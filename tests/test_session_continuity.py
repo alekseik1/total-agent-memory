@@ -45,6 +45,31 @@ def test_session_end_validates_input(sc):
         sc.session_end("sid", "")
 
 
+def test_session_end_infers_project_from_prior_summary(sc):
+    sc.session_end("s_inf", "first", project="real-proj")
+    r = sc.session_end("s_inf", "second")  # project omitted → default general
+    assert r["project"] == "real-proj"
+    assert r["project_inferred"] is True
+
+
+def test_session_end_infers_project_from_knowledge_table(sc, sc_db):
+    sc_db.execute(
+        "CREATE TABLE knowledge (session_id TEXT, project TEXT, created_at TEXT)"
+    )
+    sc_db.execute(
+        "INSERT INTO knowledge VALUES ('s_k', 'proj-from-knowledge', '2026-01-01T00:00:00Z')"
+    )
+    r = sc.session_end("s_k", "summary")
+    assert r["project"] == "proj-from-knowledge"
+    assert r["project_inferred"] is True
+
+
+def test_session_end_keeps_general_when_nothing_to_infer(sc):
+    r = sc.session_end("s_none", "summary")
+    assert r["project"] == "general"
+    assert "project_inferred" not in r
+
+
 # ──────────────────────────────────────────────
 # session_init
 # ──────────────────────────────────────────────

@@ -61,6 +61,14 @@ class SessionContinuity:
         if not session_id:
             raise ValueError("session_id required")
 
+        project_inferred = False
+        if not project or project == "general":
+            inferred = self._infer_project(session_id)
+            if inferred:
+                project = inferred
+                project_inferred = True
+                LOG(f"project inferred as '{project}' for session {session_id}")
+
         # Explicit args always win over LLM output. We compute LLM-derived
         # fields first so they can fill any gaps, then overlay the explicit
         # arguments on top.
@@ -119,6 +127,8 @@ class SessionContinuity:
             "summary_len": len(summary),
             "next_steps_count": len(next_steps or []),
         }
+        if project_inferred:
+            result["project_inferred"] = True
         if auto_compress:
             result["auto_compress"] = True
             result["compressed_used"] = compressed_used
@@ -142,6 +152,25 @@ class SessionContinuity:
                 result["active_context_error"] = str(e)
 
         return result
+
+    def _infer_project(self, session_id: str) -> str | None:
+        """Best-effort project inference for callers that omit `project`."""
+        queries = (
+            """SELECT project FROM knowledge
+               WHERE session_id = ? AND project != 'general'
+               ORDER BY created_at DESC LIMIT 1""",
+            """SELECT project FROM session_summaries
+               WHERE session_id = ? AND project != 'general'
+               ORDER BY ended_at DESC, rowid DESC LIMIT 1""",
+        )
+        for q in queries:
+            try:
+                row = self.db.execute(q, (session_id,)).fetchone()
+            except sqlite3.OperationalError:
+                continue
+            if row and row[0]:
+                return row[0]
+        return None
 
     # ──────────────────────────────────────────────
     # Auto-compress helpers
