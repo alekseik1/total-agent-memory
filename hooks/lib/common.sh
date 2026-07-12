@@ -65,6 +65,14 @@ hook_project_name() {
     local cwd
     cwd=$(hook_get 'cwd')
     [ -z "$cwd" ] && cwd="$PWD"
+    # In a git worktree, cwd basename is the branch-named worktree dir.
+    # Resolve the main repository name via the common git dir.
+    local common_dir
+    common_dir=$(cd "$cwd" 2>/dev/null && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    if [ -n "$common_dir" ] && [ "$(basename "$common_dir")" = ".git" ]; then
+        basename "$(dirname "$common_dir")"
+        return 0
+    fi
     basename "$cwd"
 }
 
