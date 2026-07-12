@@ -2343,19 +2343,20 @@ class Store:
             self.db.commit()
             # Recalculate success_rate
             self.db.execute(
-                "UPDATE rules SET success_rate=CASE WHEN fire_count>0 "
-                "THEN CAST(success_count AS REAL)/CAST(fire_count AS REAL) "
+                "UPDATE rules SET success_rate=CASE WHEN (success_count+fail_count)>0 "
+                "THEN CAST(success_count AS REAL)/CAST(success_count+fail_count AS REAL) "
                 "ELSE 0.0 END WHERE id=?", (rid,))
             self.db.commit()
             rec = self.q1("SELECT * FROM rules WHERE id=?", (rid,))
             # Auto-suspend ineffective rules
-            if rec and rec["fire_count"] >= 10 and rec["success_rate"] < 0.2:
+            rated_n = ((rec["success_count"] or 0) + (rec["fail_count"] or 0)) if rec else 0
+            if rec and rated_n >= 10 and rec["success_rate"] < 0.2:
                 self.db.execute(
                     "UPDATE rules SET status='suspended', updated_at=? WHERE id=?",
                     (now, rid))
                 self.db.commit()
                 return {"rated": True, "auto_suspended": True,
-                        "reason": "success_rate < 0.2 after 10+ fires"}
+                        "reason": "success_rate < 0.2 after 10+ ratings"}
             return {"rated": True, "id": rid,
                     "success_rate": rec["success_rate"] if rec else None}
 
