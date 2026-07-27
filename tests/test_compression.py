@@ -4,27 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from pathlib import Path
 
 import pytest
+
+from base_schema import apply_full_schema
 
 
 @pytest.fixture
 def cmp_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT, status TEXT DEFAULT 'active', created_at TEXT
-        );
-        """
-    )
-    conn.executescript((root / "migrations" / "002_multi_representation.sql").read_text())
-    conn.executescript((root / "migrations" / "005_representations_queue.sql").read_text())
+    apply_full_schema(conn)
     yield conn
     conn.close()
 
@@ -36,7 +26,8 @@ def _fake_emb(text: str, dim: int = 8) -> list[float]:
 
 def _add(db, content: str) -> int:
     return db.execute(
-        "INSERT INTO knowledge (content, created_at) VALUES (?, '2026-04-14T00:00:00Z')",
+        "INSERT INTO knowledge (session_id, type, content, created_at) "
+        "VALUES ('s1', 'fact', ?, '2026-04-14T00:00:00Z')",
         (content,),
     ).lastrowid
 

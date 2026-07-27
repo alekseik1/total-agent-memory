@@ -159,6 +159,7 @@ def main() -> int:
 
     # Build embedder bound to Store (shares FastEmbed / Ollama)
     embedder = None
+    embed_identity = None
     try:
         import server as _srv  # noqa: E402
         _srv.MEMORY_DIR = memory_dir
@@ -167,12 +168,13 @@ def main() -> int:
             embs = store.embed([text])
             return embs[0] if embs else []
         embedder = embed
+        embed_identity = store.embed_identity()
     except Exception as e:  # noqa: BLE001
         _log(f"embedder init failed (repr generation will skip): {e}")
 
     from reflection.agent import ReflectionAgent  # noqa: E402
 
-    agent = ReflectionAgent(db, embedder=embedder)
+    agent = ReflectionAgent(db, embedder=embedder, embed_identity=embed_identity)
 
     t0 = time.time()
     try:

@@ -64,8 +64,8 @@ def seeded_db(db):
 
     # Knowledge link on a loser — must move to winner without collision.
     db.execute(
-        "INSERT INTO knowledge (id, type, content, created_at) "
-        "VALUES (1, 'fact', 'about vue', '2026-01-10')"
+        "INSERT INTO knowledge (id, session_id, type, content, created_at) "
+        "VALUES (1, 's1', 'fact', 'about vue', '2026-01-10')"
     )
     db.execute(
         """INSERT INTO knowledge_nodes (knowledge_id, node_id, role, strength)

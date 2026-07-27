@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import contradiction_detector as cd
+from base_schema import apply_full_schema
 
 
 # ──────────────────────────────────────────────
@@ -35,24 +36,9 @@ def _reset(monkeypatch):
 
 @pytest.fixture
 def cdb():
-    """In-memory DB with knowledge + contradiction_log tables."""
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
-    db.executescript(
-        """
-        CREATE TABLE knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT, type TEXT, content TEXT,
-            project TEXT, status TEXT DEFAULT 'active',
-            superseded_by INTEGER, last_confirmed TEXT,
-            created_at TEXT
-        );
-        """
-    )
-    migration = (
-        Path(__file__).parent.parent / "migrations" / "016_contradictions.sql"
-    ).read_text()
-    db.executescript(migration)
+    apply_full_schema(db)
     yield db
     db.close()
 

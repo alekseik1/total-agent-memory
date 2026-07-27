@@ -217,25 +217,28 @@ def test_reembed_dry_run(monkeypatch, tmp_path, capsys):
     import sqlite3
     import urllib.request
 
+    from base_schema import apply_full_schema
+
     db_path = tmp_path / "memory.db"
     db = sqlite3.connect(str(db_path))
-    db.executescript(
-        """
-        CREATE TABLE knowledge (id INTEGER PRIMARY KEY, content TEXT);
-        CREATE TABLE embeddings (
-            knowledge_id INTEGER PRIMARY KEY,
-            binary_vector BLOB,
-            float32_vector BLOB,
-            embed_model TEXT,
-            embed_dim INTEGER,
-            created_at TEXT
-        );
-        """
-    )
+    db.row_factory = sqlite3.Row
+    apply_full_schema(db)
     # 3 rows — easy to reason about token estimate.
-    db.execute("INSERT INTO knowledge VALUES (1, ?)", ("a" * 40,))   # ~10 tok
-    db.execute("INSERT INTO knowledge VALUES (2, ?)", ("b" * 80,))   # ~20 tok
-    db.execute("INSERT INTO knowledge VALUES (3, ?)", ("c" * 4,))    # ~1 tok
+    db.execute(
+        "INSERT INTO knowledge (id, session_id, type, content, created_at) "
+        "VALUES (1, 's1', 'fact', ?, '2026-04-14T00:00:00Z')",
+        ("a" * 40,),
+    )
+    db.execute(
+        "INSERT INTO knowledge (id, session_id, type, content, created_at) "
+        "VALUES (2, 's1', 'fact', ?, '2026-04-14T00:00:00Z')",
+        ("b" * 80,),
+    )
+    db.execute(
+        "INSERT INTO knowledge (id, session_id, type, content, created_at) "
+        "VALUES (3, 's1', 'fact', ?, '2026-04-14T00:00:00Z')",
+        ("c" * 4,),
+    )
     db.commit()
     db.close()
 

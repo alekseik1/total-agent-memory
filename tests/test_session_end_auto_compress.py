@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from session_continuity import SessionContinuity  # noqa: E402
+from base_schema import apply_full_schema  # noqa: E402
 
 
 # ──────────────────────────────────────────────
@@ -27,16 +28,7 @@ from session_continuity import SessionContinuity  # noqa: E402
 def sc_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    migration = Path(__file__).parent.parent / "migrations" / "010_session_continuity.sql"
-    conn.executescript(migration.read_text())
-    # Also need a `knowledge` table so _collect_session_context doesn't blow up.
-    conn.executescript(
-        """CREATE TABLE IF NOT EXISTS knowledge (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               session_id TEXT, type TEXT, content TEXT,
-               project TEXT DEFAULT 'general'
-           );"""
-    )
+    apply_full_schema(conn)
     yield conn
     conn.close()
 

@@ -276,7 +276,7 @@ class TestGraphStoreBulk:
         node_id = graph_store.add_node("concept", "auth")
         # Insert a knowledge record first
         db.execute(
-            "INSERT INTO knowledge (id, type, content, created_at) VALUES (1, 'solution', 'Auth solution', '2025-01-01')"
+            "INSERT INTO knowledge (id, session_id, type, content, created_at) VALUES (1, 's1', 'solution', 'Auth solution', '2025-01-01')"
         )
         db.commit()
 

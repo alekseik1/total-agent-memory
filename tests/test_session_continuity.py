@@ -1,19 +1,18 @@
 """Tests for src/session_continuity.py — v7.0 Phase G."""
 
 import sqlite3
-from pathlib import Path
 
 import pytest
 
 from session_continuity import SessionContinuity
+from base_schema import apply_full_schema
 
 
 @pytest.fixture
 def sc_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    migration = Path(__file__).parent.parent / "migrations" / "010_session_continuity.sql"
-    conn.executescript(migration.read_text())
+    apply_full_schema(conn)
     yield conn
     conn.close()
 
@@ -54,10 +53,8 @@ def test_session_end_infers_project_from_prior_summary(sc):
 
 def test_session_end_infers_project_from_knowledge_table(sc, sc_db):
     sc_db.execute(
-        "CREATE TABLE knowledge (session_id TEXT, project TEXT, created_at TEXT)"
-    )
-    sc_db.execute(
-        "INSERT INTO knowledge VALUES ('s_k', 'proj-from-knowledge', '2026-01-01T00:00:00Z')"
+        "INSERT INTO knowledge (session_id, type, content, project, created_at) "
+        "VALUES ('s_k', 'fact', 'x', 'proj-from-knowledge', '2026-01-01T00:00:00Z')"
     )
     r = sc.session_end("s_k", "summary")
     assert r["project"] == "proj-from-knowledge"

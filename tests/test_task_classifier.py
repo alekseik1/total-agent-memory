@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from task_classifier import LEVEL_PHASES, classify_task
+from base_schema import apply_full_schema
 
 
 # ──────────────────────────────────────────────
@@ -89,16 +89,7 @@ def test_classify_with_analogize_boosts_confidence(tmp_path):
     """When project+db supplied, AnalogyEngine hits boost confidence."""
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
-    # Minimal knowledge table for AnalogyEngine.
-    db.executescript("""
-        CREATE TABLE knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT, content TEXT, context TEXT DEFAULT '',
-            project TEXT DEFAULT 'general', tags TEXT DEFAULT '[]',
-            status TEXT DEFAULT 'active', confidence REAL DEFAULT 1.0,
-            created_at TEXT
-        );
-    """)
+    apply_full_schema(db)
 
     # Without analogy — confidence = 0.5 (length fallback).
     r_no_match = classify_task(

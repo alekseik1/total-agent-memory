@@ -3,27 +3,17 @@
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
 import pytest
+
+from base_schema import apply_full_schema
 
 
 @pytest.fixture
 def bo_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT, status TEXT DEFAULT 'active',
-            superseded_by INTEGER, created_at TEXT
-        );
-        """
-    )
-    conn.executescript((root / "migrations" / "003_triple_extraction_queue.sql").read_text())
+    apply_full_schema(conn)
     yield conn
     conn.close()
 
@@ -41,7 +31,8 @@ def _add_node(db, name: str, type_: str = "concept", mentions: int = 1) -> str:
 
 def _add_knowledge(db, content: str) -> int:
     return db.execute(
-        "INSERT INTO knowledge (content, created_at) VALUES (?, '2026-04-14T00:00:00Z')",
+        "INSERT INTO knowledge (session_id, type, content, created_at) "
+        "VALUES ('s1', 'fact', ?, '2026-04-14T00:00:00Z')",
         (content,),
     ).lastrowid
 

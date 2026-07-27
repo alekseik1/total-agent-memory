@@ -13,33 +13,20 @@ end-to-end smoke in ``tests/test_e2e_v8_workflow.py``-style runs.
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
 import pytest
 
 import config
 from multi_repr_store import MultiReprStore, content_hash
 from representations_queue import RepresentationsQueue
-
-
-MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+from base_schema import apply_full_schema
 
 
 @pytest.fixture
 def repr_db():
-    """In-memory SQLite with the minimum schema for representations."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.executescript("""
-        CREATE TABLE knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT, project TEXT DEFAULT 'general',
-            status TEXT DEFAULT 'active', created_at TEXT
-        );
-    """)
-    conn.executescript((MIGRATIONS_DIR / "002_multi_representation.sql").read_text())
-    conn.executescript((MIGRATIONS_DIR / "005_representations_queue.sql").read_text())
-    conn.executescript((MIGRATIONS_DIR / "027_repr_freshness.sql").read_text())
+    apply_full_schema(conn)
     yield conn
     conn.close()
 
@@ -79,7 +66,7 @@ def test_content_hash_handles_none_and_empty():
 
 def test_upsert_stores_parent_hash(repr_db):
     repr_db.execute(
-        "INSERT INTO knowledge (content, status, created_at) VALUES (?, 'active', '2026-04-14T00:00:00Z')",
+        "INSERT INTO knowledge (session_id, type, content, status, created_at) VALUES ('s1', 'fact', ?, 'active', '2026-04-14T00:00:00Z')",
         ("Symfony deployment notes",),
     )
     kid = repr_db.execute("SELECT id FROM knowledge").fetchone()["id"]
@@ -99,7 +86,7 @@ def test_upsert_stores_parent_hash(repr_db):
 
 def test_upsert_replaces_hash_on_regeneration(repr_db):
     repr_db.execute(
-        "INSERT INTO knowledge (content, status, created_at) VALUES (?, 'active', '2026-04-14T00:00:00Z')",
+        "INSERT INTO knowledge (session_id, type, content, status, created_at) VALUES ('s1', 'fact', ?, 'active', '2026-04-14T00:00:00Z')",
         ("v1",),
     )
     kid = repr_db.execute("SELECT id FROM knowledge").fetchone()["id"]
@@ -122,7 +109,7 @@ def test_upsert_without_hash_keeps_column_null(repr_db):
     """Backward compatibility: callers that omit the new arg leave the
     column NULL — recall will treat that as "legacy view, no drift info"."""
     repr_db.execute(
-        "INSERT INTO knowledge (content, status, created_at) VALUES (?, 'active', '2026-04-14T00:00:00Z')",
+        "INSERT INTO knowledge (session_id, type, content, status, created_at) VALUES ('s1', 'fact', ?, 'active', '2026-04-14T00:00:00Z')",
         ("legacy",),
     )
     kid = repr_db.execute("SELECT id FROM knowledge").fetchone()["id"]
@@ -144,7 +131,7 @@ def test_queue_worker_writes_parent_hash(repr_db):
     """End-to-end through the queue: enqueue → process_pending → row carries
     the sha256 of the parent content."""
     repr_db.execute(
-        "INSERT INTO knowledge (content, status, created_at) VALUES (?, 'active', '2026-04-14T00:00:00Z')",
+        "INSERT INTO knowledge (session_id, type, content, status, created_at) VALUES ('s1', 'fact', ?, 'active', '2026-04-14T00:00:00Z')",
         ("Vue Composition API patterns",),
     )
     kid = repr_db.execute("SELECT id FROM knowledge").fetchone()["id"]
@@ -177,7 +164,7 @@ def test_queue_worker_detects_post_edit_drift_via_hash(repr_db):
     stored hash no longer matches a fresh ``content_hash(current_content)``
     — this is the signal recall uses to penalise + re-enqueue."""
     repr_db.execute(
-        "INSERT INTO knowledge (content, status, created_at) VALUES (?, 'active', '2026-04-14T00:00:00Z')",
+        "INSERT INTO knowledge (session_id, type, content, status, created_at) VALUES ('s1', 'fact', ?, 'active', '2026-04-14T00:00:00Z')",
         ("Initial content",),
     )
     kid = repr_db.execute("SELECT id FROM knowledge").fetchone()["id"]

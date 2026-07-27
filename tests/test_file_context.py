@@ -6,12 +6,14 @@ import sqlite3
 import pytest
 
 from file_context import FileContextGuard
+from base_schema import apply_full_schema
 
 
 @pytest.fixture
 def fcdb():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    apply_full_schema(conn)
     conn.executescript("""
         CREATE TABLE errors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,13 +29,6 @@ def fcdb():
             resolved_at TEXT,
             insight_id INTEGER,
             created_at TEXT NOT NULL
-        );
-        CREATE TABLE knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT, type TEXT, content TEXT, context TEXT DEFAULT '',
-            project TEXT DEFAULT 'general', tags TEXT DEFAULT '[]',
-            status TEXT DEFAULT 'active', confidence REAL DEFAULT 1.0,
-            created_at TEXT, updated_at TEXT, recall_count INTEGER DEFAULT 0
         );
         CREATE TABLE rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,15 +230,7 @@ def test_summary_counts_errors_and_knowledge(guard, fcdb):
 def test_no_errors_table_does_not_crash():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.executescript("""
-        CREATE TABLE knowledge (
-            id INTEGER PRIMARY KEY, session_id TEXT, type TEXT, content TEXT,
-            context TEXT DEFAULT '', project TEXT DEFAULT 'general',
-            tags TEXT DEFAULT '[]', status TEXT DEFAULT 'active',
-            confidence REAL DEFAULT 1.0, created_at TEXT,
-            recall_count INTEGER DEFAULT 0
-        );
-    """)
+    apply_full_schema(conn)
     g = FileContextGuard(conn)
     # Should not raise even with no errors/rules tables
     result = g.get_file_warnings("any.py")

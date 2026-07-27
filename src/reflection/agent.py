@@ -37,6 +37,49 @@ def _new_id() -> str:
     return uuid.uuid4().hex
 
 
+# Report keys holding per-phase stat dicts rather than scalars or free text.
+_PHASE_KEYS = (
+    "digest",
+    "synthesis",
+    "triple_extraction",
+    "fact_merge",
+    "deep_enrichment",
+    "representations",
+    "graph_importance",
+)
+
+
+def phase_errors(report: dict) -> dict[str, str]:
+    """Collect the failure/skip reasons the phases reported.
+
+    Every phase swallows its own exceptions and returns them as an `error` key
+    (or a `deferred`/`skipped` marker when a dependency is missing), so nothing
+    raises out of run_full. Pulling them together is what makes a broken phase
+    visible — without it the only trace is a stderr line nobody reads.
+
+    `skipped` is a plain item COUNT in most phases (queue rows dropped because
+    their knowledge record was deleted) — only `fact_merge` uses it as a
+    failure reason string. A numeric `skipped` is healthy-run noise, not an
+    error, so it is reported only when it is not a number. `skipped_reason`
+    (used by `_run_representations` when it declines to run at all, e.g. no
+    embedder) is checked ahead of `skipped` so that a phase reporting both a
+    numeric `skipped` count and a `skipped_reason` still surfaces the reason.
+    """
+    found: dict[str, str] = {}
+    for key in _PHASE_KEYS:
+        stats = report.get(key)
+        if not isinstance(stats, dict):
+            continue
+        for marker in ("error", "deferred", "skipped_reason", "skipped"):
+            value = stats.get(marker)
+            if marker == "skipped" and isinstance(value, (int, float)):
+                continue
+            if value:
+                found[key] = f"{marker}: {value}"
+                break
+    return found
+
+
 class ReflectionAgent:
     """Background process that consolidates, synthesizes, and evolves knowledge.
 
@@ -50,6 +93,7 @@ class ReflectionAgent:
         self,
         db: sqlite3.Connection,
         embedder=None,
+        embed_identity: tuple[str, str] | None = None,
     ) -> None:
         """
         Args:
@@ -57,11 +101,21 @@ class ReflectionAgent:
             embedder: Optional callable (text: str) -> list[float]. If None,
                 a fresh server.Store() is instantiated lazily for multi-repr
                 generation. Injected in tests to avoid heavy init.
+            embed_identity: Optional (embed_model, embed_provider) naming what
+                `embedder` actually produces. The production caller
+                (`tools/run_reflection.py`) builds its own `server.Store()` to
+                make the embedder and discards it afterwards, so this agent
+                never sees a live Store to ask — without this, merged rows get
+                stamped from `config`, which can disagree with the Store that
+                really wrote the vector (e.g. `FASTEMBED_MODEL` set without
+                the matching `MEMORY_EMBED_MODEL`).
         """
         self.db = db
         self.digest = DigestPhase(db)
         self.synthesize = SynthesizePhase(db)
         self._injected_embedder = embedder
+        self._embed_identity = embed_identity
+        self._store = None
 
     async def run(self, scope: str = "full") -> dict:
         """
@@ -211,11 +265,60 @@ class ReflectionAgent:
                 # Dependencies unavailable; skip silently
                 return {"clusters_found": 0, "merged": 0, "rejected": 0, "skipped": "deps"}
 
-            merger = FactMerger(self.db, similarity_fn=similarity, llm_merge_fn=llm_merge)
+            merger = FactMerger(
+                self.db,
+                similarity_fn=similarity,
+                llm_merge_fn=llm_merge,
+                on_merged=self._make_merge_hook(),
+                vectors_fn=self._make_vectors_fn(),
+            )
             return merger.run()
         except Exception as e:  # noqa: BLE001
             LOG(f"fact_merger error: {e}")
             return {"clusters_found": 0, "merged": 0, "rejected": 0, "error": str(e)}
+
+    def _make_vectors_fn(self):
+        """Build a bulk vector loader for clustering, or None if unavailable.
+
+        One query for every candidate instead of two per pair. Lets FactMerger
+        compare the whole set with a single matrix multiply.
+        """
+        import numpy as np
+
+        try:
+            count = self.db.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        except Exception:  # noqa: BLE001
+            return None
+        if not count:
+            return None
+
+        def load(ids: list[int]) -> dict[int, "np.ndarray"]:
+            if not ids:
+                return {}
+            vectors: dict[int, "np.ndarray"] = {}
+            # Chunked to stay under SQLITE_MAX_VARIABLE_NUMBER (999 by default).
+            for start in range(0, len(ids), 500):
+                chunk = ids[start : start + 500]
+                placeholders = ",".join("?" * len(chunk))
+                rows = self.db.execute(
+                    "SELECT knowledge_id, float32_vector, embed_dim FROM embeddings "
+                    f"WHERE knowledge_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    try:
+                        # A materialized Python list of floats per record
+                        # doubles memory at scale — _banded_pairs_in_group
+                        # copies it into a float32 ndarray anyway. Load it as
+                        # one already.
+                        vectors[row["knowledge_id"]] = np.frombuffer(
+                            row["float32_vector"], dtype=np.float32
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        LOG(f"vector unpack failed for {row['knowledge_id']}: {e}")
+            return vectors
+
+        return load
 
     def _make_cosine_similarity_fn(self):
         """Build a cosine-similarity closure over the embeddings table.
@@ -295,6 +398,29 @@ class ReflectionAgent:
             LOG(f"representations processing error: {e}")
             return {"processed": 0, "failed": 0, "skipped": 0, "error": str(e)}
 
+    def _get_store(self):
+        """Return a lazily-built server.Store, or None if it cannot be built.
+
+        Cached: Store init loads the embedding model, so the merge hook and the
+        embedder must not each pay for their own — including a failed attempt.
+        `self._store` is `False` once a build has been tried and failed (a
+        real sentinel distinct from the "not tried yet" `None`), so a second
+        caller in the same run doesn't retry the same expensive failure.
+        """
+        if self._store is False:
+            return None
+        if self._store is not None:
+            return self._store
+        try:
+            import server as _srv
+
+            self._store = _srv.Store()
+        except Exception as e:  # noqa: BLE001
+            LOG(f"store init failed: {e}")
+            self._store = False
+            return None
+        return self._store
+
     def _make_embedder(self):
         """Return an embedder callable, or None if unavailable.
 
@@ -302,17 +428,118 @@ class ReflectionAgent:
         """
         if self._injected_embedder is not None:
             return self._injected_embedder
-        try:
-            import server as _srv
-
-            store = _srv.Store()
-            def embed(text: str) -> list[float]:
-                embs = store.embed([text])
-                return embs[0] if embs else []
-            return embed
-        except Exception as e:  # noqa: BLE001
-            LOG(f"embedder init failed: {e}")
+        store = self._get_store()
+        if store is None:
             return None
+
+        def embed(text: str) -> list[float]:
+            embs = store.embed([text])
+            return embs[0] if embs else []
+
+        return embed
+
+    def _resolve_embed_identity(self) -> tuple[str, str]:
+        """Return (embed_model, provider) for rows this agent writes.
+
+        Priority: identity supplied by the composer at construction time (the
+        real Store the production caller built) → a Store this agent lazily
+        built itself → config as a last resort. Config alone reads
+        `MEMORY_EMBED_MODEL`, not the `FASTEMBED_MODEL` env var `server.py`
+        actually uses for the fastembed provider, so a deployment that sets
+        only `FASTEMBED_MODEL` would otherwise stamp the wrong embed_model.
+        """
+        if self._embed_identity is not None:
+            return self._embed_identity
+        store = self._store
+        if store:  # not None (never tried) and not False (tried, failed)
+            try:
+                return store.embed_identity()
+            except Exception as e:  # noqa: BLE001
+                LOG(f"embed identity from store failed: {e}")
+        try:
+            import config as _config
+
+            provider = _config.get_embed_provider()
+            if provider == "fastembed":
+                import os as _os
+
+                model = _os.environ.get("FASTEMBED_MODEL", _config.get_embed_model(provider))
+            else:
+                model = _config.get_embed_model(provider)
+            return model, provider
+        except Exception as e:  # noqa: BLE001
+            LOG(f"embed identity from config failed: {e}")
+            return "unknown", "unknown"
+
+    def _make_merge_hook(self):
+        """Return a post-merge callback that makes a merged fact retrievable.
+
+        FactMerger INSERTs straight into `knowledge`, which bypasses everything
+        `memory_save` normally does afterwards. Without this hook a merged fact
+        gets an FTS row from the table trigger and nothing else: no vector in
+        `embeddings`, so it is invisible to semantic recall, and — because
+        clustering scores an absent vector as 0.0 — it can never be merged
+        again. Returns None when there is no embedder, in which case merging
+        still proceeds (FTS-only, same as before).
+        """
+        embedder = self._make_embedder()
+        if embedder is None:
+            return None
+
+        # Not `reembed`: src/reembed.py and scripts/reembed.py share a module
+        # name, so which one an import resolves to depends on sys.path order.
+        # multi_repr_store is unambiguous and its blob format is documented as
+        # matching server._quantize_binary.
+        from multi_repr_store import _binary_blob, _float32_blob
+
+        # Written on self.db, not store.db: they are separate connections, and
+        # under an injected in-memory db they are separate databases entirely.
+        #
+        # The name matters — tooling groups by embed_model to detect model drift
+        # and decide what to re-embed, so a placeholder here would quietly
+        # exclude merged records from that. Prefer the live Store's answer, and
+        # fall back to config when the embedder was injected without one.
+        model_name, provider = self._resolve_embed_identity()
+
+        try:
+            from representations_queue import RepresentationsQueue
+
+            queue = RepresentationsQueue(self.db)
+        except Exception as e:  # noqa: BLE001
+            LOG(f"merge hook: representations queue unavailable: {e}")
+            queue = None
+
+        def on_merged(knowledge_id: int, content: str) -> None:
+            try:
+                vector = embedder(content)
+                if vector:
+                    self.db.execute(
+                        """INSERT OR REPLACE INTO embeddings (
+                               knowledge_id, binary_vector, float32_vector,
+                               embed_model, embed_dim, created_at,
+                               embedding_provider, embedding_space,
+                               content_type, language
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'text', 'text', NULL)""",
+                        (
+                            knowledge_id,
+                            _binary_blob(vector),
+                            _float32_blob(vector),
+                            model_name,
+                            len(vector),
+                            _now(),
+                            provider,
+                        ),
+                    )
+                    self.db.commit()
+            except Exception as e:  # noqa: BLE001
+                LOG(f"merge hook: embedding {knowledge_id} failed: {e}")
+            if queue is not None:
+                try:
+                    queue.enqueue(knowledge_id)
+                except Exception as e:  # noqa: BLE001
+                    LOG(f"merge hook: enqueue {knowledge_id} failed: {e}")
+
+        return on_merged
 
     # ──────────────────────────────────────────────
     # Phase 5 — drain deep enrichment queue
@@ -452,10 +679,7 @@ class ReflectionAgent:
         weekly_digest = self.synthesize.generate_weekly_digest()
 
         # Phase 4: Update graph importance via PageRank
-        try:
-            self._update_graph_importance()
-        except Exception as e:
-            LOG(f"PageRank update error: {e}")
+        graph_importance_stats = self._update_graph_importance()
 
         report = {
             "id": _new_id(),
@@ -466,6 +690,7 @@ class ReflectionAgent:
             "digest": digest_stats,
             "synthesis": synthesis_stats,
             "weekly_digest": weekly_digest,
+            "graph_importance": graph_importance_stats,
         }
 
         self._save_report(report)
@@ -491,8 +716,13 @@ class ReflectionAgent:
 
         return stats
 
-    def _update_graph_importance(self) -> None:
-        """Update graph node importance via PageRank."""
+    def _update_graph_importance(self) -> dict:
+        """Update graph node importance via PageRank.
+
+        Returns {} on success, {"error": message} when graph modules are
+        missing or PageRank fails, so `run_weekly` can fold the outcome into
+        its report instead of the failure only reaching stderr.
+        """
         try:
             from graph.query import GraphQuery
             from graph.store import GraphStore
@@ -501,10 +731,23 @@ class ReflectionAgent:
             query = GraphQuery(store)
             query.update_importance()
             LOG("Graph importance updated via PageRank")
-        except ImportError:
+            return {}
+        except ImportError as e:
             LOG("graph.query not available, skipping PageRank update")
+            return {"error": str(e)}
         except Exception as e:
             LOG(f"PageRank update failed: {e}")
+            return {"error": str(e)}
+
+    def _has_phase_errors_column(self) -> bool:
+        try:
+            cols = {
+                r[1]
+                for r in self.db.execute("PRAGMA table_info(reflection_reports)").fetchall()
+            }
+        except Exception:  # noqa: BLE001
+            return False
+        return "phase_errors" in cols
 
     def _save_report(self, report: dict) -> str:
         """Save reflection report to DB. Returns report ID."""
@@ -525,30 +768,46 @@ class ReflectionAgent:
         digest = report.get("digest") or {}
         synthesis = report.get("synthesis") or {}
 
+        columns = [
+            "id", "period_start", "period_end", "type",
+            "new_nodes", "patterns_found", "skills_refined",
+            "rules_proposed", "contradictions", "archived",
+            "focus_areas", "key_findings", "proposed_changes", "created_at",
+        ]
+        values = [
+            report_id,
+            period_start,
+            period_end,
+            report_type,
+            synthesis.get("edges_strengthened", 0),
+            synthesis.get("clusters_found", 0),
+            synthesis.get("skills_proposed", 0),
+            0,  # rules_proposed
+            digest.get("contradictions_found", 0),
+            digest.get("decay", {}).get("archived", 0),
+            json.dumps((report.get("weekly_digest") or {}).get("focus_areas", [])),
+            json.dumps((report.get("weekly_digest") or {}).get("top_concepts", [])),
+            json.dumps(synthesis),
+            _now(),
+        ]
+
+        # Only appended when migration 029 has run: a database that predates the
+        # column must still get its report saved, not lose the whole row. When
+        # the column is missing AND there were real phase errors, log them —
+        # otherwise a pre-029 database drops them with no trace at all, the
+        # exact failure mode 029 exists to end.
+        errors = phase_errors(report)
+        if self._has_phase_errors_column():
+            columns.append("phase_errors")
+            values.append(json.dumps(errors))
+        elif errors:
+            LOG(f"phase_errors dropped (migration 029 not applied): {errors}")
+
         try:
             self.db.execute(
-                """INSERT INTO reflection_reports
-                   (id, period_start, period_end, type,
-                    new_nodes, patterns_found, skills_refined,
-                    rules_proposed, contradictions, archived,
-                    focus_areas, key_findings, proposed_changes, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    report_id,
-                    period_start,
-                    period_end,
-                    report_type,
-                    synthesis.get("edges_strengthened", 0),
-                    synthesis.get("clusters_found", 0),
-                    synthesis.get("skills_proposed", 0),
-                    0,  # rules_proposed
-                    digest.get("contradictions_found", 0),
-                    digest.get("decay", {}).get("archived", 0),
-                    json.dumps((report.get("weekly_digest") or {}).get("focus_areas", [])),
-                    json.dumps((report.get("weekly_digest") or {}).get("top_concepts", [])),
-                    json.dumps(synthesis),
-                    _now(),
-                ),
+                f"""INSERT INTO reflection_reports ({", ".join(columns)})
+                   VALUES ({", ".join("?" * len(columns))})""",
+                values,
             )
             self.db.commit()
             LOG(f"Saved reflection report: {report_id} ({report_type})")

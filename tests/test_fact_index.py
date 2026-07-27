@@ -18,6 +18,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from fact_index import FactHit, FactIndex, extract_candidates  # noqa: E402
+from base_schema import apply_full_schema  # noqa: E402
 
 
 # ──────────────────────────────────────────────
@@ -26,40 +27,7 @@ from fact_index import FactHit, FactIndex, extract_candidates  # noqa: E402
 
 
 def _schema(db: sqlite3.Connection) -> None:
-    """Minimal schema subset used by FactIndex."""
-    db.executescript(
-        """
-        CREATE TABLE graph_nodes (
-            id TEXT PRIMARY KEY,
-            type TEXT NOT NULL,
-            name TEXT NOT NULL
-        );
-        CREATE TABLE graph_edges (
-            id TEXT PRIMARY KEY,
-            source_id TEXT NOT NULL,
-            target_id TEXT NOT NULL,
-            relation_type TEXT NOT NULL,
-            weight REAL DEFAULT 1.0,
-            context TEXT,
-            reinforcement_count INTEGER DEFAULT 0
-        );
-        CREATE TABLE knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project TEXT,
-            content TEXT,
-            type TEXT,
-            tags TEXT,
-            context TEXT
-        );
-        CREATE TABLE knowledge_nodes (
-            knowledge_id INTEGER,
-            node_id TEXT,
-            role TEXT,
-            strength REAL DEFAULT 1.0,
-            PRIMARY KEY (knowledge_id, node_id)
-        );
-        """
-    )
+    apply_full_schema(db)
 
 
 def _add_node(db: sqlite3.Connection, nid: str, name: str, typ: str = "person") -> None:
@@ -90,7 +58,8 @@ def _add_knowledge(
     node_id: str | None = None,
 ) -> None:
     db.execute(
-        "INSERT INTO knowledge(id,project,content,type) VALUES(?,?,?,?)",
+        "INSERT INTO knowledge(id,session_id,project,content,type,created_at) "
+        "VALUES(?,'s1',?,?,?,'2026-04-14T00:00:00Z')",
         (kid, project, content, "fact"),
     )
     if node_id:

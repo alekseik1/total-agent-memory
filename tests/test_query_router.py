@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import query_router as qr
+from base_schema import apply_full_schema
 
 
 # ──────────────────────────────────────────────
@@ -136,44 +137,7 @@ def test_classify_empty_query():
 def gdb():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
-    db.executescript(
-        """
-        CREATE TABLE knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT, type TEXT, content TEXT,
-            project TEXT, tags TEXT DEFAULT '[]',
-            status TEXT DEFAULT 'active',
-            created_at TEXT, last_confirmed TEXT,
-            recall_count INTEGER DEFAULT 0
-        );
-        CREATE TABLE graph_nodes (
-            id TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL,
-            content TEXT, properties TEXT, source TEXT,
-            importance REAL DEFAULT 0.5,
-            first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
-            mention_count INTEGER DEFAULT 1, status TEXT DEFAULT 'active'
-        );
-        CREATE TABLE graph_edges (
-            id TEXT PRIMARY KEY,
-            source_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
-            target_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
-            relation_type TEXT NOT NULL,
-            weight REAL DEFAULT 1.0,
-            context TEXT,
-            created_at TEXT NOT NULL,
-            last_reinforced_at TEXT,
-            reinforcement_count INTEGER DEFAULT 0,
-            UNIQUE(source_id, target_id, relation_type)
-        );
-        CREATE TABLE knowledge_nodes (
-            knowledge_id INTEGER REFERENCES knowledge(id) ON DELETE CASCADE,
-            node_id TEXT REFERENCES graph_nodes(id) ON DELETE CASCADE,
-            role TEXT DEFAULT 'related',
-            strength REAL DEFAULT 1.0,
-            PRIMARY KEY (knowledge_id, node_id)
-        );
-        """
-    )
+    apply_full_schema(db)
     yield db
     db.close()
 

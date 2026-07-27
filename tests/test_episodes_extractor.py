@@ -33,35 +33,6 @@ from memory_core.episodes import (  # noqa: E402
 
 # ─── fixtures ───────────────────────────────────────────────────────────
 
-_MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
-_BASE_KNOWLEDGE_DDL = """
-CREATE TABLE IF NOT EXISTS knowledge (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT, type TEXT, content TEXT, context TEXT DEFAULT '',
-    project TEXT DEFAULT 'general', tags TEXT DEFAULT '[]',
-    status TEXT DEFAULT 'active', confidence REAL DEFAULT 1.0,
-    created_at TEXT, updated_at TEXT, recall_count INTEGER DEFAULT 0,
-    last_recalled TEXT, last_confirmed TEXT, superseded_by INTEGER,
-    source TEXT DEFAULT 'explicit', branch TEXT DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS migrations (
-    version TEXT PRIMARY KEY,
-    description TEXT,
-    applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-"""
-
-
-@pytest.fixture
-def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript(_BASE_KNOWLEDGE_DDL)
-    migration = (_MIGRATIONS_DIR / "023_episodes.sql").read_text()
-    conn.executescript(migration)
-    yield conn
-    conn.close()
-
 
 @pytest.fixture
 def short_summarizer():

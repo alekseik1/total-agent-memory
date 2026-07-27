@@ -32,6 +32,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from workers import consolidation_daemon  # noqa: E402
+from base_schema import apply_full_schema  # noqa: E402
 
 _MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
 
@@ -41,48 +42,7 @@ def _bootstrap_db(path: Path) -> None:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS migrations (
-            version TEXT PRIMARY KEY, description TEXT,
-            applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-        );
-        CREATE TABLE IF NOT EXISTS knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT, type TEXT, content TEXT, context TEXT DEFAULT '',
-            project TEXT DEFAULT 'general', tags TEXT DEFAULT '[]',
-            status TEXT DEFAULT 'active', confidence REAL DEFAULT 1.0,
-            created_at TEXT, last_recalled TEXT, last_confirmed TEXT,
-            superseded_by INTEGER, source TEXT DEFAULT 'explicit'
-        );
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY, started_at TEXT, ended_at TEXT,
-            project TEXT, status TEXT, summary TEXT, log_count INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS embeddings (
-            knowledge_id INTEGER PRIMARY KEY,
-            binary_vector BLOB, float32_vector BLOB,
-            embed_model TEXT, embed_dim INTEGER, created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS graph_nodes (
-            id TEXT PRIMARY KEY, type TEXT, name TEXT, content TEXT,
-            properties TEXT, source TEXT, importance REAL, first_seen_at TEXT,
-            last_seen_at TEXT, mention_count INTEGER, status TEXT
-        );
-        CREATE TABLE IF NOT EXISTS graph_edges (
-            id TEXT PRIMARY KEY, source_id TEXT, target_id TEXT,
-            relation_type TEXT, weight REAL, context TEXT,
-            created_at TEXT, last_reinforced_at TEXT, reinforcement_count INTEGER,
-            UNIQUE(source_id, target_id, relation_type)
-        );
-        CREATE TABLE IF NOT EXISTS knowledge_nodes (
-            knowledge_id INTEGER, node_id TEXT, role TEXT, strength REAL,
-            PRIMARY KEY(knowledge_id, node_id)
-        );
-        """
-    )
-    conn.executescript((_MIGRATIONS / "025_consolidation_state.sql").read_text())
-    conn.executescript((_MIGRATIONS / "023_episodes.sql").read_text())
+    apply_full_schema(conn)
     conn.commit()
     conn.close()
 

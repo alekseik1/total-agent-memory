@@ -3,60 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+import struct
 
 import pytest
 
 
 @pytest.fixture
-def refl_db():
-    """DB with v5 schema + 002/003 migrations + knowledge+embeddings tables."""
-    import sqlite3
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY, started_at TEXT, ended_at TEXT,
-            project TEXT DEFAULT 'general', status TEXT DEFAULT 'open',
-            summary TEXT, log_count INTEGER DEFAULT 0, branch TEXT DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT, type TEXT, content TEXT, context TEXT DEFAULT '',
-            project TEXT DEFAULT 'general', tags TEXT DEFAULT '[]',
-            status TEXT DEFAULT 'active', confidence REAL DEFAULT 1.0,
-            recall_count INTEGER DEFAULT 0, last_recalled TEXT,
-            last_confirmed TEXT, superseded_by INTEGER, source TEXT DEFAULT 'explicit',
-            created_at TEXT, updated_at TEXT, branch TEXT DEFAULT ''
-        );
-        CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
-            content, context, tags, content='knowledge', content_rowid='id'
-        );
-        CREATE TABLE IF NOT EXISTS embeddings (
-            knowledge_id INTEGER PRIMARY KEY,
-            binary_vector BLOB NOT NULL,
-            float32_vector BLOB NOT NULL,
-            embed_model TEXT NOT NULL,
-            embed_dim INTEGER NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS knowledge_merges (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            merged_knowledge_id INTEGER NOT NULL,
-            source_ids TEXT NOT NULL,
-            rationale TEXT,
-            created_at TEXT NOT NULL
-        );
-        """
-    )
-    conn.executescript((root / "migrations" / "002_multi_representation.sql").read_text())
-    conn.executescript((root / "migrations" / "003_triple_extraction_queue.sql").read_text())
-    yield conn
-    conn.close()
+def refl_db(db):
+    return db
 
 
 def test_run_full_drains_triple_queue_and_runs_fact_merger(refl_db, monkeypatch):
@@ -128,3 +82,313 @@ def test_run_full_survives_triple_extraction_error(refl_db, monkeypatch):
     # Still returns a report, just with failed triples
     assert report["triple_extraction"]["failed"] >= 1
     assert report["triple_extraction"]["processed"] == 0
+
+
+def test_failing_phase_is_persisted_in_report(refl_db, monkeypatch):
+    import json
+
+    from reflection.agent import ReflectionAgent
+
+    def broken_similarity_fn():
+        raise RuntimeError("boom")
+
+    agent = ReflectionAgent(refl_db)
+    monkeypatch.setattr(agent, "_make_cosine_similarity_fn", broken_similarity_fn)
+
+    report = asyncio.run(agent.run_full())
+
+    assert "boom" in report["fact_merge"]["error"]
+    stored = refl_db.execute(
+        "SELECT phase_errors FROM reflection_reports WHERE id=?", (report["id"],)
+    ).fetchone()
+    assert "boom" in json.loads(stored["phase_errors"])["fact_merge"]
+
+
+def test_save_report_without_phase_errors_column_still_inserts_row(monkeypatch):
+    import sqlite3
+
+    from reflection.agent import ReflectionAgent
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE reflection_reports (
+            id TEXT PRIMARY KEY,
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            type TEXT NOT NULL CHECK (type IN ('session', 'periodic', 'weekly', 'manual')),
+            new_nodes INTEGER DEFAULT 0,
+            patterns_found INTEGER DEFAULT 0,
+            skills_refined INTEGER DEFAULT 0,
+            rules_proposed INTEGER DEFAULT 0,
+            contradictions INTEGER DEFAULT 0,
+            archived INTEGER DEFAULT 0,
+            focus_areas JSON,
+            key_findings JSON,
+            proposed_changes JSON,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        """
+    )
+
+    agent = ReflectionAgent(conn)
+    warnings: list[str] = []
+    monkeypatch.setattr("reflection.agent.LOG", warnings.append)
+
+    report_id = agent._save_report(
+        {"id": "rep1", "type": "periodic", "digest": {"error": "boom"}}
+    )
+
+    assert report_id == "rep1"
+    row = conn.execute(
+        "SELECT id FROM reflection_reports WHERE id=?", ("rep1",)
+    ).fetchone()
+    assert row is not None
+    assert any("029" in w and "boom" in w for w in warnings)
+
+
+@pytest.mark.parametrize(
+    "report,expected",
+    [
+        ({"digest": {"error": "boom"}}, {"digest": "error: boom"}),
+        ({"triple_extraction": {"deferred": "no_llm"}}, {"triple_extraction": "deferred: no_llm"}),
+        ({"triple_extraction": {"skipped": 4}}, {}),
+        (
+            {"representations": {"skipped": 0, "skipped_reason": "no embedder"}},
+            {"representations": "skipped_reason: no embedder"},
+        ),
+        (
+            {"fact_merge": {"error": "e1", "deferred": "d1", "skipped": "s1"}},
+            {"fact_merge": "error: e1"},
+        ),
+        (
+            {"representations": {"skipped_reason": "no embedder", "skipped": "s1"}},
+            {"representations": "skipped_reason: no embedder"},
+        ),
+        ({"digest": "not a dict"}, {}),
+        ({"some_unknown_key": {"error": "x"}}, {}),
+    ],
+)
+def test_phase_errors_markers(report, expected):
+    from reflection.agent import phase_errors
+
+    assert phase_errors(report) == expected
+
+
+def test_merge_hook_embeds_and_queues_merged_record(refl_db, monkeypatch):
+    from fact_merger import FactMerger
+    from reflection.agent import ReflectionAgent
+
+    monkeypatch.setenv("MEMORY_EMBED_PROVIDER", "fastembed")
+    monkeypatch.setenv("FASTEMBED_MODEL", "test-fastembed-model")
+
+    ids = []
+    for content in ("User uses Go for backend", "User builds APIs in Go"):
+        cur = refl_db.execute(
+            "INSERT INTO knowledge (session_id, type, content, project, status, created_at) "
+            "VALUES ('s1', 'fact', ?, 'demo', 'active', '2026-04-14T00:00:00Z')",
+            (content,),
+        )
+        ids.append(cur.lastrowid)
+    refl_db.commit()
+
+    agent = ReflectionAgent(refl_db, embedder=lambda text: [0.5, 0.25, 0.125])
+    merger = FactMerger(
+        refl_db,
+        similarity_fn=lambda *_: 0.8,
+        llm_merge_fn=lambda contents: "User writes Go backends and APIs.",
+        on_merged=agent._make_merge_hook(),
+    )
+    merged_id = merger.merge_cluster(ids)["merged_id"]
+
+    embedding = refl_db.execute(
+        "SELECT embed_dim, embed_model, embedding_provider FROM embeddings WHERE knowledge_id=?",
+        (merged_id,),
+    ).fetchone()
+    assert embedding["embed_dim"] == 3
+    assert embedding["embed_model"] == "test-fastembed-model"
+    assert embedding["embedding_provider"] == "fastembed"
+
+    round_tripped_vector = agent._make_vectors_fn()([merged_id])
+    assert list(round_tripped_vector[merged_id]) == [0.5, 0.25, 0.125]
+
+    queued = refl_db.execute(
+        "SELECT status FROM representations_queue WHERE knowledge_id=?", (merged_id,)
+    ).fetchone()
+    assert queued["status"] == "pending"
+
+
+def test_merge_hook_prefers_injected_embed_identity_over_config(refl_db, monkeypatch):
+    from fact_merger import FactMerger
+    from reflection.agent import ReflectionAgent
+
+    monkeypatch.setenv("MEMORY_EMBED_PROVIDER", "openai")
+    monkeypatch.setenv("FASTEMBED_MODEL", "config-fastembed-model")
+
+    ids = []
+    for content in ("User uses Go for backend", "User builds APIs in Go"):
+        cur = refl_db.execute(
+            "INSERT INTO knowledge (session_id, type, content, project, status, created_at) "
+            "VALUES ('s1', 'fact', ?, 'demo', 'active', '2026-04-14T00:00:00Z')",
+            (content,),
+        )
+        ids.append(cur.lastrowid)
+    refl_db.commit()
+
+    agent = ReflectionAgent(
+        refl_db,
+        embedder=lambda text: [0.5, 0.25, 0.125],
+        embed_identity=("injected-model", "injected-provider"),
+    )
+    merger = FactMerger(
+        refl_db,
+        similarity_fn=lambda *_: 0.8,
+        llm_merge_fn=lambda contents: "User writes Go backends and APIs.",
+        on_merged=agent._make_merge_hook(),
+    )
+    merged_id = merger.merge_cluster(ids)["merged_id"]
+
+    embedding = refl_db.execute(
+        "SELECT embed_model, embedding_provider FROM embeddings WHERE knowledge_id=?",
+        (merged_id,),
+    ).fetchone()
+    assert embedding["embed_model"] == "injected-model"
+    assert embedding["embedding_provider"] == "injected-provider"
+
+
+def test_merge_hook_absent_without_embedder(refl_db, monkeypatch):
+    import server as _srv
+    from fact_merger import FactMerger
+    from reflection.agent import ReflectionAgent
+
+    def raise_store(*args, **kwargs):
+        raise RuntimeError("no store in this environment")
+
+    monkeypatch.setattr(_srv, "Store", raise_store)
+
+    agent = ReflectionAgent(refl_db, embedder=None)
+    hook = agent._make_merge_hook()
+    assert hook is None
+
+    a = refl_db.execute(
+        "INSERT INTO knowledge (session_id, type, content, project, status, created_at) "
+        "VALUES ('s1', 'fact', 'fact a', 'demo', 'active', '2026-04-14T00:00:00Z')"
+    ).lastrowid
+    b = refl_db.execute(
+        "INSERT INTO knowledge (session_id, type, content, project, status, created_at) "
+        "VALUES ('s1', 'fact', 'fact b', 'demo', 'active', '2026-04-14T00:00:00Z')"
+    ).lastrowid
+    refl_db.commit()
+
+    merger = FactMerger(
+        refl_db,
+        similarity_fn=lambda *_: 0.8,
+        llm_merge_fn=lambda contents: "merged fact",
+        on_merged=hook,
+    )
+    result = merger.merge_cluster([a, b])
+
+    assert result["merged_id"] is not None
+    row = refl_db.execute(
+        "SELECT status FROM knowledge WHERE id=?", (result["merged_id"],)
+    ).fetchone()
+    assert row["status"] == "active"
+    assert (
+        refl_db.execute(
+            "SELECT 1 FROM embeddings WHERE knowledge_id=?", (result["merged_id"],)
+        ).fetchone()
+        is None
+    )
+
+
+def test_phase_errors_omits_healthy_phases(refl_db, monkeypatch):
+    import json
+
+    import config as config_mod
+    import server as server_mod
+    from reflection.agent import ReflectionAgent
+
+    monkeypatch.setattr(config_mod, "has_llm", lambda *_a, **_kw: False)
+
+    def raise_store(*_args, **_kwargs):
+        raise RuntimeError("no store in this environment")
+
+    monkeypatch.setattr(server_mod, "Store", raise_store)
+
+    report = asyncio.run(ReflectionAgent(refl_db).run_full())
+    stored = json.loads(
+        refl_db.execute(
+            "SELECT phase_errors FROM reflection_reports WHERE id=?", (report["id"],)
+        ).fetchone()["phase_errors"]
+    )
+
+    assert stored == {
+        "triple_extraction": "deferred: no_llm",
+        "fact_merge": "skipped: deps",
+        "deep_enrichment": "deferred: no_llm",
+        "representations": "skipped_reason: no embedder",
+    }
+
+
+def test_make_vectors_fn_loads_real_embeddings_across_chunk_boundary(refl_db):
+    from reflection.agent import ReflectionAgent
+
+    dim = 3
+    ids = list(range(1, 502))
+    for kid in ids:
+        refl_db.execute(
+            "INSERT INTO embeddings "
+            "(knowledge_id, binary_vector, float32_vector, embed_model, embed_dim, created_at) "
+            "VALUES (?, ?, ?, 'test-model', ?, '2026-04-14T00:00:00Z')",
+            (kid, b"", struct.pack(f"{dim}f", float(kid), 0.0, 1.0), dim),
+        )
+    refl_db.commit()
+
+    vectors_fn = ReflectionAgent(refl_db)._make_vectors_fn()
+    loaded = vectors_fn(ids)
+
+    assert set(loaded.keys()) == set(ids)
+    assert all(len(v) == dim for v in loaded.values())
+    assert list(loaded[1]) == [1.0, 0.0, 1.0]
+    assert list(loaded[501]) == [501.0, 0.0, 1.0]
+
+
+def test_run_fact_merger_wires_hook_and_vectors_fn(refl_db, monkeypatch):
+    from reflection.agent import ReflectionAgent
+
+    ids = []
+    for content in ("User uses Go for backend", "User builds APIs in Go"):
+        cur = refl_db.execute(
+            "INSERT INTO knowledge (session_id, type, content, project, status, created_at) "
+            "VALUES ('s1', 'fact', ?, 'demo', 'active', '2026-04-14T00:00:00Z')",
+            (content,),
+        )
+        ids.append(cur.lastrowid)
+    refl_db.commit()
+
+    agent = ReflectionAgent(refl_db, embedder=lambda text: [0.1, 0.2])
+    monkeypatch.setattr(agent, "_make_cosine_similarity_fn", lambda: (lambda a, b: 0.8))
+    monkeypatch.setattr(
+        agent, "_make_llm_merge_fn", lambda: (lambda contents: "User writes Go backends and APIs.")
+    )
+
+    stats = agent._run_fact_merger()
+
+    assert stats["merged"] == 1
+    merged_row = refl_db.execute(
+        "SELECT id FROM knowledge WHERE source='merged'"
+    ).fetchone()
+    assert merged_row is not None
+    merged_id = merged_row["id"]
+
+    assert (
+        refl_db.execute(
+            "SELECT 1 FROM embeddings WHERE knowledge_id=?", (merged_id,)
+        ).fetchone()
+        is not None
+    )
+    queued = refl_db.execute(
+        "SELECT status FROM representations_queue WHERE knowledge_id=?", (merged_id,)
+    ).fetchone()
+    assert queued["status"] == "pending"

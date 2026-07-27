@@ -48,6 +48,29 @@ and versions use [Semantic Versioning](https://semver.org/).
   the existing `total` (count actually returned). The `self_rules` tool
   schema gained a matching `limit` input.
 
+### Fixed — unified SQLite schema source, fact-merge visibility
+- The core schema moved out of `Store._schema()`'s inline DDL into
+  `src/sql/base_schema.sql`, read by both production and the test suite via
+  `src/base_schema.py` — a hand-rolled test fixture schema is how
+  `fact_merger` previously shipped writing to a `knowledge.updated_at` column
+  that didn't exist in production, with a fully green suite.
+- `base_schema.apply_core_column_migrations` is now the single list of
+  PRAGMA-guarded `ALTER TABLE` statements for older databases; both
+  `Store._migrate()` and the test fixtures call it, so a column can no
+  longer exist in one and not the other.
+- Migration `028_agent_lineage.sql` no longer fails on every startup — it
+  used to re-`ALTER TABLE` columns `apply_core_column_migrations` had
+  already added, raising `duplicate column name` and never recording itself
+  as applied.
+- Migration `029_reflection_phase_errors.sql` adds
+  `reflection_reports.phase_errors`, so a reflection phase that fails (or is
+  deferred/skipped) is now visible in the saved report instead of only
+  reaching stderr.
+- `fact_merger`'s merged records now carry `session_id='fact-merge'` and
+  `source='merged'` instead of a raw insert that violated `knowledge`'s
+  `NOT NULL` `session_id`; the origin session row is seeded once in the base
+  schema rather than written per merge.
+
 ## [12.4.0] — 2026-05-26 — 100% functional through every install path
 
 `npx connect`, `bash install.sh`, `docker run`, `docker compose up` — same

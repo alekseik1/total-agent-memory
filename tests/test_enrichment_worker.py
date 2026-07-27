@@ -14,7 +14,6 @@ Covers:
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -30,56 +29,6 @@ import enrichment_worker as ew
 # ──────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────
-
-
-@pytest.fixture
-def db():
-    """Minimal SQLite with the columns each stage reads/writes."""
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
-        CREATE TABLE knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT, type TEXT, content TEXT,
-            project TEXT DEFAULT 'general',
-            status TEXT DEFAULT 'active',
-            importance TEXT DEFAULT 'medium',
-            tags TEXT DEFAULT '[]', created_at TEXT
-        );
-
-        -- enrichment_queue (the unit under test)
-        CREATE TABLE enrichment_queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            knowledge_id INTEGER NOT NULL,
-            session_id TEXT,
-            project TEXT NOT NULL DEFAULT 'general',
-            ktype TEXT NOT NULL,
-            content_snapshot TEXT NOT NULL,
-            tags_snapshot TEXT NOT NULL DEFAULT '[]',
-            importance TEXT NOT NULL DEFAULT 'medium',
-            skip_quality INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL DEFAULT 'pending'
-                CHECK (status IN ('pending','processing','done','failed')),
-            attempts INTEGER NOT NULL DEFAULT 0,
-            last_error TEXT,
-            enqueued_at TEXT NOT NULL,
-            started_at TEXT, finished_at TEXT
-        );
-
-        -- audit log targets the stages write into
-        CREATE TABLE quality_gate_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            knowledge_id INTEGER, project TEXT, ktype TEXT,
-            decision TEXT, total REAL, specificity REAL, actionability REAL,
-            verifiability REAL, reason TEXT, threshold REAL,
-            provider TEXT, model TEXT, latency_ms INTEGER,
-            content TEXT, created_at TEXT NOT NULL
-        );
-        """
-    )
-    yield conn
-    conn.close()
 
 
 @pytest.fixture

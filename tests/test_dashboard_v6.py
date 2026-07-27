@@ -3,35 +3,17 @@
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
 import pytest
+
+from base_schema import apply_full_schema
 
 
 @pytest.fixture
 def dash_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT, project TEXT DEFAULT 'general',
-            status TEXT DEFAULT 'active', created_at TEXT
-        );
-        """
-    )
-    for m in ("002_multi_representation", "003_triple_extraction_queue",
-              "004_deep_enrichment", "005_representations_queue",
-              "006_filter_savings"):
-        conn.executescript((root / "migrations" / f"{m}.sql").read_text())
-    # v10.1 — enrichment_queue migration (separate so older tests still run
-    # even if it is missing at runtime).
-    eq_sql = root / "migrations" / "020_async_enrichment.sql"
-    if eq_sql.exists():
-        conn.executescript(eq_sql.read_text())
+    apply_full_schema(conn)
     yield conn
     conn.close()
 
@@ -107,8 +89,8 @@ def test_coverage_computes_percentages(dash_db):
 
     for i in range(4):
         dash_db.execute(
-            "INSERT INTO knowledge (content, project, status, created_at) "
-            "VALUES ('c','demo','active','2026-04-14T00:00:00Z')"
+            "INSERT INTO knowledge (session_id, type, content, project, status, created_at) "
+            "VALUES ('s1', 'fact', 'c','demo','active','2026-04-14T00:00:00Z')"
         )
     dash_db.executemany(
         "INSERT INTO knowledge_representations "

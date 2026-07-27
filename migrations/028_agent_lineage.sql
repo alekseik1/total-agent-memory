@@ -9,12 +9,14 @@
 --
 -- Both columns are nullable — pre-existing rows and callers that don't pass
 -- the ids stay unaffected.
-
-ALTER TABLE knowledge ADD COLUMN agent_id TEXT DEFAULT NULL;
-ALTER TABLE knowledge ADD COLUMN parent_agent_id TEXT DEFAULT NULL;
-
--- Partial indexes: we only care about rows that actually carry an id.
-CREATE INDEX IF NOT EXISTS idx_k_agent_id
-    ON knowledge(agent_id) WHERE agent_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_k_parent_agent_id
-    ON knowledge(parent_agent_id) WHERE parent_agent_id IS NOT NULL;
+--
+-- The columns themselves are added by `base_schema.apply_core_column_migrations`,
+-- which runs before this file and is PRAGMA-guarded. This migration used to
+-- ALTER them in too, which meant it raised `duplicate column name: agent_id`
+-- on every startup and was never recorded as applied — it had still not applied
+-- on a database that had been running it for months.
+--
+-- The two partial indexes this migration used to create are also now issued
+-- unconditionally by `apply_core_column_migrations`, so nothing is left for
+-- this file to do — it stays as a historical marker so `version` 028 remains
+-- a recorded, applied row in every database, rather than a gap in the chain.

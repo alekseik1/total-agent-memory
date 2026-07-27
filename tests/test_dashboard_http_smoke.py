@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from base_schema import apply_full_schema
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -34,31 +36,7 @@ def dashboard_server():
     root = Path(__file__).parent.parent
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, type TEXT,
-            content TEXT, context TEXT DEFAULT '', project TEXT DEFAULT 'general',
-            tags TEXT DEFAULT '[]', status TEXT DEFAULT 'active', superseded_by INTEGER,
-            confidence REAL DEFAULT 1.0, source TEXT DEFAULT 'explicit',
-            created_at TEXT, last_confirmed TEXT, recall_count INTEGER DEFAULT 0,
-            last_recalled TEXT, branch TEXT DEFAULT ''
-        );
-        CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
-            content, context, tags, content='knowledge', content_rowid='id'
-        );
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY, started_at TEXT, ended_at TEXT,
-            project TEXT DEFAULT 'general', status TEXT DEFAULT 'open',
-            summary TEXT, log_count INTEGER DEFAULT 0, branch TEXT DEFAULT ''
-        );
-        """
-    )
-    for m in ("002_multi_representation", "003_triple_extraction_queue",
-              "004_deep_enrichment", "005_representations_queue",
-              "006_filter_savings"):
-        conn.executescript((root / "migrations" / f"{m}.sql").read_text())
+    apply_full_schema(conn)
 
     # Seed a filter saving row so savings endpoint has something to return
     conn.execute(

@@ -12,27 +12,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from triple_extraction_queue import TripleExtractionQueue
+from base_schema import apply_full_schema
 
 
 def _setup_db() -> sqlite3.Connection:
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
-    db.executescript(
-        """
-        CREATE TABLE knowledge (id INTEGER PRIMARY KEY, content TEXT);
-        CREATE TABLE triple_extraction_queue (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            knowledge_id INTEGER NOT NULL,
-            status       TEXT NOT NULL DEFAULT 'pending',
-            attempts     INTEGER NOT NULL DEFAULT 0,
-            last_error   TEXT,
-            created_at   TEXT NOT NULL,
-            claimed_at   TEXT,
-            processed_at TEXT,
-            UNIQUE(knowledge_id, status)
-        );
-        """
-    )
+    apply_full_schema(db)
     return db
 
 

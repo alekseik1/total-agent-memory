@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import quality_gate as qg
+from base_schema import apply_full_schema
 
 
 # ──────────────────────────────────────────────
@@ -75,19 +76,9 @@ def fake_provider(monkeypatch):
 
 @pytest.fixture
 def gate_db(tmp_path):
-    """SQLite DB with just the migration-015 tables applied."""
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
-    db.execute(
-        "CREATE TABLE knowledge (id INTEGER PRIMARY KEY, importance TEXT DEFAULT 'medium')"
-    )
-    migration = (
-        Path(__file__).parent.parent / "migrations" / "015_quality_importance.sql"
-    ).read_text()
-    # The ALTER TABLE in the migration would fail on the simplified knowledge
-    # table above — execute only the quality_gate_log block.
-    log_block = migration.split("CREATE TABLE IF NOT EXISTS quality_gate_log", 1)[1]
-    db.executescript("CREATE TABLE IF NOT EXISTS quality_gate_log" + log_block)
+    apply_full_schema(db)
     yield db
     db.close()
 

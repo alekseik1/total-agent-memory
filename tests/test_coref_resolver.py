@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import coref_resolver as cr
+from base_schema import apply_full_schema
 
 
 # ──────────────────────────────────────────────
@@ -33,12 +34,7 @@ def _reset(monkeypatch):
 def hist_db():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
-    db.execute(
-        """CREATE TABLE knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT, content TEXT, status TEXT DEFAULT 'active'
-        )"""
-    )
+    apply_full_schema(db)
     yield db
     db.close()
 
@@ -46,7 +42,8 @@ def hist_db():
 def _seed(db, session_id, *contents):
     for c in contents:
         db.execute(
-            "INSERT INTO knowledge (session_id, content, status) VALUES (?, ?, 'active')",
+            "INSERT INTO knowledge (session_id, type, content, status, created_at) "
+            "VALUES (?, 'fact', ?, 'active', '2026-04-14T00:00:00Z')",
             (session_id, c),
         )
     db.commit()

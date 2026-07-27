@@ -87,8 +87,8 @@ class TestSpreadingActivation:
 
         # Insert knowledge and link to node
         db.execute(
-            "INSERT INTO knowledge (id, type, content, status, created_at) "
-            "VALUES (100, 'solution', 'Test solution', 'active', '2025-01-01')"
+            "INSERT INTO knowledge (id, session_id, type, content, status, created_at) "
+            "VALUES (100, 's1', 'solution', 'Test solution', 'active', '2025-01-01')"
         )
         db.execute(
             "INSERT INTO knowledge_nodes (knowledge_id, node_id, role, strength) "

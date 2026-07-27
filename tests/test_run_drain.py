@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import pytest
+
+from base_schema import apply_full_schema
 
 
 @pytest.fixture
@@ -13,37 +14,7 @@ def drain_db():
     import sqlite3
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY, started_at TEXT, ended_at TEXT,
-            project TEXT DEFAULT 'general', status TEXT DEFAULT 'open',
-            summary TEXT, log_count INTEGER DEFAULT 0, branch TEXT DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT, type TEXT, project TEXT DEFAULT 'general',
-            tags TEXT DEFAULT '[]', status TEXT DEFAULT 'active',
-            confidence REAL DEFAULT 1.0, created_at TEXT, session_id TEXT DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS embeddings (
-            knowledge_id INTEGER PRIMARY KEY,
-            binary_vector BLOB NOT NULL, float32_vector BLOB NOT NULL,
-            embed_model TEXT NOT NULL, embed_dim INTEGER NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS knowledge_merges (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            merged_knowledge_id INTEGER NOT NULL,
-            source_ids TEXT NOT NULL, rationale TEXT, created_at TEXT NOT NULL
-        );
-        """
-    )
-    for m in ("002_multi_representation", "003_triple_extraction_queue",
-              "004_deep_enrichment", "005_representations_queue"):
-        conn.executescript((root / "migrations" / f"{m}.sql").read_text())
+    apply_full_schema(conn)
     yield conn
     conn.close()
 
@@ -55,8 +26,8 @@ def test_run_drain_only_runs_phases_3_5_6(drain_db, monkeypatch):
     from representations_queue import RepresentationsQueue
 
     kid = drain_db.execute(
-        "INSERT INTO knowledge (content, type, project, created_at) "
-        "VALUES ('quick test content', 'fact', 'demo', '2026-04-14T00:00:00Z')"
+        "INSERT INTO knowledge (session_id, content, type, project, created_at) "
+        "VALUES ('s1', 'quick test content', 'fact', 'demo', '2026-04-14T00:00:00Z')"
     ).lastrowid
     drain_db.commit()
     TripleExtractionQueue(drain_db).enqueue(kid)

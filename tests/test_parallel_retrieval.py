@@ -19,10 +19,11 @@ import hashlib
 import os
 import sqlite3
 import time
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from base_schema import apply_full_schema
 
 
 # ─────────────────────────── fixtures ───────────────────────────
@@ -32,18 +33,7 @@ import pytest
 def mrs_db():
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT, project TEXT DEFAULT 'general',
-            status TEXT DEFAULT 'active', created_at TEXT
-        );
-        """
-    )
-    conn.executescript((root / "migrations" / "002_multi_representation.sql").read_text())
+    apply_full_schema(conn)
     yield conn
     conn.close()
 
@@ -70,8 +60,8 @@ def _det_emb(text: str, dim: int = 8) -> list[float]:
 
 def _seed(db, text: str, project: str = "demo") -> int:
     return db.execute(
-        "INSERT INTO knowledge (content, project, status, created_at) "
-        "VALUES (?, ?, 'active', '2026-04-14T00:00:00Z')",
+        "INSERT INTO knowledge (session_id, type, content, project, status, created_at) "
+        "VALUES ('s1', 'fact', ?, ?, 'active', '2026-04-14T00:00:00Z')",
         (text, project),
     ).lastrowid
 

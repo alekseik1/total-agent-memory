@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 import struct
-from pathlib import Path
 
 import pytest
+
+from base_schema import apply_full_schema
 
 
 # ──────────────────────────────────────────────
@@ -16,30 +17,9 @@ import pytest
 
 @pytest.fixture
 def repr_db():
-    """SQLite in-memory DB with v5 schema + migration 002."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
-    # base tables
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT, project TEXT DEFAULT 'general',
-            status TEXT DEFAULT 'active', created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS embeddings (
-            knowledge_id INTEGER PRIMARY KEY,
-            binary_vector BLOB NOT NULL,
-            float32_vector BLOB NOT NULL,
-            embed_model TEXT NOT NULL,
-            embed_dim INTEGER NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        """
-    )
-    conn.executescript((root / "migrations" / "002_multi_representation.sql").read_text())
+    apply_full_schema(conn)
     yield conn
     conn.close()
 
@@ -62,7 +42,7 @@ def test_store_upsert_and_get(repr_db):
 
     s = MultiReprStore(repr_db)
     kid = repr_db.execute(
-        "INSERT INTO knowledge (content, created_at) VALUES (?, ?)",
+        "INSERT INTO knowledge (session_id, type, content, created_at) VALUES ('s1', 'fact', ?, ?)",
         ("hello world", "2026-01-01T00:00:00Z"),
     ).lastrowid
 
@@ -81,7 +61,7 @@ def test_store_replaces_on_re_upsert(repr_db):
 
     s = MultiReprStore(repr_db)
     kid = repr_db.execute(
-        "INSERT INTO knowledge (content, created_at) VALUES (?, ?)",
+        "INSERT INTO knowledge (session_id, type, content, created_at) VALUES ('s1', 'fact', ?, ?)",
         ("x", "2026-01-01T00:00:00Z"),
     ).lastrowid
 
@@ -101,7 +81,7 @@ def test_store_delete_cascades_on_representation(repr_db):
 
     s = MultiReprStore(repr_db)
     kid = repr_db.execute(
-        "INSERT INTO knowledge (content, created_at) VALUES (?, ?)",
+        "INSERT INTO knowledge (session_id, type, content, created_at) VALUES ('s1', 'fact', ?, ?)",
         ("x", "2026-01-01T00:00:00Z"),
     ).lastrowid
     s.upsert(kid, "summary", "a", _fake_embed("a"), "test")
@@ -120,7 +100,7 @@ def test_store_rejects_invalid_type(repr_db):
 
     s = MultiReprStore(repr_db)
     kid = repr_db.execute(
-        "INSERT INTO knowledge (content, created_at) VALUES (?, ?)",
+        "INSERT INTO knowledge (session_id, type, content, created_at) VALUES ('s1', 'fact', ?, ?)",
         ("x", "2026-01-01T00:00:00Z"),
     ).lastrowid
     with pytest.raises(ValueError):

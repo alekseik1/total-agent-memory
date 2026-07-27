@@ -23,8 +23,8 @@ def _iso_days_ago(days: int) -> str:
 
 def _add_k(db, content: str, project: str = "demo") -> int:
     return db.execute(
-        "INSERT INTO knowledge (content, project, status, created_at) "
-        "VALUES (?, ?, 'active', ?)",
+        "INSERT INTO knowledge (session_id, type, content, project, status, created_at) "
+        "VALUES ('s1', 'fact', ?, ?, 'active', ?)",
         (content, project, "2026-04-14T00:00:00Z"),
     ).lastrowid
 

@@ -14,33 +14,18 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import claude_total_memory.lookup as lookup  # noqa: E402
+from base_schema import apply_full_schema  # noqa: E402
 
 
 def _make_db(tmp_path: Path, *, with_fts: bool = True) -> Path:
     db = tmp_path / "memory.db"
     conn = sqlite3.connect(str(db))
-    conn.execute(
-        """
-        CREATE TABLE knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
-            project TEXT,
-            type TEXT,
-            content TEXT,
-            context TEXT,
-            tags TEXT,
-            confidence REAL,
-            created_at TEXT,
-            last_confirmed TEXT,
-            recall_count INTEGER,
-            status TEXT,
-            branch TEXT
-        )
-        """
-    )
-    if with_fts:
-        conn.execute(
-            "CREATE VIRTUAL TABLE knowledge_fts USING fts5(content, content='knowledge', content_rowid='id')"
+    apply_full_schema(conn)
+    if not with_fts:
+        conn.executescript(
+            "DROP TRIGGER IF EXISTS k_fts_i;"
+            "DROP TRIGGER IF EXISTS k_fts_u;"
+            "DROP TABLE IF EXISTS knowledge_fts;"
         )
     rows = [
         ("vito", "fact", "vito uses Postgres for primary storage", '["reusable","postgres"]', "active"),
@@ -54,11 +39,6 @@ def _make_db(tmp_path: Path, *, with_fts: bool = True) -> Path:
             "confidence, created_at, last_confirmed, recall_count, status, branch) "
             "VALUES (?,?,?,?,?,?,1.0,'2026-04-25T00:00:00','2026-04-25T00:00:00',0,?,'')",
             ("s1", project, typ, content, "", tags, status),
-        )
-    if with_fts:
-        conn.execute(
-            "INSERT INTO knowledge_fts(rowid, content) "
-            "SELECT id, content FROM knowledge"
         )
     conn.commit()
     conn.close()

@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import project_wiki as pw
+from base_schema import apply_full_schema
 
 
 # ──────────────────────────────────────────────
@@ -33,20 +34,7 @@ def _env(monkeypatch, tmp_path):
 def wdb():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
-    db.executescript(
-        """
-        CREATE TABLE knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT, type TEXT NOT NULL,
-            content TEXT NOT NULL, project TEXT NOT NULL,
-            tags TEXT DEFAULT '[]',
-            status TEXT DEFAULT 'active',
-            importance TEXT NOT NULL DEFAULT 'medium',
-            created_at TEXT NOT NULL,
-            last_confirmed TEXT
-        );
-        """
-    )
+    apply_full_schema(db)
     yield db
     db.close()
 

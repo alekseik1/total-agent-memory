@@ -76,44 +76,13 @@ def _disable_async_enrichment_in_tests(monkeypatch):
 
 @pytest.fixture
 def db():
-    """In-memory SQLite database with all v5 tables."""
+    from base_schema import apply_full_schema
+
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    apply_full_schema(conn)
 
-    # Apply v5 migration
-    migration = Path(__file__).parent.parent / "migrations" / "001_v5_schema.sql"
-    conn.executescript(migration.read_text())
-
-    # Migration 026 — case-insensitive name normalization for graph_nodes.
-    # Tests that touch graph_store rely on name_norm being present so
-    # add_node can do its UPSERT lookup.
-    m026 = Path(__file__).parent.parent / "migrations" / "026_graph_nodes_dedup.sql"
-    if m026.exists():
-        conn.executescript(m026.read_text())
-
-    # Add base tables (from main server, not in v5 migration)
     conn.executescript("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT,
-            project TEXT DEFAULT 'general', status TEXT DEFAULT 'open',
-            summary TEXT, log_count INTEGER DEFAULT 0, branch TEXT DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT, type TEXT, content TEXT, context TEXT DEFAULT '',
-            project TEXT DEFAULT 'general', tags TEXT DEFAULT '[]',
-            status TEXT DEFAULT 'active', confidence REAL DEFAULT 1.0,
-            created_at TEXT, updated_at TEXT, recall_count INTEGER DEFAULT 0,
-            last_recalled TEXT, last_confirmed TEXT, superseded_by INTEGER,
-            source TEXT DEFAULT 'explicit', branch TEXT DEFAULT ''
-        );
-        CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
-            content, context, tags, content='knowledge', content_rowid='id'
-        );
-        CREATE TRIGGER IF NOT EXISTS k_fts_i AFTER INSERT ON knowledge BEGIN
-            INSERT INTO knowledge_fts(rowid, content, context, tags)
-            VALUES (new.id, new.content, new.context, new.tags);
-        END;
         CREATE TABLE IF NOT EXISTS rules (
             id INTEGER PRIMARY KEY, session_id TEXT, content TEXT, context TEXT,
             category TEXT, scope TEXT DEFAULT 'global', priority INTEGER DEFAULT 5,

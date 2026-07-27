@@ -19,7 +19,9 @@ import json
 import sqlite3
 import sys
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
+
+import numpy as np
 
 try:
     from validator import ContentValidator
@@ -35,6 +37,14 @@ def _now() -> str:
 
 SimilarityFn = Callable[[int, int], float]
 LLMMergeFn = Callable[[list[str]], str]
+MergedHookFn = Callable[[int, str], None]
+VectorsFn = Callable[[list[int]], dict[int, Sequence[float]]]
+
+# Origin marker for synthesized records: no real session produced them. The
+# matching `sessions` row is seeded once in src/sql/base_schema.sql — which
+# session a synthesized record belongs to is composition, not something this
+# class (contract: "db: SQLite connection") should decide per merge.
+MERGE_SESSION_ID = "fact-merge"
 
 
 class FactMerger:
@@ -45,18 +55,31 @@ class FactMerger:
         db: sqlite3.Connection,
         similarity_fn: SimilarityFn,
         llm_merge_fn: LLMMergeFn | None = None,
+        on_merged: MergedHookFn | None = None,
+        vectors_fn: VectorsFn | None = None,
     ) -> None:
         """
         Args:
             db: SQLite connection (row_factory = Row).
             similarity_fn: (id_a, id_b) -> cosine similarity in [0, 1].
-                Typically wraps server._binary_search / float32 cosine.
+                Typically wraps server._binary_search / float32 cosine. Used
+                only when `vectors_fn` is None.
+            vectors_fn: (ids) -> {id: vector}. When given, clustering compares
+                everything in one vectorized pass instead of O(n²) calls back
+                into `similarity_fn`.
             llm_merge_fn: (list[content]) -> merged_content. If None, no merges
                 happen (useful for tests that only want clustering).
+            on_merged: (merged_id, merged_content) -> None, called after the
+                merge commits. A raw INSERT skips everything `memory_save` does
+                downstream, so this is where the merged record gets embedded and
+                queued for representations. Failures inside it must not undo a
+                committed merge, so it is called outside the write path.
         """
         self.db = db
         self.similarity = similarity_fn
         self.llm_merge = llm_merge_fn or (lambda _c: "")
+        self.on_merged = on_merged
+        self.vectors_fn = vectors_fn
         self.validator = ContentValidator()
 
     # ──────────────────────────────────────────────
@@ -93,15 +116,9 @@ class FactMerger:
             if ra != rb:
                 parent[rb] = ra
 
-        for i, a in enumerate(ids):
-            for b in ids[i + 1 :]:
-                try:
-                    sim = float(self.similarity(a, b))
-                except Exception as e:  # noqa: BLE001
-                    LOG(f"similarity({a},{b}) failed: {e}")
-                    continue
-                if min_similarity <= sim <= max_similarity:
-                    union(a, b)
+        pairs = self._banded_pairs(ids, min_similarity, max_similarity)
+        for a, b in pairs:
+            union(a, b)
 
         # Collect clusters
         groups: dict[int, list[int]] = {}
@@ -123,6 +140,95 @@ class FactMerger:
                         capped.append(chunk)
 
         return capped
+
+    def _banded_pairs(
+        self, ids: list[int], min_similarity: float, max_similarity: float
+    ) -> list[tuple[int, int]]:
+        """Return every id pair whose similarity falls inside the merge band.
+
+        Uses one vectorized cosine pass per embedding dimension when a
+        `vectors_fn` is available, falling back to pairwise `similarity_fn`
+        calls otherwise. The fallback is O(n²) Python-level calls: at 1.6k
+        candidate records that is 1.3M calls and ~37s, and it grows quadratically.
+
+        Vectors are grouped by dimension because cosine between different-width
+        vectors is undefined. The pairwise path scored those pairs 0.0, silently
+        making records embedded by a different model unmergeable rather than
+        reporting them.
+        """
+        if self.vectors_fn is None:
+            pairs: list[tuple[int, int]] = []
+            for i, a in enumerate(ids):
+                for b in ids[i + 1 :]:
+                    try:
+                        sim = float(self.similarity(a, b))
+                    except Exception as e:  # noqa: BLE001
+                        LOG(f"similarity({a},{b}) failed: {e}")
+                        continue
+                    if min_similarity <= sim <= max_similarity:
+                        pairs.append((a, b))
+            return pairs
+
+        vectors = self.vectors_fn(ids)
+        by_dim: dict[int, list[int]] = {}
+        for kid, vec in vectors.items():
+            # `if vec:` raises on a numpy array with >1 element ("truth value
+            # of an array is ambiguous") — a plain length check works for
+            # both a list and an ndarray.
+            if len(vec):
+                by_dim.setdefault(len(vec), []).append(kid)
+
+        missing = len(ids) - sum(len(g) for g in by_dim.values())
+        if missing:
+            LOG(f"{missing}/{len(ids)} candidates have no embedding — not compared")
+        if len(by_dim) > 1:
+            LOG(f"embedding dims present: {sorted(by_dim)} — compared within each")
+
+        pairs = []
+        for dim, group in sorted(by_dim.items()):
+            if len(group) < 2:
+                continue
+            pairs.extend(
+                self._banded_pairs_in_group(group, vectors, min_similarity, max_similarity)
+            )
+        return pairs
+
+    def _banded_pairs_in_group(
+        self,
+        group: list[int],
+        vectors: dict[int, list[float]],
+        min_similarity: float,
+        max_similarity: float,
+        chunk_size: int = 512,
+    ) -> list[tuple[int, int]]:
+        """Cosine-similarity band search within one embedding dimension.
+
+        Chunks the matmul `chunk_size` rows at a time so peak memory is
+        O(n * chunk_size) instead of O(n^2). A single `matrix @ matrix.T` plus
+        `np.triu_indices(n)` holds two n^2/2 int64 index arrays and a fancy-index
+        copy of the full similarity matrix — ~800MB at 10k candidates and ~3GB
+        at 20k, a MemoryError risk in a background daemon. Chunking keeps every
+        intermediate array bounded by `chunk_size * n` regardless of `n`.
+        """
+        matrix = np.array([vectors[kid] for kid in group], dtype=np.float32)
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        # A zero vector has no direction: leave it unnormalized so every
+        # similarity against it is 0 rather than NaN.
+        norms[norms == 0] = 1.0
+        matrix /= norms
+
+        n = len(group)
+        pairs: list[tuple[int, int]] = []
+        for start in range(0, n, chunk_size):
+            end = min(start + chunk_size, n)
+            block = matrix[start:end] @ matrix.T  # (chunk, n)
+            i_idx = np.arange(start, end)[:, None]
+            j_idx = np.arange(n)[None, :]
+            banded = (j_idx > i_idx) & (block >= min_similarity) & (block <= max_similarity)
+            local_rows, cols = np.nonzero(banded)
+            for local_i, j in zip(local_rows, cols):
+                pairs.append((group[start + int(local_i)], group[int(j)]))
+        return pairs
 
     def _candidate_rows(self, project: str | None) -> list[sqlite3.Row]:
         if project:
@@ -176,13 +282,17 @@ class FactMerger:
                 "reason": f"validator rejected: {'; '.join(v.errors[:3])}",
             }
 
-        # Insert merged record
+        # Insert merged record. session_id is NOT NULL with no default, so the
+        # merge has to name itself as the origin — there is no user session
+        # behind a record the reflection agent synthesized.
         first = rows[0]
         merged_id = self.db.execute(
             """INSERT INTO knowledge
-                 (content, project, type, tags, status, confidence, created_at, updated_at)
-               VALUES (?, ?, 'fact', ?, 'active', ?, ?, ?)""",
+                 (session_id, content, project, type, tags, status, source,
+                  confidence, created_at, updated_at)
+               VALUES (?, ?, ?, 'fact', ?, 'active', 'merged', ?, ?, ?)""",
             (
+                MERGE_SESSION_ID,
                 merged_text.strip(),
                 first["project"] if "project" in first.keys() else "general",
                 json.dumps(["merged", "consolidated"]),
@@ -214,6 +324,13 @@ class FactMerger:
         self.db.commit()
 
         LOG(f"merged cluster {ids} -> knowledge_id={merged_id}")
+
+        if self.on_merged is not None:
+            try:
+                self.on_merged(merged_id, merged_text.strip())
+            except Exception as e:  # noqa: BLE001
+                LOG(f"on_merged hook failed for {merged_id}: {e}")
+
         return {"merged_id": merged_id, "reason": "ok"}
 
     def _fetch_rows(self, ids: list[int]) -> list[sqlite3.Row]:

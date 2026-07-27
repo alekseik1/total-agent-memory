@@ -13,13 +13,13 @@ class TestDigestPhase:
         # Insert duplicate knowledge records
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         db.execute(
-            "INSERT INTO knowledge (type, content, project, status, confidence, recall_count, created_at, updated_at) "
-            "VALUES ('solution', 'Deploy Docker container to production', 'proj1', 'active', 1.0, 0, ?, ?)",
+            "INSERT INTO knowledge (session_id, type, content, project, status, confidence, recall_count, created_at, updated_at) "
+            "VALUES ('s1', 'solution', 'Deploy Docker container to production', 'proj1', 'active', 1.0, 0, ?, ?)",
             (now, now),
         )
         db.execute(
-            "INSERT INTO knowledge (type, content, project, status, confidence, recall_count, created_at, updated_at) "
-            "VALUES ('solution', 'Deploy Docker container to production server', 'proj1', 'active', 1.0, 0, ?, ?)",
+            "INSERT INTO knowledge (session_id, type, content, project, status, confidence, recall_count, created_at, updated_at) "
+            "VALUES ('s1', 'solution', 'Deploy Docker container to production server', 'proj1', 'active', 1.0, 0, ?, ?)",
             (now, now),
         )
         db.commit()
@@ -60,8 +60,8 @@ class TestDigestPhase:
         # Insert a rule-type knowledge (immortal)
         old_date = (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
         db.execute(
-            "INSERT INTO knowledge (type, content, status, confidence, recall_count, created_at, updated_at) "
-            "VALUES ('rule', 'Always use strict mode', 'active', 1.0, 0, ?, ?)",
+            "INSERT INTO knowledge (session_id, type, content, status, confidence, recall_count, created_at, updated_at) "
+            "VALUES ('s1', 'rule', 'Always use strict mode', 'active', 1.0, 0, ?, ?)",
             (old_date, old_date),
         )
         db.commit()
@@ -80,8 +80,8 @@ class TestDigestPhase:
         # Insert very old low-confidence auto-saved knowledge
         very_old = (datetime.now(timezone.utc) - timedelta(days=400)).strftime("%Y-%m-%dT%H:%M:%SZ")
         db.execute(
-            "INSERT INTO knowledge (type, content, status, confidence, recall_count, source, created_at, updated_at) "
-            "VALUES ('fact', 'Very old fact nobody recalls', 'active', 0.3, 0, 'auto', ?, ?)",
+            "INSERT INTO knowledge (session_id, type, content, status, confidence, recall_count, source, created_at, updated_at) "
+            "VALUES ('s1', 'fact', 'Very old fact nobody recalls', 'active', 0.3, 0, 'auto', ?, ?)",
             (very_old, very_old),
         )
         db.commit()
@@ -132,8 +132,8 @@ class TestSynthesizePhase:
             (now,),
         )
         db.execute(
-            "INSERT INTO knowledge (type, content, project, status, created_at, updated_at) "
-            "VALUES ('solution', 'Test solution', 'test', 'active', ?, ?)",
+            "INSERT INTO knowledge (session_id, type, content, project, status, created_at, updated_at) "
+            "VALUES ('s1', 'solution', 'Test solution', 'test', 'active', ?, ?)",
             (now, now),
         )
         db.commit()

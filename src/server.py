@@ -109,6 +109,7 @@ try:
 except ImportError:
     HAS_CACHE = False
 
+from base_schema import apply_core_column_migrations, base_schema_sql  # noqa: E402
 from paths import memory_dir as _resolve_memory_dir  # noqa: E402
 MEMORY_DIR = _resolve_memory_dir()
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
@@ -402,6 +403,16 @@ class Store:
         if mode == "ollama":
             return OLLAMA_EMBED_MODEL
         return EMBEDDING_MODEL
+
+    def embed_identity(self) -> tuple[str, str]:
+        """Public (embed_model, embed_provider) for rows this Store writes.
+
+        Callers outside this module (e.g. reflection.agent) should use this
+        instead of reaching into `_active_embed_model_name()` / `_embed_mode`
+        directly, so the private attribute names can change without breaking
+        another package.
+        """
+        return self._active_embed_model_name(), (self._embed_mode or "fastembed")
 
     def _init_embed_mode(self):
         """Eagerly determine embedding mode at startup.
@@ -893,95 +904,12 @@ class Store:
         return scored[:n_results]
 
     def _schema(self):
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT,
-                project TEXT DEFAULT 'general', status TEXT DEFAULT 'open',
-                summary TEXT, log_count INTEGER DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS knowledge (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL, type TEXT NOT NULL,
-                content TEXT NOT NULL, context TEXT DEFAULT '',
-                project TEXT DEFAULT 'general', tags TEXT DEFAULT '[]',
-                status TEXT DEFAULT 'active', superseded_by INTEGER,
-                confidence REAL DEFAULT 1.0, source TEXT DEFAULT 'explicit',
-                created_at TEXT NOT NULL, last_confirmed TEXT,
-                recall_count INTEGER DEFAULT 0, last_recalled TEXT
-            );
-            CREATE TABLE IF NOT EXISTS relations (
-                from_id INTEGER, to_id INTEGER, type TEXT, created_at TEXT
-            );
-            CREATE TABLE IF NOT EXISTS timeline (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL, ts TEXT NOT NULL,
-                event TEXT NOT NULL, summary TEXT NOT NULL,
-                details TEXT DEFAULT '', project TEXT DEFAULT 'general', files TEXT DEFAULT '[]'
-            );
-            CREATE INDEX IF NOT EXISTS idx_k_status ON knowledge(status);
-            CREATE INDEX IF NOT EXISTS idx_k_type ON knowledge(type);
-            CREATE INDEX IF NOT EXISTS idx_k_project ON knowledge(project);
-            CREATE INDEX IF NOT EXISTS idx_k_session ON knowledge(session_id);
-            CREATE INDEX IF NOT EXISTS idx_k_last_confirmed ON knowledge(last_confirmed);
-            CREATE INDEX IF NOT EXISTS idx_rel_from ON relations(from_id);
-            CREATE INDEX IF NOT EXISTS idx_rel_to ON relations(to_id);
-            CREATE INDEX IF NOT EXISTS idx_t_session ON timeline(session_id);
-            CREATE INDEX IF NOT EXISTS idx_s_started ON sessions(started_at);
-            CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
-                content, context, tags, content='knowledge', content_rowid='id'
-            );
-            CREATE TRIGGER IF NOT EXISTS k_fts_i AFTER INSERT ON knowledge BEGIN
-                INSERT INTO knowledge_fts(rowid,content,context,tags)
-                VALUES (new.id,new.content,new.context,new.tags);
-            END;
-            CREATE TRIGGER IF NOT EXISTS k_fts_u AFTER UPDATE ON knowledge BEGIN
-                INSERT INTO knowledge_fts(knowledge_fts,rowid,content,context,tags)
-                VALUES ('delete',old.id,old.content,old.context,old.tags);
-                INSERT INTO knowledge_fts(rowid,content,context,tags)
-                VALUES (new.id,new.content,new.context,new.tags);
-            END;
-            CREATE TABLE IF NOT EXISTS embeddings (
-                knowledge_id INTEGER PRIMARY KEY,
-                binary_vector BLOB NOT NULL,
-                float32_vector BLOB NOT NULL,
-                embed_model TEXT NOT NULL,
-                embed_dim INTEGER NOT NULL,
-                created_at TEXT NOT NULL
-            );
-        """)
+        self.db.executescript(base_schema_sql())
         self.db.commit()
 
     def _migrate(self):
         """Add columns/tables that may not exist in older databases."""
-        cols = {r[1] for r in self.db.execute("PRAGMA table_info(knowledge)").fetchall()}
-        if "recall_count" not in cols:
-            self.db.execute("ALTER TABLE knowledge ADD COLUMN recall_count INTEGER DEFAULT 0")
-        if "last_recalled" not in cols:
-            self.db.execute("ALTER TABLE knowledge ADD COLUMN last_recalled TEXT")
-        # v4.0: branch-aware context
-        if "branch" not in cols:
-            self.db.execute("ALTER TABLE knowledge ADD COLUMN branch TEXT DEFAULT ''")
-            LOG("Migration: added branch to knowledge table")
-        # Claude Code v2.1.139+ subagent lineage (OTEL agent_id / parent_agent_id)
-        if "agent_id" not in cols:
-            self.db.execute("ALTER TABLE knowledge ADD COLUMN agent_id TEXT DEFAULT NULL")
-            self.db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_k_agent_id "
-                "ON knowledge(agent_id) WHERE agent_id IS NOT NULL"
-            )
-            LOG("Migration: added agent_id to knowledge table")
-        if "parent_agent_id" not in cols:
-            self.db.execute("ALTER TABLE knowledge ADD COLUMN parent_agent_id TEXT DEFAULT NULL")
-            self.db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_k_parent_agent_id "
-                "ON knowledge(parent_agent_id) WHERE parent_agent_id IS NOT NULL"
-            )
-            LOG("Migration: added parent_agent_id to knowledge table")
-
-        sess_cols = {r[1] for r in self.db.execute("PRAGMA table_info(sessions)").fetchall()}
-        if "branch" not in sess_cols:
-            self.db.execute("ALTER TABLE sessions ADD COLUMN branch TEXT DEFAULT ''")
-            LOG("Migration: added branch to sessions table")
+        apply_core_column_migrations(self.db, LOG)
 
         # Self-Improvement tables (v3.0)
         tables = {r[0] for r in self.db.execute(

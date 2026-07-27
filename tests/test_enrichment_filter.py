@@ -4,36 +4,25 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from pathlib import Path
 
 import pytest
+
+from base_schema import apply_full_schema
 
 
 @pytest.fixture
 def filt_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT,
-            project TEXT DEFAULT 'general',
-            status TEXT DEFAULT 'active',
-            created_at TEXT
-        );
-        """
-    )
-    conn.executescript((root / "migrations" / "004_deep_enrichment.sql").read_text())
+    apply_full_schema(conn)
     yield conn
     conn.close()
 
 
 def _add_k(db, content: str = "x") -> int:
     return db.execute(
-        "INSERT INTO knowledge (content, created_at) VALUES (?, '2026-04-14T00:00:00Z')",
+        "INSERT INTO knowledge (session_id, type, content, created_at) "
+        "VALUES ('s1', 'fact', ?, '2026-04-14T00:00:00Z')",
         (content,),
     ).lastrowid
 

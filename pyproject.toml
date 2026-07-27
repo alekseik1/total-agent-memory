@@ -27,6 +27,7 @@ classifiers = [
 dependencies = [
     "mcp[cli]>=1.0.0",
     "chromadb>=0.4.0",
+    "numpy>=1.24.0",
     "sentence-transformers>=2.2.0",
     "transformers>=4.40",
     # v11 D4 LoCoMo — BAAI/bge-reranker-v2-m3 multilingual reranker.

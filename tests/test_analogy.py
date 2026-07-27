@@ -6,22 +6,14 @@ import sqlite3
 import pytest
 
 from analogy import AnalogyEngine
+from base_schema import apply_full_schema
 
 
 @pytest.fixture
 def adb():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.executescript("""
-        CREATE TABLE knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT, type TEXT, content TEXT, context TEXT DEFAULT '',
-            project TEXT DEFAULT 'general', tags TEXT DEFAULT '[]',
-            status TEXT DEFAULT 'active', confidence REAL DEFAULT 0.9,
-            created_at TEXT DEFAULT '2026-04-14T10:00:00Z',
-            recall_count INTEGER DEFAULT 0
-        );
-    """)
+    apply_full_schema(conn)
     yield conn
     conn.close()
 
@@ -33,9 +25,9 @@ def ae(adb):
 
 def _add(db, *, type, content, tags=None, project="p1"):
     db.execute(
-        """INSERT INTO knowledge (type, content, tags, project)
-           VALUES (?, ?, ?, ?)""",
-        (type, content, json.dumps(tags or []), project),
+        """INSERT INTO knowledge (session_id, type, content, tags, project, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        ("s1", type, content, json.dumps(tags or []), project, "2026-04-14T10:00:00Z"),
     )
     db.commit()
 
