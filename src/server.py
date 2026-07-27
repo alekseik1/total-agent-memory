@@ -4175,7 +4175,9 @@ async def list_tools():
             description="Manage behavioral rules (SOUL). Rules are promoted insights that shape agent behavior. "
                         "Actions: list, fire (record relevance), rate (success=true/false), "
                         "suspend, activate, retire, add_manual. "
-                        "Auto-suspend: success_rate < 0.2 after 10+ fires. "
+                        "Auto-suspend: success_rate < 0.2 after 10+ RATINGS (success_count+fail_count), "
+                        "checked only when action='rate' runs — an unrated rule is never suspended, "
+                        "however often it fires. "
                         "For list: no result cap by default — all matching active rules are "
                         "returned unless `limit` is passed or the MEMORY_RULES_LIMIT env var is set.",
             inputSchema={
