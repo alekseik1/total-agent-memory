@@ -120,6 +120,28 @@ DECAY_HALF_LIFE = int(os.environ.get("DECAY_HALF_LIFE", "90"))  # days
 ARCHIVE_AFTER_DAYS = int(os.environ.get("ARCHIVE_AFTER_DAYS", "180"))
 PURGE_AFTER_DAYS = int(os.environ.get("PURGE_AFTER_DAYS", "365"))
 OBSERVATION_RETENTION_DAYS = int(os.environ.get("OBSERVATION_RETENTION_DAYS", "30"))
+def _read_rules_limit(env=None):
+    """Parse MEMORY_RULES_LIMIT. Unset/empty/invalid -> None (no cap)."""
+    raw = (env if env is not None else os.environ).get("MEMORY_RULES_LIMIT")
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        sys.stderr.write(
+            f"[memory-mcp] Invalid MEMORY_RULES_LIMIT={raw!r} — ignoring, no cap applied\n"
+        )
+        return None
+    return value if value >= 0 else None
+
+
+RULES_CONTEXT_LIMIT = _read_rules_limit()  # None = no cap
+
+# Shared ranking policy for active rules: unrated rules (no ratings yet)
+# score as neutral (0.5) rather than the DB default 0.0, so they don't rank
+# below rules with recorded failures. Used by both get_rules_for_context and
+# manage_rule(action="list").
+_RULE_SCORE_SQL = "CASE WHEN (success_count + fail_count) = 0 THEN 0.5 ELSE success_rate END"
 
 # v10 — importance multipliers applied to the final recall score so a
 # `critical` decision outranks ten `medium` observations at the same RRF
@@ -2320,7 +2342,7 @@ class Store:
                 conds.append("scope=?"); params.append(kw["scope"])
             rows = self.q(
                 f"SELECT * FROM rules WHERE {' AND '.join(conds)} "
-                "ORDER BY priority DESC, success_rate DESC LIMIT 30", params)
+                f"ORDER BY priority DESC, {_RULE_SCORE_SQL} DESC LIMIT 30", params)
             return {"rules": rows, "total": len(rows)}
 
         elif action == "fire":
@@ -2392,7 +2414,7 @@ class Store:
 
         return {"error": f"Unknown action: {action}"}
 
-    def get_rules_for_context(self, project="general", categories=None, phase=None):
+    def get_rules_for_context(self, project="general", categories=None, phase=None, limit=None):
         """Get active rules relevant to current context.
 
         Args:
@@ -2401,6 +2423,15 @@ class Store:
             phase: optional phase filter (v8.0 lazy rule loading). When set, returns
                 core rules (no 'phase:*' tag) plus rules tagged 'phase:<phase>'.
                 Expected values: van|plan|creative|build|reflect|archive.
+            limit: optional cap on the number of rules returned, applied after
+                the phase filter. Defaults to RULES_CONTEXT_LIMIT (MEMORY_RULES_LIMIT
+                env var), which is None (no cap) unless set. 0 means return no rules.
+                Negative values are rejected with an error.
+
+        Note: fire_count/last_fired are bumped ONLY for rules actually returned
+        (post phase-filter, post-limit). Those columns feed self_patterns'
+        rule_effectiveness report and its stale-rule query, so a narrow
+        `limit`/`MEMORY_RULES_LIMIT` also narrows that effectiveness telemetry.
         """
         VALID_PHASES = {"van", "plan", "creative", "build", "reflect", "archive"}
         if phase is not None and phase not in VALID_PHASES:
@@ -2408,6 +2439,8 @@ class Store:
                 "error": f"Unknown phase '{phase}'. "
                          f"Expected one of: {sorted(VALID_PHASES)}",
             }
+        if limit is not None and limit < 0:
+            return {"error": f"limit must be >= 0, got {limit}"}
 
         scopes = ["'global'", f"'project:{project}'"]
         if categories:
@@ -2415,7 +2448,9 @@ class Store:
         rows = self.q(f"""
             SELECT * FROM rules
             WHERE status='active' AND scope IN ({','.join(scopes)})
-            ORDER BY priority DESC, success_rate DESC LIMIT 20
+            ORDER BY priority DESC,
+                     {_RULE_SCORE_SQL} DESC,
+                     created_at DESC
         """)
 
         if phase is not None:
@@ -2436,13 +2471,20 @@ class Store:
                 # else: rule is scoped to a different phase — skip
             rows = filtered
 
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        for r in rows:
+        total_matched = len(rows)
+        effective = limit if limit is not None else RULES_CONTEXT_LIMIT
+        if effective is not None:
+            rows = rows[:effective]
+
+        if rows:
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            placeholders = ",".join("?" * len(rows))
             self.db.execute(
-                "UPDATE rules SET fire_count=fire_count+1, last_fired=?, updated_at=? WHERE id=?",
-                (now, now, r["id"]))
-        self.db.commit()
-        result = {"rules_count": len(rows), "rules": rows}
+                f"UPDATE rules SET fire_count=fire_count+1, last_fired=?, updated_at=? "
+                f"WHERE id IN ({placeholders})",
+                (now, now, *(r["id"] for r in rows)))
+            self.db.commit()
+        result = {"rules_count": len(rows), "total_matched": total_matched, "rules": rows}
         if phase is not None:
             result["phase_filter"] = phase
         return result
@@ -4185,6 +4227,11 @@ async def list_tools():
                         "Call at SESSION START to load rules. Returns rules filtered by project and scope. "
                         "v8.0: pass `phase` to lazy-load rules relevant to current task phase — core "
                         "rules (no phase tag) + rules tagged phase:<X>. Cuts prompt tokens ~70%. "
+                        "No result cap by default — all matching active rules are returned unless "
+                        "`limit` is passed or the MEMORY_RULES_LIMIT env var is set. "
+                        "Only rules actually returned get fire_count/last_fired bumped, which "
+                        "feeds self_patterns rule_effectiveness — narrowing this limit also "
+                        "narrows that telemetry. "
                         "After task completion, rate rules: self_rules(action='rate', id=X, success=true/false).",
             inputSchema={
                 "type": "object",
@@ -4196,6 +4243,10 @@ async def list_tools():
                               "enum": ["van", "plan", "creative", "build", "reflect", "archive"],
                               "description": "Optional: lazy-load only rules relevant to this phase "
                                              "(core + phase-specific). Omit to get all rules."},
+                    "limit": {"type": "integer", "minimum": 0,
+                              "description": "Optional cap on number of rules returned, applied after "
+                                             "the phase filter. Defaults to the MEMORY_RULES_LIMIT env "
+                                             "var (unset = no cap)."},
                 },
             },
         ),
@@ -5726,7 +5777,8 @@ async def _do(name, a):
 
     elif name == "self_rules_context":
         return J(store.get_rules_for_context(
-            a.get("project", "general"), a.get("categories"), a.get("phase")))
+            project=a.get("project", "general"), categories=a.get("categories"),
+            phase=a.get("phase"), limit=a.get("limit")))
 
     elif name == "rule_set_phase":
         return J(store.set_rule_phase(a["rule_id"], a.get("phase")))

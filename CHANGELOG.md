@@ -4,6 +4,42 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed — `self_rules_context` silently dropped active rules
+- `get_rules_for_context` had a hardcoded `LIMIT 20`, so projects with more
+  than 20 active rules silently lost the rest. Removed the SQL limit; added
+  an optional `limit` parameter and a `MEMORY_RULES_LIMIT` env var (default:
+  no cap).
+- Ranking previously sorted `success_rate DESC`, which put unrated new rules
+  (0 successes, 0 fails → success_rate 0.0) below rules with recorded
+  failures. Unrated rules now score as neutral (0.5) and ties break by
+  `created_at DESC` (newest first).
+- The `phase` filter ran after the SQL limit, so a phase-tagged rule ranked
+  below the cap could never load. Order is now: fetch (unlimited) → phase
+  filter → `limit` → `fire_count` increment (touches only returned rules).
+
+### Fixed — follow-up review findings on the above
+- `MEMORY_RULES_LIMIT=<non-integer>` used to crash the server at import
+  (`int()` on an unparsable value). Parsing is now isolated in
+  `_read_rules_limit()`, which logs a warning and falls back to no cap
+  instead of raising.
+- `get_rules_for_context` now rejects a negative `limit` with `{"error":
+  ...}` before querying, mirroring the existing bad-`phase` guard.
+- The per-row `fire_count`/`last_fired` UPDATE loop is now a single batched
+  `UPDATE ... WHERE id IN (...)` over the returned rule ids (only fires when
+  rows were actually returned) — only returned rules get their telemetry
+  bumped, and those columns feed `self_patterns`' `rule_effectiveness`
+  report and stale-rule query, so a narrow `MEMORY_RULES_LIMIT` also narrows
+  that telemetry.
+- The response now includes `total_matched` (count after the phase filter,
+  before truncation) alongside `rules_count` (count actually returned), so
+  callers can tell "all matching rules" from "top N of more".
+- The ranking expression (unrated rules score 0.5, tie-break by
+  `created_at DESC`) is now a single module-level constant
+  (`_RULE_SCORE_SQL`), shared by `get_rules_for_context` and
+  `manage_rule(action="list")` so both order consistently.
+
 ## [12.4.0] — 2026-05-26 — 100% functional through every install path
 
 `npx connect`, `bash install.sh`, `docker run`, `docker compose up` — same
