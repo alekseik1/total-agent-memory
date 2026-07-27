@@ -39,6 +39,14 @@ and versions use [Semantic Versioning](https://semver.org/).
   `created_at DESC`) is now a single module-level constant
   (`_RULE_SCORE_SQL`), shared by `get_rules_for_context` and
   `manage_rule(action="list")` so both order consistently.
+- `manage_rule(action="list")` (used by `self_rules(action='list')`) had the
+  same silent-drop defect via a hardcoded `LIMIT 30` — 55 active rules would
+  show 30 with no signal. Removed the SQL limit; `list` now takes the same
+  optional `limit` (rejecting negative values with the same `{"error": ...}`
+  shape) and falls back to `RULES_CONTEXT_LIMIT`/`MEMORY_RULES_LIMIT`. The
+  response now also exposes `total_matched` (pre-truncation count) alongside
+  the existing `total` (count actually returned). The `self_rules` tool
+  schema gained a matching `limit` input.
 
 ## [12.4.0] — 2026-05-26 — 100% functional through every install path
 

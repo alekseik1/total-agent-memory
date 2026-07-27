@@ -2334,6 +2334,12 @@ class Store:
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         if action == "list":
+            # `limit` defaults to RULES_CONTEXT_LIMIT (MEMORY_RULES_LIMIT env
+            # var, unset = no cap), same contract as get_rules_for_context.
+            limit = kw.get("limit")
+            if limit is not None and limit < 0:
+                return {"error": f"limit must be >= 0, got {limit}"}
+
             conds, params = ["status='active'"], []
             if kw.get("project"):
                 conds.append("(project=? OR scope='global')")
@@ -2342,8 +2348,13 @@ class Store:
                 conds.append("scope=?"); params.append(kw["scope"])
             rows = self.q(
                 f"SELECT * FROM rules WHERE {' AND '.join(conds)} "
-                f"ORDER BY priority DESC, {_RULE_SCORE_SQL} DESC LIMIT 30", params)
-            return {"rules": rows, "total": len(rows)}
+                f"ORDER BY priority DESC, {_RULE_SCORE_SQL} DESC", params)
+
+            total_matched = len(rows)
+            effective = limit if limit is not None else RULES_CONTEXT_LIMIT
+            if effective is not None:
+                rows = rows[:effective]
+            return {"rules": rows, "total": len(rows), "total_matched": total_matched}
 
         elif action == "fire":
             self.db.execute(
@@ -4164,7 +4175,9 @@ async def list_tools():
             description="Manage behavioral rules (SOUL). Rules are promoted insights that shape agent behavior. "
                         "Actions: list, fire (record relevance), rate (success=true/false), "
                         "suspend, activate, retire, add_manual. "
-                        "Auto-suspend: success_rate < 0.2 after 10+ fires.",
+                        "Auto-suspend: success_rate < 0.2 after 10+ fires. "
+                        "For list: no result cap by default — all matching active rules are "
+                        "returned unless `limit` is passed or the MEMORY_RULES_LIMIT env var is set.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -4179,6 +4192,9 @@ async def list_tools():
                     "priority": {"type": "integer", "default": 5, "description": "1-10"},
                     "project": {"type": "string", "default": "general"},
                     "tags": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer", "minimum": 0,
+                              "description": "For list: optional cap on number of rules returned. "
+                                             "Defaults to the MEMORY_RULES_LIMIT env var (unset = no cap)."},
                 },
                 "required": ["action"],
             },

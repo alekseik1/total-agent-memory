@@ -279,3 +279,51 @@ def test_self_rules_context_handler_honours_limit_via_real_inject_path(live_stor
     out = json.loads(raw)
     assert out["rules_count"] == 3
     assert out["total_matched"] == 25
+
+
+def test_manage_rule_list_no_cap_returns_all_35_active_rules(store):
+    """35 active rules seeded → manage_rule(action="list") returns all 35
+    (regression against the old hardcoded LIMIT 30)."""
+    for i in range(35):
+        _add_rule(store, f"rule {i}")
+
+    r = store.manage_rule("sess-limit-test", "list", project="myproj")
+    assert r["total"] == 35
+    assert r["total_matched"] == 35
+    assert len(r["rules"]) == 35
+
+
+def test_manage_rule_list_explicit_limit_caps_result(store):
+    """limit=10 parameter → exactly 10 returned, total_matched stays 35."""
+    for i in range(35):
+        _add_rule(store, f"rule {i}")
+
+    r = store.manage_rule("sess-limit-test", "list", project="myproj", limit=10)
+    assert r["total"] == 10
+    assert r["total_matched"] == 35
+    assert len(r["rules"]) == 10
+
+
+def test_manage_rule_list_negative_limit_returns_error(store):
+    """A negative `limit` returns the same {"error": ...} shape as
+    get_rules_for_context's bad-limit guard, and does not truncate."""
+    for i in range(5):
+        _add_rule(store, f"rule {i}")
+
+    r = store.manage_rule("sess-limit-test", "list", project="myproj", limit=-1)
+    assert "error" in r
+    assert "rules" not in r
+
+
+def test_self_rules_handler_list_honours_limit_via_real_inject_path(live_store):
+    """Drive the MCP dispatcher end-to-end (`server._do`) for self_rules,
+    not the Store method directly, so a wiring/signature regression in the
+    handler would be caught."""
+    s, server = live_store
+    for i in range(35):
+        _add_rule(s, f"rule {i}")
+
+    raw = asyncio.run(server._do("self_rules", {"action": "list", "project": "myproj", "limit": 10}))
+    out = json.loads(raw)
+    assert out["total"] == 10
+    assert out["total_matched"] == 35
