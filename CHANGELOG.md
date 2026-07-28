@@ -71,6 +71,22 @@ and versions use [Semantic Versioning](https://semver.org/).
   `NOT NULL` `session_id`; the origin session row is seeded once in the base
   schema rather than written per merge.
 
+### Fixed — `ContentValidator`'s absolute-path check never matched real paths
+- The old path regex consumed exactly one character after the leading slash,
+  so it only ever matched single-char path segments (e.g. `/x/`) and never
+  real absolute paths — the guard was silently inert. The new pattern
+  matches any-depth absolute/tilde paths, gates single-segment relative
+  paths on a recognized code/doc extension (so `/compact`, `python/3.12`,
+  `v1.2/2.0` and similar prose aren't mistaken for paths), and normalizes
+  away Markdown emphasis/backticks before comparing so a path re-wrapped in
+  `` `code` `` or `**bold**` by an LLM is still recognized as preserved.
+- Path enforcement is now an explicit per-call argument
+  (`ContentValidator.validate(..., strict_paths=...)`) rather than only a
+  constructor-level default: `fact_merger` (a merge replaces its sources) and
+  `representations_queue`'s `compressed` view (documented as must-preserve)
+  both now opt in explicitly at the call site; `summary`/`keywords`/
+  `questions` views remain unvalidated and unaffected.
+
 ## [12.4.0] — 2026-05-26 — 100% functional through every install path
 
 `npx connect`, `bash install.sh`, `docker run`, `docker compose up` — same

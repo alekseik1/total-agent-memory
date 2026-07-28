@@ -131,6 +131,33 @@ def test_queue_rejects_compressed_that_loses_url(cmp_db):
     assert "compressed" not in kinds  # compressed rejected by validator
 
 
+def test_queue_rejects_compressed_that_loses_path(cmp_db):
+    """Compressed output missing an absolute path is silently dropped (raw still stored)."""
+    from representations_queue import RepresentationsQueue
+
+    q = RepresentationsQueue(cmp_db)
+    path = "/Users/alice/project/src/server.py"
+    original = f"Edit {path} to fix the bug — do not lose this path. " * 30
+    kid = _add(cmp_db, original)
+    q.enqueue(kid)
+
+    def bad_gen(content, project=None):
+        return {"compressed": "Short version without the path."}
+
+    stats = q.process_pending(bad_gen, _fake_emb, "fake", limit=1)
+    assert stats["processed"] == 1
+
+    kinds = {
+        r["representation"]
+        for r in cmp_db.execute(
+            "SELECT representation FROM knowledge_representations WHERE knowledge_id=?",
+            (kid,),
+        ).fetchall()
+    }
+    assert "raw" in kinds
+    assert "compressed" not in kinds
+
+
 def test_queue_stores_compressed_preserving_code_block(cmp_db):
     from representations_queue import RepresentationsQueue
 

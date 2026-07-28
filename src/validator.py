@@ -31,8 +31,42 @@ _CODE_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _URL_RE = re.compile(r"https?://[^\s<>`'\"()]+")
 _URL_TRAILING_PUNCT = ".,;:!?"
 
-# Absolute paths: /Users/..., /etc/..., /home/...  AND tilde paths ~/...
-_PATH_RE = re.compile(r"(?:~|/[A-Za-z0-9_.-])(?:/[A-Za-z0-9_.\-]+)+/?")
+# Markdown emphasis/backticks are stripped before path extraction so the same
+# path is found whether or not an LLM wrapped it in `code` or **bold** —
+# extraction must be symmetric between original and transformed text.
+_MARKDOWN_STRIP_RE = re.compile(r"[`*]")
+
+# Absolute paths (/Users/..., /etc/...), tilde paths (~/...), and relative
+# paths that carry a recognized code/doc extension (alembic/versions/x.py).
+# A slash may only start a path at the beginning of the text/line or after
+# whitespace/quote/bracket/`=`/`:`/`,`, so prose like "EU/Russia" or
+# "SQLAlchemy/Postgres" — and "db=/path" style assignments — are handled
+# correctly (matched or ignored, as appropriate) rather than silently
+# producing no match at all.
+_PATH_BOUNDARY = r"""(?:(?<=^)|(?<=[\s'"(\[{=:,]))"""
+
+# Extensions that plausibly identify a real code/doc file. Used to gate the
+# relative-path branch so version/tool pairs (python/3.12, 1/6.5, v1.2/2.0)
+# and date ranges (27.07/28.07) are never mistaken for paths.
+_CODE_EXT = r"(?:py|sql|md|json|ya?ml|toml|sh|ts|js|txt|ini|cfg|go|rs|tsx|jsx)"
+
+_SEG = r"[A-Za-z0-9_.\-]+"
+# Absolute body: either >=2 segments or a trailing slash (single `(seg/)+`
+# repetition with an empty final segment covers both), or a single segment
+# with a recognized extension (/README.md). This is what excludes bare
+# single-segment slash tokens like slash-commands ("/compact", "/jira-task").
+_ABS_MULTI_OR_TRAILING = rf"(?:{_SEG}/)+(?:{_SEG})?"
+_ABS_EXT_SINGLE = rf"{_SEG}\.{_CODE_EXT}\b"
+_ABS_BODY = rf"(?:{_ABS_MULTI_OR_TRAILING}|{_ABS_EXT_SINGLE})"
+
+# Relative body: >=2 segments, final one gated on _CODE_EXT (not "any
+# extension") so numeric/version tuples don't qualify as extensions.
+_REL_BODY = rf"{_SEG}(?:/{_SEG})+\.{_CODE_EXT}\b"
+
+_PATH_RE = re.compile(
+    _PATH_BOUNDARY + rf"(?:~?/{_ABS_BODY}|{_REL_BODY})",
+    re.MULTILINE,
+)
 
 # Markdown headings (line-starting #..######).
 _HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S", re.MULTILINE)
@@ -99,6 +133,7 @@ def _extract_paths(text: str) -> set[str]:
     cleaned = text
     for u in urls:
         cleaned = cleaned.replace(u, " ")
+    cleaned = _MARKDOWN_STRIP_RE.sub("", cleaned)
     paths: set[str] = set()
     for m in _PATH_RE.findall(cleaned):
         # Strip trailing punctuation (comma/period/etc.) that regex may include.
@@ -131,10 +166,38 @@ def _extract_inline_code(text: str) -> set[str]:
 class ContentValidator:
     """Check that a transformed text preserves critical elements of the original."""
 
-    def __init__(self, bullet_tolerance: float = BULLET_TOLERANCE) -> None:
+    def __init__(
+        self,
+        bullet_tolerance: float = BULLET_TOLERANCE,
+        strict_paths: bool = False,
+    ) -> None:
+        """
+        Args:
+            bullet_tolerance: fraction of bullet-count drop allowed before
+                flagging an error (see the bullet-count check below).
+            strict_paths: instance-level default for the `strict_paths`
+                argument to `validate()`, used when a call omits it.
+        """
         self.bullet_tolerance = bullet_tolerance
+        self.strict_paths = strict_paths
 
-    def validate(self, original: str, transformed: str) -> ValidationResult:
+    def validate(
+        self,
+        original: str,
+        transformed: str,
+        strict_paths: bool | None = None,
+    ) -> ValidationResult:
+        """
+        Args:
+            strict_paths: enforce file-path preservation (see `_PATH_RE`) for
+                this call. Callers producing deliberately lossy derived views
+                legitimately do not repeat source file paths and should pass
+                False (or omit it and rely on a non-strict instance default);
+                callers whose output REPLACES the original (e.g. fact
+                merging) must pass True explicitly. Defaults to the instance's
+                `self.strict_paths` when omitted.
+        """
+        strict_paths = self.strict_paths if strict_paths is None else strict_paths
         errors: list[str] = []
         warnings: list[str] = []
 
@@ -157,11 +220,12 @@ class ContentValidator:
         for u in orig_urls - trans_urls:
             errors.append(f"url lost: {u}")
 
-        # ── Paths
-        orig_paths = _extract_paths(original)
-        trans_paths = _extract_paths(transformed)
-        for p in orig_paths - trans_paths:
-            errors.append(f"path lost: {p}")
+        # ── Paths (opt-in; see `strict_paths` param)
+        if strict_paths:
+            orig_paths = _extract_paths(original)
+            trans_paths = _extract_paths(transformed)
+            for p in orig_paths - trans_paths:
+                errors.append(f"path lost: {p}")
 
         # ── Inline code
         orig_inline = _extract_inline_code(original)

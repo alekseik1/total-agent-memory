@@ -119,6 +119,23 @@ def test_merge_creates_consolidated_record_and_archives_sources(merger_db, monke
         assert row["superseded_by"] == result["merged_id"]
 
 
+def test_merge_rejected_when_llm_drops_a_path(merger_db):
+    from fact_merger import FactMerger
+
+    path = "/Users/alice/project/src/server.py"
+    a = _add(merger_db, f"Edit {path} to fix the bug")
+    b = _add(merger_db, f"The file {path} also needs a docstring")
+
+    def drops_path(contents: list[str]) -> str:
+        return "Fix the bug and add a docstring to the server file."
+
+    m = FactMerger(merger_db, similarity_fn=lambda *_: 0.8, llm_merge_fn=drops_path)
+    result = m.merge_cluster([a, b])
+
+    assert result["merged_id"] is None
+    assert path in result["reason"]
+
+
 def test_merged_record_carries_merge_origin(merger_db, monkeypatch):
     import fact_merger as fact_merger_mod
     from fact_merger import MERGE_SESSION_ID, FactMerger
