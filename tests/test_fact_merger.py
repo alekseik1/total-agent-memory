@@ -1,14 +1,3 @@
-"""Tests for semantic fact merger.
-
-Unlike reflection.digest.merge_duplicates (Jaccard >=0.85 — near duplicates),
-this module finds clusters of *related but distinct* facts (cosine 0.70-0.90)
-and asks an LLM to synthesize them into one consolidated fact.
-
-Example:
-  "User uses Go for backend" + "User builds microservices in Go"
-    → "User's primary backend language is Go (used for microservices)"
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -19,11 +8,13 @@ def merger_db(db):
     return db
 
 
-def _add(db, content: str, project: str = "demo", confidence: float = 1.0) -> int:
+def _add(
+    db, content: str, project: str = "demo", confidence: float = 1.0, type: str = "fact"
+) -> int:
     return db.execute(
         "INSERT INTO knowledge (session_id, type, content, project, confidence, created_at) "
-        "VALUES ('s1', 'fact', ?, ?, ?, ?)",
-        (content, project, confidence, "2026-04-14T00:00:00Z"),
+        "VALUES ('s1', ?, ?, ?, ?, ?)",
+        (type, content, project, confidence, "2026-04-14T00:00:00Z"),
     ).lastrowid
 
 
@@ -77,12 +68,73 @@ def test_find_clusters_respects_max_size(merger_db):
     ids = [_add(merger_db, f"fact {i}") for i in range(8)]
 
     def sim(i1: int, i2: int) -> float:
-        return 0.8
+        return 0.9
 
     m = FactMerger(merger_db, similarity_fn=sim)
     clusters = m.find_clusters(project="demo", max_cluster_size=3)
+    assert clusters
     for cl in clusters:
         assert len(cl) <= 3
+
+
+def test_find_clusters_ignores_solution_typed_records(merger_db):
+    from fact_merger import FactMerger
+
+    a = _add(merger_db, "User uses Go for backend", type="fact")
+    b = _add(merger_db, "User builds APIs in Go", type="solution")
+
+    def sim(*_a: int) -> float:
+        return 0.9
+
+    m = FactMerger(merger_db, similarity_fn=sim)
+    clusters = m.find_clusters(project="demo")
+
+    assert clusters == []
+
+
+def test_find_clusters_includes_convention_typed_records(merger_db):
+    from fact_merger import FactMerger
+
+    a = _add(merger_db, "Always use module-level constants", type="convention")
+    b = _add(merger_db, "Prefer module-level constants over classes", type="convention")
+
+    def sim(*_a: int) -> float:
+        return 0.9
+
+    m = FactMerger(merger_db, similarity_fn=sim)
+    clusters = m.find_clusters(project="demo")
+
+    assert clusters == [sorted([a, b])]
+
+
+def test_find_clusters_default_band_excludes_pair_below_threshold(merger_db):
+    from fact_merger import FactMerger
+
+    a = _add(merger_db, "User uses Go for backend")
+    b = _add(merger_db, "User builds APIs in Go")
+
+    def sim(*_a: int) -> float:
+        return 0.80
+
+    m = FactMerger(merger_db, similarity_fn=sim)
+    clusters = m.find_clusters(project="demo")
+
+    assert clusters == []
+
+
+def test_find_clusters_default_band_includes_pair_above_threshold(merger_db):
+    from fact_merger import FactMerger
+
+    a = _add(merger_db, "User uses Go for backend")
+    b = _add(merger_db, "User builds APIs in Go")
+
+    def sim(*_a: int) -> float:
+        return 0.90
+
+    m = FactMerger(merger_db, similarity_fn=sim)
+    clusters = m.find_clusters(project="demo")
+
+    assert clusters == [sorted([a, b])]
 
 
 # ──────────────────────────────────────────────
@@ -334,6 +386,27 @@ def test_merge_preserves_provenance_in_audit_table(merger_db):
     assert audit["merged_knowledge_id"] == result["merged_id"]
 
 
+def test_merge_audit_rationale_reflects_configured_thresholds(merger_db):
+    from fact_merger import DEFAULT_MAX_SIMILARITY, DEFAULT_MIN_SIMILARITY, FactMerger
+
+    a = _add(merger_db, "fact a")
+    b = _add(merger_db, "fact b")
+
+    m = FactMerger(
+        merger_db,
+        similarity_fn=lambda *_: 0.9,
+        llm_merge_fn=lambda contents: "merged summary",
+    )
+    result = m.merge_cluster([a, b])
+
+    rationale = merger_db.execute(
+        "SELECT rationale FROM knowledge_merges WHERE merged_knowledge_id=?",
+        (result["merged_id"],),
+    ).fetchone()["rationale"]
+    assert str(DEFAULT_MIN_SIMILARITY) in rationale
+    assert str(DEFAULT_MAX_SIMILARITY) in rationale
+
+
 def test_merge_skips_single_item(merger_db):
     from fact_merger import FactMerger
 
@@ -390,9 +463,9 @@ def test_run_processes_all_clusters(merger_db):
         go_pair = frozenset({a, b})
         docker_pair = frozenset({c, d})
         if frozenset({i1, i2}) == go_pair:
-            return 0.82
+            return 0.92
         if frozenset({i1, i2}) == docker_pair:
-            return 0.80
+            return 0.90
         return 0.15
 
     def merge(contents: list[str]) -> str:

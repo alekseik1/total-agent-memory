@@ -2,8 +2,20 @@
 
 Complements `reflection.digest.merge_duplicates` (which handles near-duplicates
 at Jaccard >=0.85). This module finds clusters of related records — cosine
-similarity in the 0.70-0.95 band — and asks an LLM to synthesize them into a
+similarity in the high-similarity band defined by DEFAULT_MIN_SIMILARITY and
+DEFAULT_MAX_SIMILARITY below — and asks an LLM to synthesize them into a
 single consolidated fact. Validator guards against LLM information loss.
+
+Only records whose type is in MERGEABLE_TYPES are candidates. The merged
+record the INSERT produces is always written as type='fact', so merging a
+`solution`/`decision`/`lesson` row would silently relabel it. Those types are
+episodic work-log entries (what was done, when, in what order) rather than
+timeless claims: two similar entries are usually two distinct events — a
+sequence of steps, two separate edits to the same thing, or a decision that
+was reversed and re-reversed — and merging them would destroy the temporal
+order that contradiction_detector and the temporal KG rely on. `fact` and
+`convention` records carry no such sequence, so they are the only safe
+candidates.
 
 Example:
     "User uses Go for backend" + "User builds APIs in Go"
@@ -45,6 +57,16 @@ VectorsFn = Callable[[list[int]], dict[int, Sequence[float]]]
 # session a synthesized record belongs to is composition, not something this
 # class (contract: "db: SQLite connection") should decide per merge.
 MERGE_SESSION_ID = "fact-merge"
+
+# Only these types are timeless claims that can legitimately be restated as
+# one synthesized sentence. `solution`/`decision`/`lesson` rows are episodic
+# work-log entries — see the module docstring for why merging those is unsafe.
+MERGEABLE_TYPES = ("fact", "convention")
+
+# Defaults for find_clusters' merge band. Referenced (not restated) by the
+# `knowledge_merges` audit rationale in merge_cluster, so the two can't drift.
+DEFAULT_MIN_SIMILARITY = 0.85
+DEFAULT_MAX_SIMILARITY = 0.95
 
 
 class FactMerger:
@@ -89,8 +111,8 @@ class FactMerger:
     def find_clusters(
         self,
         project: str | None = None,
-        min_similarity: float = 0.72,
-        max_similarity: float = 0.95,
+        min_similarity: float = DEFAULT_MIN_SIMILARITY,
+        max_similarity: float = DEFAULT_MAX_SIMILARITY,
         max_cluster_size: int = 5,
     ) -> list[list[int]]:
         """Find clusters of related (but not duplicate) knowledge records.
@@ -231,16 +253,19 @@ class FactMerger:
         return pairs
 
     def _candidate_rows(self, project: str | None) -> list[sqlite3.Row]:
+        type_placeholders = ",".join("?" * len(MERGEABLE_TYPES))
         if project:
             return self.db.execute(
                 "SELECT id, content FROM knowledge "
                 "WHERE status='active' AND project=? AND superseded_by IS NULL "
-                "ORDER BY id",
-                (project,),
+                f"AND type IN ({type_placeholders}) ORDER BY id",
+                (project, *MERGEABLE_TYPES),
             ).fetchall()
         return self.db.execute(
             "SELECT id, content FROM knowledge "
-            "WHERE status='active' AND superseded_by IS NULL ORDER BY id"
+            "WHERE status='active' AND superseded_by IS NULL "
+            f"AND type IN ({type_placeholders}) ORDER BY id",
+            MERGEABLE_TYPES,
         ).fetchall()
 
     # ──────────────────────────────────────────────
@@ -317,7 +342,7 @@ class FactMerger:
             (
                 merged_id,
                 json.dumps([r["id"] for r in rows]),
-                "semantic fact merge (cosine 0.72-0.95)",
+                f"semantic fact merge (cosine {DEFAULT_MIN_SIMILARITY}-{DEFAULT_MAX_SIMILARITY})",
                 _now(),
             ),
         )

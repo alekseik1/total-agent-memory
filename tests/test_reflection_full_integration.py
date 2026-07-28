@@ -368,7 +368,7 @@ def test_run_fact_merger_wires_hook_and_vectors_fn(refl_db, monkeypatch):
     refl_db.commit()
 
     agent = ReflectionAgent(refl_db, embedder=lambda text: [0.1, 0.2])
-    monkeypatch.setattr(agent, "_make_cosine_similarity_fn", lambda: (lambda a, b: 0.8))
+    monkeypatch.setattr(agent, "_make_cosine_similarity_fn", lambda: (lambda a, b: 0.9))
     monkeypatch.setattr(
         agent, "_make_llm_merge_fn", lambda: (lambda contents: "User writes Go backends and APIs.")
     )
