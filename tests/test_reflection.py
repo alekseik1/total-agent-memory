@@ -34,6 +34,70 @@ class TestDigestPhase:
         statuses = [r[0] for r in rows]
         assert "superseded" in statuses
 
+    def test_merge_duplicates_cheap_bound_cascade_matches_full_ratio(self, db):
+        from reflection.digest import DigestPhase
+
+        base = (
+            "The deployment pipeline runs unit tests then integration "
+            "tests before pushing to staging"
+        )
+        above_085 = (
+            "TheXdeploymXnXXpiXeline runsXunXt tXsts then integratiXn "
+            "tests beforeXpushiXg to XtagiXg"
+        )
+        below_085 = (
+            "TheXXeploymXnXXpiXeline runsXunXt tXsts then integratiXn "
+            "tests beforeXpushiXg to XtagiXg"
+        )
+        unrelated = (
+            "Completely unrelated content about a totally different "
+            "topic like gardening tips"
+        )
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def insert(project, content):
+            cur = db.execute(
+                "INSERT INTO knowledge (session_id, type, content, project, status, "
+                "confidence, recall_count, created_at, updated_at) "
+                "VALUES ('s1', 'fact', ?, ?, 'active', 1.0, 0, ?, ?)",
+                (content, project, now, now),
+            )
+            return cur.lastrowid
+
+        id_identical_a = insert("p_identical", base)
+        id_identical_b = insert("p_identical", base)
+        id_above_a = insert("p_above", base)
+        id_above_b = insert("p_above", above_085)
+        id_below_a = insert("p_below", base)
+        id_below_b = insert("p_below", below_085)
+        id_diff_a = insert("p_diff", base)
+        id_diff_b = insert("p_diff", unrelated)
+        db.commit()
+
+        digest = DigestPhase(db)
+        merged = digest.merge_duplicates()
+
+        assert merged == 2
+
+        def status_of(kid):
+            row = db.execute(
+                "SELECT status FROM knowledge WHERE id = ?", (kid,)
+            ).fetchone()
+            return row["status"]
+
+        identical_statuses = {status_of(id_identical_a), status_of(id_identical_b)}
+        assert identical_statuses == {"active", "superseded"}
+
+        above_statuses = {status_of(id_above_a), status_of(id_above_b)}
+        assert above_statuses == {"active", "superseded"}
+
+        assert status_of(id_below_a) == "active"
+        assert status_of(id_below_b) == "active"
+
+        assert status_of(id_diff_a) == "active"
+        assert status_of(id_diff_b) == "active"
+
     def test_intelligent_decay_preserves_failures(self, db):
         from reflection.digest import DigestPhase
         digest = DigestPhase(db)

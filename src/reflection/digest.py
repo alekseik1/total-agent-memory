@@ -111,6 +111,23 @@ class DigestPhase:
         Find and merge semantic duplicates in knowledge table.
         Uses content similarity (SequenceMatcher).
         Returns number of merged records.
+
+        Before paying for the O(len_a * len_b) SequenceMatcher.ratio() call,
+        each pair is screened with real_quick_ratio()/quick_ratio(). Both are
+        documented, mathematically proven upper bounds on ratio() (ratio() <=
+        quick_ratio() <= real_quick_ratio()), and unlike ratio() itself they
+        are symmetric in argument order (verified empirically: swapping a/b
+        never changes their value, while it CAN change ratio() itself). That
+        means the cheap bounds can safely be computed in whatever order is
+        fastest to cache, while the actual ratio() call below is kept in the
+        exact original argument order (content_a, content_b) so its numeric
+        result -- and therefore which pairs cross `threshold` -- is unchanged.
+
+        The cheap-bound matcher fixes group_rows[i]'s content as seq2 (`b`)
+        for the whole inner loop and only swaps seq1 (`a`) per candidate j,
+        per the stdlib's own guidance for comparing one sequence against
+        many: this reuses the cached per-b state (fullbcount/b2j) instead of
+        rebuilding it on every pair.
         """
         rows = self.db.execute(
             """SELECT id, type, content, project, tags, confidence,
@@ -138,19 +155,34 @@ class DigestPhase:
                 if group_rows[i]["id"] in merged_ids:
                     continue
 
+                content_a = group_rows[i]["content"]
+                len_a = len(content_a)
+                if len_a == 0:
+                    continue
+
+                # Cheap-bound matcher: content_a fixed as seq2 for the whole
+                # inner loop so fullbcount/b2j are cached once per i, not
+                # rebuilt per pair. See docstring above for why this is safe.
+                quick_sm = SequenceMatcher(None, "", content_a)
+
                 for j in range(i + 1, len(group_rows)):
                     if group_rows[j]["id"] in merged_ids:
                         continue
 
-                    content_a = group_rows[i]["content"]
                     content_b = group_rows[j]["content"]
 
                     # Quick length check to skip obviously different records
-                    len_a, len_b = len(content_a), len(content_b)
-                    if len_a == 0 or len_b == 0:
+                    len_b = len(content_b)
+                    if len_b == 0:
                         continue
                     ratio = min(len_a, len_b) / max(len_a, len_b)
                     if ratio < 0.5:
+                        continue
+
+                    quick_sm.set_seq1(content_b)
+                    if quick_sm.real_quick_ratio() < threshold:
+                        continue
+                    if quick_sm.quick_ratio() < threshold:
                         continue
 
                     similarity = SequenceMatcher(
