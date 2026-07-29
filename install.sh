@@ -141,6 +141,8 @@ _systemd_units() {
     cat <<'EOF'
 claude-memory-reflection.service
 claude-memory-reflection.path
+claude-memory-reflection-full.service
+claude-memory-reflection-full.timer
 claude-memory-dashboard.service
 claude-memory-orphan-backfill.service
 claude-memory-orphan-backfill.timer
@@ -153,6 +155,7 @@ EOF
 _systemd_enable_units() {
     cat <<'EOF'
 claude-memory-reflection.path
+claude-memory-reflection-full.timer
 claude-memory-dashboard.service
 claude-memory-orphan-backfill.timer
 claude-memory-check-updates.timer

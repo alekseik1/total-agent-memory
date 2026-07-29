@@ -90,6 +90,8 @@ def test_all_systemd_templates_present():
     expected = [
         "claude-memory-reflection.service",
         "claude-memory-reflection.path",
+        "claude-memory-reflection-full.service",
+        "claude-memory-reflection-full.timer",
         "claude-memory-dashboard.service",
         "claude-memory-orphan-backfill.service",
         "claude-memory-orphan-backfill.timer",
@@ -129,6 +131,8 @@ def test_linux_branch_creates_systemd_user_files(sandbox_home: Path, tmp_path: P
     expected_files = {
         "claude-memory-reflection.service",
         "claude-memory-reflection.path",
+        "claude-memory-reflection-full.service",
+        "claude-memory-reflection-full.timer",
         "claude-memory-dashboard.service",
         "claude-memory-orphan-backfill.service",
         "claude-memory-orphan-backfill.timer",
@@ -164,6 +168,7 @@ def test_linux_enables_units_when_bus_available(sandbox_home: Path, tmp_path: Pa
     calls = systemctl_log.read_text() if systemctl_log.exists() else ""
     assert "--user daemon-reload" in calls, "daemon-reload must be called"
     assert "--user enable --now claude-memory-reflection.path" in calls
+    assert "--user enable --now claude-memory-reflection-full.timer" in calls
     assert "--user enable --now claude-memory-dashboard.service" in calls
     assert "--user enable --now claude-memory-orphan-backfill.timer" in calls
     assert "--user enable --now claude-memory-check-updates.timer" in calls

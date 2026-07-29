@@ -1,0 +1,18 @@
+[Unit]
+Description=Claude Memory — full reflection (digest+synthesize) 4x/day
+Documentation=https://github.com/vbcherepanov/total-agent-memory
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@INSTALL_DIR@
+ExecStart=@INSTALL_DIR@/.venv/bin/python @INSTALL_DIR@/src/tools/run_reflection.py --scope=full
+Environment=TAM_MEMORY_DIR=@MEMORY_DIR@
+Environment=MEMORY_LLM_MODEL=qwen2.5-coder:7b
+Environment=MEMORY_FACT_MERGE_ENABLED=false
+# Full scope runs digest (merge_duplicates/decay/contradictions) + synthesize;
+# give it real headroom instead of the 20min auto-scope timeout.
+TimeoutStartSec=3600
+Nice=10
+StandardOutput=append:@MEMORY_DIR@/logs/reflection-full.log
+StandardError=append:@MEMORY_DIR@/logs/reflection-full.log

@@ -1,0 +1,13 @@
+[Unit]
+Description=Fire full reflection (digest+synthesize) 4x per day (02/08/14/20)
+Documentation=https://github.com/vbcherepanov/total-agent-memory
+
+[Timer]
+# Offset from claude-memory-orphan-backfill.timer (00/06/12/18) so the two
+# jobs don't contend for .reflect.lock / the database at the same time.
+OnCalendar=*-*-* 02,08,14,20:00:00
+Persistent=true
+Unit=claude-memory-reflection-full.service
+
+[Install]
+WantedBy=timers.target

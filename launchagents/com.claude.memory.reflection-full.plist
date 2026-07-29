@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.claude.memory.reflection-full</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__INSTALL_DIR__/.venv/bin/python</string>
+    <string>__INSTALL_DIR__/src/tools/run_reflection.py</string>
+    <string>--scope=full</string>
+  </array>
+
+  <!-- Fire at 02:00, 08:00, 14:00, 20:00 every day (4x per day) --
+       offset from com.claude.memory.orphan-backfill.plist (00/06/12/18)
+       so the two jobs don't contend for .reflect.lock / the database
+       at the same wall-clock minute. No WatchPaths here: cadence for
+       the full (digest+synthesize) scope belongs to this dedicated
+       calendar trigger, not to an on-save escalation. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>2</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>8</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>14</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>20</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+  </array>
+
+  <!-- Don't run at load (avoid double-run on startup) -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- Lower priority so it doesn't fight the MCP server -->
+  <key>Nice</key>
+  <integer>10</integer>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin</string>
+    <key>TAM_MEMORY_DIR</key>
+    <string>__MEMORY_DIR__</string>
+    <key>CLAUDE_MEMORY_DIR</key>
+    <string>__MEMORY_DIR__</string>
+    <key>MEMORY_LLM_MODEL</key>
+    <string>qwen2.5-coder:7b</string>
+    <key>MEMORY_FACT_MERGE_ENABLED</key>
+    <string>false</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__INSTALL_DIR__</string>
+
+  <key>StandardOutPath</key>
+  <string>__MEMORY_DIR__/logs/reflection-full.log</string>
+  <key>StandardErrorPath</key>
+  <string>__MEMORY_DIR__/logs/reflection-full.err</string>
+</dict>
+</plist>
