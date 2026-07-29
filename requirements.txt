@@ -1,4 +1,6 @@
-mcp[cli]>=1.0.0
+# <2: mcp 2.0 removed the @app.list_tools()/@app.call_tool() decorator API
+# that src/server.py relies on; do not widen until those call sites are ported.
+mcp[cli]>=1.0.0,<2
 chromadb>=0.4.0
 sentence-transformers>=2.2.0
 httpx>=0.25.0

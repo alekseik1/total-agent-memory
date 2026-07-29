@@ -37,7 +37,10 @@ source "$DIR/.venv/bin/activate"
 
 echo "→ Installing dependencies..."
 pip install -q --upgrade pip
-pip install -q "mcp[cli]>=1.0.0" chromadb sentence-transformers
+# Install from requirements.txt (single source of truth for version pins,
+# e.g. the mcp<2 cap — src/server.py uses the 1.x @app.list_tools()/
+# @app.call_tool() decorator API that mcp 2.0 removed).
+pip install -q -r "$DIR/requirements.txt"
 
 # 3. Pre-download model
 echo "→ Loading embedding model..."

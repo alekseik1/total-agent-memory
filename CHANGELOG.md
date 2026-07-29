@@ -87,6 +87,66 @@ and versions use [Semantic Versioning](https://semver.org/).
   both now opt in explicitly at the call site; `summary`/`keywords`/
   `questions` views remain unvalidated and unaffected.
 
+### Added — `MEMORY_FACT_MERGE_ENABLED` gate for the fact_merge reflection phase
+- `fact_merge` (semantic clustering + LLM synthesis of related facts) is now
+  gated by `config.is_fact_merge_enabled()` / `MEMORY_FACT_MERGE_ENABLED`,
+  default `false`. Cosine similarity alone can't distinguish "the same claim
+  twice" from "the same subject at two different points in time" — unattended
+  merging isn't safe yet, so it's opt-in until that's addressed.
+- `_run_fact_merger` returns `{"clusters_found": 0, "merged": 0, "rejected":
+  0, "disabled": True}` when the gate is off, without importing/constructing
+  `FactMerger`. `"disabled"` is deliberately not one of the marker keys
+  `phase_errors()` treats as a failure (`error`/`deferred`/`skipped_reason`/
+  non-numeric `skipped`), so a disabled phase doesn't show up as a fake error
+  in every saved reflection report — documented directly in `phase_errors()`'s
+  docstring.
+- Wired `MEMORY_FACT_MERGE_ENABLED=false` into every path that runs the
+  reflection phase without inheriting a shell environment:
+  `launchagents/com.claude.memory.reflection.plist`,
+  `systemd/claude-memory-reflection.service`, and the `reflection` service in
+  `docker-compose.yml`. Documented in `.env.example` and the README env table
+  next to `MEMORY_ENRICHMENT_ENABLED`.
+
+### Fixed — `install.sh` test coverage could silently upgrade the dev venv's `mcp` package
+- `test_launchagents_substitute_install_dir_and_memory_dir` ran real
+  `install.sh` with `INSTALL_TEST_MODE=skip-heavy`, a value the script never
+  actually checked (only the literal `"1"` skipped anything), so it silently
+  ran the full pip install/upgrade path against the ambient venv. First fix
+  attempt (`INSTALL_SKIP_PIP=1` with no `INSTALL_TEST_MODE`) turned out to
+  have the same defect in a different shape: it left the model pre-download,
+  Ollama probe, `claude mcp add-json` CLI call, and
+  `dashboard-service.sh print-management` all running for real. Replaced it
+  with `INSTALL_FORCE_LAUNCHAGENTS=1`, a narrow opt-in checked alongside
+  `INSTALL_TEST_MODE=1` at the LaunchAgents step only — the test now sets
+  both env vars, so every other heavy step stays skipped and only the
+  LaunchAgent install branch re-enables.
+- `INSTALL_SKIP_PIP=1`'s ensurepip pre-flight was gated on `INSTALL_TEST_MODE`
+  instead of on itself, so it still ran the venv-module check under
+  `INSTALL_SKIP_PIP=1` with `INSTALL_TEST_MODE=0` despite claiming to skip
+  venv/pip work. Now gated on the same switch (`SKIP_PIP`) as the work it
+  protects.
+- `INSTALL_SKIP_PIP=1` also unconditionally pointed `PY_PATH` at the system
+  `python3`, even when an existing `.venv` was present — and `PY_PATH` isn't
+  test-only, it gets written into the IDE's MCP config. Now prefers the
+  existing venv's interpreter when one exists.
+- The same test also asserted the generated plist never contains the literal
+  string `claude-memory-server`, which fails for anyone whose clone legitimately
+  carries that directory name — the `sed` substitution was working correctly.
+  Rewrote the assertion to check the actual intent: no `__INSTALL_DIR__` /
+  `__MEMORY_DIR__` / `__HOME__` placeholder tokens survive, and the
+  substituted values equal the `INSTALL_DIR` / `MEMORY_DIR` / `HOME` the
+  installer was actually given — guarded against silently checking nothing
+  by asserting at least one placeholder was actually present in each plist's
+  source template.
+- Pinned `mcp[cli]>=1.0.0,<2` in `requirements.txt` and `pyproject.toml`:
+  `src/server.py` uses the 1.x `@app.list_tools()`/`@app.call_tool()`
+  decorator API, which `mcp` 2.0 removed; the unbounded `>=1.0.0` constraint
+  let a routine `pip install --upgrade` silently break the server.
+  `setup.sh`'s Manual Setup path had its own unbounded `mcp[cli]>=1.0.0`
+  pin, reproducing the same breakage — it now installs from
+  `requirements.txt` instead of hand-rolling its dependency list, so there is
+  a single source of truth for the pin.
+
 ## [12.4.0] — 2026-05-26 — 100% functional through every install path
 
 `npx connect`, `bash install.sh`, `docker run`, `docker compose up` — same
