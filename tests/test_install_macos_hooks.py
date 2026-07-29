@@ -323,47 +323,68 @@ def test_launchagents_substitute_install_dir_and_memory_dir(
     `__HOME__/claude-memory-server/...` — any user who cloned the repo
     under a different name had a non-functional reflection daemon.
 
-    This test runs install.sh WITHOUT INSTALL_TEST_MODE so the
-    LaunchAgent install branch actually fires, with a fake launchctl.
+    This test runs install.sh with INSTALL_TEST_MODE=1 (as usual) plus
+    INSTALL_FORCE_LAUNCHAGENTS=1, which re-enables just the LaunchAgent
+    install branch so it can be exercised with a fake launchctl while pip,
+    model download, the Ollama probe, and the `claude` CLI stay skipped.
     """
     launchctl_log = tmp_path / "launchctl.log"
     stub = _write_launchctl_stub(tmp_path / "bin", launchctl_log)
 
+    install_dir = str(ROOT)
+    memory_dir = str(sandbox_home / ".tam")
+
     env = os.environ.copy()
     env["HOME"] = str(sandbox_home)
+    env["INSTALL_TEST_MODE"] = "1"
+    env["INSTALL_FORCE_LAUNCHAGENTS"] = "1"
     env["FAKE_UNAME"] = "Darwin"
-    env["TAM_MEMORY_DIR"] = str(sandbox_home / ".tam")
-    # Skip pip & model download, but keep the LaunchAgent step running.
-    env["INSTALL_TEST_MODE"] = "skip-heavy"
+    env["TAM_MEMORY_DIR"] = memory_dir
     env["PATH"] = f"{stub.parent}:{env.get('PATH','')}"
 
     result = subprocess.run(
         ["bash", str(INSTALL_SH), "--ide", "claude-code"],
         env=env, capture_output=True, text=True, timeout=180,
     )
-    # We don't assert returncode==0: pip/model steps may skip with
-    # non-fatal warnings under our partial test mode. We only care that
-    # the LaunchAgent step ran and produced valid plists.
+    assert result.returncode == 0, result.stderr
+
+    assert "SKIP (test mode): embedding model pre-download" in result.stdout, (
+        "model pre-download must be skipped, not run against a warm cache"
+    )
+    assert "SKIP (test mode): Ollama probe" in result.stdout, (
+        "Ollama probe must be skipped under INSTALL_TEST_MODE=1"
+    )
+
     la_dir = sandbox_home / "Library" / "LaunchAgents"
-    if not la_dir.exists():
-        pytest.skip(
-            "LaunchAgent branch did not fire under INSTALL_TEST_MODE=skip-heavy "
-            f"(install.sh stderr: {result.stderr[-300:]})"
-        )
+    assert la_dir.exists(), (
+        f"LaunchAgent step did not run (install.sh stderr: {result.stderr[-300:]})"
+    )
 
     plists = list(la_dir.glob("*.plist"))
     assert plists, "no plists were copied to LaunchAgents dir"
 
+    placeholder_values = {
+        "__INSTALL_DIR__": install_dir,
+        "__MEMORY_DIR__": memory_dir,
+        "__HOME__": str(sandbox_home),
+    }
+
     for plist in plists:
         body = plist.read_text()
-        # No leftover placeholders.
-        for placeholder in ("__INSTALL_DIR__", "__MEMORY_DIR__", "__HOME__"):
+        template = (ROOT / "launchagents" / plist.name).read_text()
+        checked_placeholders = []
+        for placeholder, value in placeholder_values.items():
             assert placeholder not in body, (
                 f"{plist.name}: leftover placeholder {placeholder}\n{body}"
             )
-        # No hardcoded old paths.
-        assert "claude-memory-server" not in body, (
-            f"{plist.name}: hardcoded old checkout name 'claude-memory-server'"
+            if placeholder in template:
+                assert value in body, (
+                    f"{plist.name}: {placeholder} not substituted with {value!r}\n{body}"
+                )
+                checked_placeholders.append(placeholder)
+        assert checked_placeholders, (
+            f"{plist.name}: none of {sorted(placeholder_values)} appear in "
+            f"the source template — the substitution check verified nothing"
         )
 
 

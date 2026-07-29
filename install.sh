@@ -18,6 +18,15 @@
 # Env:
 #   INSTALL_TEST_MODE=1   skip pip install, model pre-download, dashboard
 #                         service, LaunchAgents (for test harness)
+#   INSTALL_SKIP_PIP=1    skip ONLY dependency installation (venv/pip/editable
+#                         install), independent of INSTALL_TEST_MODE — for
+#                         users who manage their own Python environment and
+#                         don't want install.sh touching it
+#   INSTALL_FORCE_LAUNCHAGENTS=1   re-enable just the LaunchAgent install step
+#                         even when INSTALL_TEST_MODE=1 — for tests that need
+#                         real LaunchAgent installation without mutating the
+#                         developer's Python environment (pip, model
+#                         download, Ollama probe, dashboard stay skipped)
 #   TAM_MEMORY_DIR=... override memory directory (default: ~/.tam).
 #                         Legacy CLAUDE_MEMORY_DIR still respected.
 #   OLLAMA_URL=...        override Ollama probe URL
@@ -100,6 +109,16 @@ DASHBOARD_SERVICE="$INSTALL_DIR/scripts/dashboard-service.sh"
 
 # Test mode: skip heavy steps (pip, model DL, launchctl, dashboard install)
 TEST_MODE="${INSTALL_TEST_MODE:-0}"
+# Finer-grained switch: skip ONLY dependency installation, independent of
+# TEST_MODE, so tests can exercise LaunchAgents without touching pip.
+SKIP_PIP="${INSTALL_SKIP_PIP:-0}"
+if [ "$TEST_MODE" = "1" ]; then
+    SKIP_PIP=1
+fi
+# Test-mode override: re-enable just the LaunchAgent install step (Step 5)
+# even under INSTALL_TEST_MODE=1, so a test can verify plist substitution
+# without pip, model download, Ollama probe, or the `claude` CLI running.
+FORCE_LAUNCHAGENTS="${INSTALL_FORCE_LAUNCHAGENTS:-0}"
 
 # -----------------------------------------------------------------
 # Linux helpers: WSL detection + systemd --user services setup
@@ -289,7 +308,7 @@ echo "  Python $PY_VERSION found"
 # a separate `python3-venv` package. Without it `python3 -m venv` errors on
 # ensurepip with a cryptic message that does not mention the actual fix.
 # Detect and surface a clear, actionable hint before failing.
-if [ "$TEST_MODE" != "1" ] && ! [ -d "$VENV_DIR" ]; then
+if [ "$SKIP_PIP" != "1" ] && ! [ -d "$VENV_DIR" ]; then
     if ! python3 -c "import ensurepip" >/dev/null 2>&1; then
         echo "  ERROR: python3 venv module is missing (ensurepip unavailable)."
         echo "  Install it first, then re-run this script:"
@@ -302,9 +321,13 @@ if [ "$TEST_MODE" != "1" ] && ! [ -d "$VENV_DIR" ]; then
     fi
 fi
 
-if [ "$TEST_MODE" = "1" ]; then
-    echo "  SKIP (test mode): venv creation and pip install"
-    PY_PATH="$(command -v python3)"
+if [ "$SKIP_PIP" = "1" ]; then
+    echo "  SKIP: venv creation and pip install"
+    if [ -d "$VENV_DIR" ] && [ -f "$VENV_DIR/bin/python" ]; then
+        PY_PATH="$VENV_DIR/bin/python"
+    else
+        PY_PATH="$(command -v python3)"
+    fi
 else
     if [ -d "$VENV_DIR" ] && [ -f "$VENV_DIR/bin/python" ]; then
         echo "  Existing venv found, updating dependencies..."
@@ -886,7 +909,7 @@ fi
 # the canonical `com.total-agent-memory.dashboard.plist` shipped under
 # launchagents/. Both fought for port 37737. dashboard-service.sh remains
 # in scripts/ for manual use but isn't invoked automatically anymore.
-if [ "$TEST_MODE" != "1" ] && [ "$IDE" = "claude-code" ] && [ "$OS_NAME" = "Darwin" ] && [ -d "$INSTALL_DIR/launchagents" ]; then
+if { [ "$TEST_MODE" != "1" ] || [ "$FORCE_LAUNCHAGENTS" = "1" ]; } && [ "$IDE" = "claude-code" ] && [ "$OS_NAME" = "Darwin" ] && [ -d "$INSTALL_DIR/launchagents" ]; then
     echo "-> Step 5: Installing background LaunchAgents (dashboard, reflection, orphan-backfill, check-updates)..."
     LA_DIR="$HOME/Library/LaunchAgents"
     mkdir -p "$LA_DIR"
