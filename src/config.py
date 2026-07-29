@@ -748,6 +748,11 @@ def is_enrichment_enabled() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def is_fact_merge_enabled() -> bool:
+    raw = (os.environ.get("MEMORY_FACT_MERGE_ENABLED", "false") or "false").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 # ──────────────────────────────────────────────
 # Per-space embedding model env vars (v11 §J multi-embedding-space)
 # ──────────────────────────────────────────────

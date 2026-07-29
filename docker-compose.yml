@@ -152,6 +152,7 @@ services:
       <<: *memory-env
       REFLECT_DEBOUNCE_SEC: "5"
       REFLECT_INTERVAL_SEC: "3600"
+      MEMORY_FACT_MERGE_ENABLED: ${MEMORY_FACT_MERGE_ENABLED:-false}
     volumes:
       - memory-data:/data
 

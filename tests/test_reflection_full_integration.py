@@ -18,6 +18,8 @@ def test_run_full_drains_triple_queue_and_runs_fact_merger(refl_db, monkeypatch)
     from reflection.agent import ReflectionAgent
     from triple_extraction_queue import TripleExtractionQueue
 
+    monkeypatch.setenv("MEMORY_FACT_MERGE_ENABLED", "true")
+
     # Seed knowledge + queue
     kid1 = refl_db.execute(
         "INSERT INTO knowledge (session_id, type, content, project, status, created_at) "
@@ -92,6 +94,7 @@ def test_failing_phase_is_persisted_in_report(refl_db, monkeypatch):
     def broken_similarity_fn():
         raise RuntimeError("boom")
 
+    monkeypatch.setenv("MEMORY_FACT_MERGE_ENABLED", "true")
     agent = ReflectionAgent(refl_db)
     monkeypatch.setattr(agent, "_make_cosine_similarity_fn", broken_similarity_fn)
 
@@ -102,6 +105,50 @@ def test_failing_phase_is_persisted_in_report(refl_db, monkeypatch):
         "SELECT phase_errors FROM reflection_reports WHERE id=?", (report["id"],)
     ).fetchone()
     assert "boom" in json.loads(stored["phase_errors"])["fact_merge"]
+
+
+def test_fact_merge_disabled_by_default_leaves_phase_errors_clean(refl_db, monkeypatch):
+    import json
+
+    import fact_merger
+    from reflection.agent import ReflectionAgent, phase_errors
+
+    monkeypatch.delenv("MEMORY_FACT_MERGE_ENABLED", raising=False)
+
+    def fail_if_constructed(*_args, **_kwargs):
+        raise AssertionError("FactMerger must not be constructed while disabled")
+
+    monkeypatch.setattr(fact_merger, "FactMerger", fail_if_constructed)
+
+    agent = ReflectionAgent(refl_db)
+    report = asyncio.run(agent.run_full())
+
+    assert report["fact_merge"] == {
+        "clusters_found": 0,
+        "merged": 0,
+        "rejected": 0,
+        "disabled": True,
+    }
+    assert "fact_merge" not in phase_errors(report)
+    stored = refl_db.execute(
+        "SELECT phase_errors FROM reflection_reports WHERE id=?", (report["id"],)
+    ).fetchone()
+    assert "fact_merge" not in json.loads(stored["phase_errors"])
+
+
+def test_fact_merge_enabled_via_env_attempts_clustering(refl_db, monkeypatch):
+    from reflection.agent import ReflectionAgent
+
+    monkeypatch.setenv("MEMORY_FACT_MERGE_ENABLED", "true")
+
+    agent = ReflectionAgent(refl_db)
+    monkeypatch.setattr(agent, "_make_cosine_similarity_fn", lambda: (lambda a, b: 0.9))
+    monkeypatch.setattr(agent, "_make_llm_merge_fn", lambda: (lambda contents: "merged"))
+
+    stats = agent._run_fact_merger()
+
+    assert "disabled" not in stats
+    assert "clusters_found" in stats
 
 
 def test_save_report_without_phase_errors_column_still_inserts_row(monkeypatch):
@@ -310,6 +357,7 @@ def test_phase_errors_omits_healthy_phases(refl_db, monkeypatch):
     from reflection.agent import ReflectionAgent
 
     monkeypatch.setattr(config_mod, "has_llm", lambda *_a, **_kw: False)
+    monkeypatch.setenv("MEMORY_FACT_MERGE_ENABLED", "true")
 
     def raise_store(*_args, **_kwargs):
         raise RuntimeError("no store in this environment")
@@ -356,6 +404,8 @@ def test_make_vectors_fn_loads_real_embeddings_across_chunk_boundary(refl_db):
 
 def test_run_fact_merger_wires_hook_and_vectors_fn(refl_db, monkeypatch):
     from reflection.agent import ReflectionAgent
+
+    monkeypatch.setenv("MEMORY_FACT_MERGE_ENABLED", "true")
 
     ids = []
     for content in ("User uses Go for backend", "User builds APIs in Go"):

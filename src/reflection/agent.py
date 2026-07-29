@@ -64,6 +64,12 @@ def phase_errors(report: dict) -> dict[str, str]:
     (used by `_run_representations` when it declines to run at all, e.g. no
     embedder) is checked ahead of `skipped` so that a phase reporting both a
     numeric `skipped` count and a `skipped_reason` still surfaces the reason.
+
+    `disabled` (used by `_run_fact_merger` when `MEMORY_FACT_MERGE_ENABLED` is
+    off) is deliberately NOT one of the markers checked above. A configuration
+    choice is not a failure, so a disabled phase must not show up in
+    `phase_errors()` — unlike `skipped_reason`/`error`/`deferred`, which all
+    describe circumstances the operator didn't choose.
     """
     found: dict[str, str] = {}
     for key in _PHASE_KEYS:
@@ -252,6 +258,11 @@ class ReflectionAgent:
 
     def _run_fact_merger(self) -> dict[str, int]:
         """Find clusters of related (non-duplicate) facts and synthesize via LLM."""
+        from config import is_fact_merge_enabled
+        if not is_fact_merge_enabled():
+            LOG("fact_merger disabled by MEMORY_FACT_MERGE_ENABLED")
+            return {"clusters_found": 0, "merged": 0, "rejected": 0, "disabled": True}
+
         try:
             from fact_merger import FactMerger
         except Exception as e:  # noqa: BLE001

@@ -8,6 +8,7 @@ Type=oneshot
 WorkingDirectory=@INSTALL_DIR@
 ExecStart=@INSTALL_DIR@/.venv/bin/python @INSTALL_DIR@/src/tools/run_reflection.py
 Environment=TAM_MEMORY_DIR=@MEMORY_DIR@
+Environment=MEMORY_FACT_MERGE_ENABLED=false
 # Cold Ollama load ~30s first time, then ~10s per queue item
 TimeoutStartSec=1200
 Nice=10
