@@ -2315,6 +2315,29 @@ class Store:
                 rows = rows[:effective]
             return {"rules": rows, "total": len(rows), "total_matched": total_matched}
 
+        elif action == "get":
+            # Companion to get_rules_for_context's `rules_index`: fetch the full
+            # text of rules the context limit cut.
+            ids = kw.get("ids")
+            if not isinstance(ids, list) or not ids:
+                return {"error": "ids must be a non-empty list of rule ids"}
+            if not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+                return {"error": "ids must contain integers only"}
+            ids = ids[:50]
+
+            rows = self.q(
+                f"SELECT * FROM rules WHERE status='active' "
+                f"AND id IN ({','.join('?' * len(ids))}) "
+                f"ORDER BY priority DESC, {_RULE_SCORE_SQL} DESC, created_at DESC", ids)
+            if rows:
+                self.db.execute(
+                    f"UPDATE rules SET fire_count=fire_count+1, last_fired=?, updated_at=? "
+                    f"WHERE id IN ({','.join('?' * len(rows))})",
+                    (now, now, *(r["id"] for r in rows)))
+                self.db.commit()
+            return {"rules": rows, "total": len(rows),
+                    "returned_ids": [r["id"] for r in rows]}
+
         elif action == "fire":
             self.db.execute(
                 "UPDATE rules SET fire_count=fire_count+1, last_fired=?, updated_at=? "
@@ -2402,6 +2425,11 @@ class Store:
         (post phase-filter, post-limit). Those columns feed self_patterns'
         rule_effectiveness report and its stale-rule query, so a narrow
         `limit`/`MEMORY_RULES_LIMIT` also narrows that effectiveness telemetry.
+
+        When the limit truncates, the response also carries `rules_index`
+        (id/priority/category/head for the omitted rules, same ordering) and a
+        `hint` pointing at manage_rule(action="get", ids=[...]) for full text.
+        Both keys are absent when nothing was cut.
         """
         VALID_PHASES = {"van", "plan", "creative", "build", "reflect", "archive"}
         if phase is not None and phase not in VALID_PHASES:
@@ -2443,7 +2471,9 @@ class Store:
 
         total_matched = len(rows)
         effective = limit if limit is not None else RULES_CONTEXT_LIMIT
+        omitted = []
         if effective is not None:
+            omitted = rows[effective:]
             rows = rows[:effective]
 
         if rows:
@@ -2455,6 +2485,20 @@ class Store:
                 (now, now, *(r["id"] for r in rows)))
             self.db.commit()
         result = {"rules_count": len(rows), "total_matched": total_matched, "rules": rows}
+        if omitted:
+            # Index entries are NOT fired: only rules whose full text reached the
+            # agent count as "applied", otherwise rule_effectiveness telemetry
+            # would credit every truncated rule with a hit it never got.
+            result["rules_index"] = [
+                {"id": r["id"], "priority": r["priority"],
+                 "category": r["category"], "head": r["content"][:80]}
+                for r in omitted
+            ]
+            result["hint"] = (
+                f"{len(omitted)} more matching rules were cut by the limit and are listed "
+                "in `rules_index` (id/priority/category/head only). They still apply — "
+                "fetch their full text with self_rules(action='get', ids=[...])."
+            )
         if phase is not None:
             result["phase_filter"] = phase
         return result
@@ -4132,18 +4176,26 @@ async def list_tools():
         Tool(
             name="self_rules",
             description="Manage behavioral rules (SOUL). Rules are promoted insights that shape agent behavior. "
-                        "Actions: list, fire (record relevance), rate (success=true/false), "
-                        "suspend, activate, retire, add_manual. "
+                        "Actions: list, get (full text by ids), fire (record relevance), "
+                        "rate (success=true/false), suspend, activate, retire, add_manual. "
                         "Auto-suspend: success_rate < 0.2 after 10+ RATINGS (success_count+fail_count), "
                         "checked only when action='rate' runs — an unrated rule is never suspended, "
                         "however often it fires. "
                         "For list: no result cap by default — all matching active rules are "
-                        "returned unless `limit` is passed or the MEMORY_RULES_LIMIT env var is set.",
+                        "returned unless `limit` is passed or the MEMORY_RULES_LIMIT env var is set. "
+                        "For get: pass `ids` (max 50) to retrieve the full rows behind the "
+                        "`rules_index` entries self_rules_context returns when its limit truncates; "
+                        "returned rules get fire_count/last_fired bumped, ids that are not active "
+                        "rules are skipped and `returned_ids` says which came back.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "action": {"type": "string",
-                               "enum": ["list", "fire", "rate", "suspend", "activate", "retire", "add_manual"]},
+                               "enum": ["list", "get", "fire", "rate", "suspend", "activate",
+                                        "retire", "add_manual"]},
+                    "ids": {"type": "array", "items": {"type": "integer"}, "maxItems": 50,
+                            "description": "For get: rule ids to fetch in full (max 50 per call; "
+                                           "extras are dropped, unknown/inactive ids are skipped)."},
                     "id": {"type": "integer", "description": "Rule ID (for fire/rate/suspend/activate/retire)"},
                     "success": {"type": "boolean", "description": "For rate: was rule helpful?"},
                     "content": {"type": "string", "description": "Rule text (for add_manual)"},
@@ -4209,6 +4261,11 @@ async def list_tools():
                         "Only rules actually returned get fire_count/last_fired bumped, which "
                         "feeds self_patterns rule_effectiveness — narrowing this limit also "
                         "narrows that telemetry. "
+                        "When the limit truncates, the response carries `rules_index` "
+                        "(id/priority/category/head for every omitted rule, same ordering) and "
+                        "a `hint`: those rules still bind you — fetch their full text with "
+                        "self_rules(action='get', ids=[...]). Both keys are absent when nothing "
+                        "was cut. "
                         "After task completion, rate rules: self_rules(action='rate', id=X, success=true/false).",
             inputSchema={
                 "type": "object",

@@ -6,6 +6,19 @@ and versions use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — truncated `self_rules_context` now carries the rules it cut
+- When `MEMORY_RULES_LIMIT` (or a per-call `limit`) truncates the result,
+  `get_rules_for_context` adds `rules_index` — `{id, priority, category,
+  head}` for every omitted rule, in the same ordering — plus a `hint`
+  pointing at the new fetch action. Both keys are absent when nothing was
+  cut, so the untruncated response shape is unchanged. Previously the
+  remainder was reachable only by running a `sqlite3` query by hand, which
+  agents skipped and which does not work at all when the DB is not local.
+- `self_rules` gains `action="get"` with `ids` (max 50 per call): returns the
+  full rows for those ids, bumps their `fire_count`/`last_fired`, skips ids
+  that are not active rules, and reports `returned_ids`. Index entries
+  themselves never fire — only rules whose full text reached the agent.
+
 ### Fixed — `self_rules_context` silently dropped active rules
 - `get_rules_for_context` had a hardcoded `LIMIT 20`, so projects with more
   than 20 active rules silently lost the rest. Removed the SQL limit; added

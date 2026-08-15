@@ -315,6 +315,146 @@ def test_manage_rule_list_negative_limit_returns_error(store):
     assert "rules" not in r
 
 
+def _add_ranked_rules(store, n=10, content=None):
+    """Seed n rules with distinct descending priorities, so the server ordering
+    (priority DESC) is deterministic and index membership can be asserted by id."""
+    return [
+        _add_rule(store, content(i) if content else f"rule {i}", priority=n - i)
+        for i in range(n)
+    ]
+
+
+def test_rules_index_lists_exactly_the_omitted_rules_in_order(store):
+    """A truncated response carries `rules_index` with the matched-but-cut rules,
+    in the same ordering, and rules + rules_index account for total_matched."""
+    ids = _add_ranked_rules(store, 10)
+
+    r = store.get_rules_for_context(project="myproj", limit=4)
+    returned_ids = [x["id"] for x in r["rules"]]
+    index_ids = [x["id"] for x in r["rules_index"]]
+
+    assert returned_ids == ids[:4]
+    assert index_ids == ids[4:]
+    assert len(r["rules"]) + len(r["rules_index"]) == r["total_matched"] == 10
+    assert set(r["rules_index"][0]) == {"id", "priority", "category", "head"}
+    assert "self_rules(action='get'" in r["hint"]
+
+
+def test_untruncated_response_has_no_rules_index_or_hint(store):
+    """When nothing is cut the response shape is exactly what it was before —
+    existing callers and tests depend on the key set."""
+    _add_ranked_rules(store, 5)
+
+    r = store.get_rules_for_context(project="myproj")
+    assert set(r) == {"rules_count", "total_matched", "rules"}
+
+    # limit exactly equal to the match count is still "nothing cut"
+    r_exact = store.get_rules_for_context(project="myproj", limit=5)
+    assert set(r_exact) == {"rules_count", "total_matched", "rules"}
+
+
+def test_index_only_rules_do_not_bump_fire_count(store):
+    """Appearing in `rules_index` is not a hit: only delivered rules fire, which
+    is what keeps self_patterns rule_effectiveness meaningful."""
+    ids = _add_ranked_rules(store, 6)
+
+    r = store.get_rules_for_context(project="myproj", limit=2)
+    assert [x["id"] for x in r["rules_index"]] == ids[2:]
+
+    for rid in ids:
+        row = store.db.execute(
+            "SELECT fire_count FROM rules WHERE id=?", (rid,)).fetchone()
+        assert row["fire_count"] == (1 if rid in ids[:2] else 0)
+
+
+def test_rules_index_head_is_first_80_chars_of_content(store):
+    """`head` is a plain truncation — newlines kept, nothing reformatted."""
+    long_content = "a" * 40 + "\n" + "b" * 60
+    kept = _add_rule(store, "kept rule", priority=10)
+    cut = _add_rule(store, long_content, priority=1)
+
+    r = store.get_rules_for_context(project="myproj", limit=1)
+    assert [x["id"] for x in r["rules"]] == [kept]
+    entry = r["rules_index"][0]
+    assert entry["id"] == cut
+    assert entry["head"] == long_content[:80]
+    assert len(entry["head"]) == 80
+    assert "\n" in entry["head"]
+
+
+def test_manage_rule_get_returns_full_content_and_bumps_fire_count(store):
+    """action="get" is the fetch path behind `rules_index`: full rows back, and
+    the fetched rules fire (the old sqlite3 workaround bumped nothing)."""
+    ids = _add_ranked_rules(store, 5)
+    wanted = [ids[3], ids[4]]
+
+    r = store.manage_rule("sess-limit-test", "get", ids=wanted)
+    assert r["total"] == 2
+    assert sorted(r["returned_ids"]) == sorted(wanted)
+    assert sorted(x["content"] for x in r["rules"]) == ["rule 3", "rule 4"]
+
+    for rid in ids:
+        row = store.db.execute(
+            "SELECT fire_count FROM rules WHERE id=?", (rid,)).fetchone()
+        assert row["fire_count"] == (1 if rid in wanted else 0)
+
+
+def test_manage_rule_get_skips_unknown_and_retired_ids(store):
+    """Non-active / non-existent ids are skipped, not fatal — `returned_ids`
+    tells the caller what actually came back."""
+    ids = _add_ranked_rules(store, 3)
+    store.manage_rule("sess-limit-test", "retire", id=ids[1])
+
+    r = store.manage_rule("sess-limit-test", "get", ids=[ids[0], ids[1], 999999])
+    assert "error" not in r
+    assert r["returned_ids"] == [ids[0]]
+    assert r["total"] == 1
+
+
+def test_manage_rule_get_caps_ids_at_50(store):
+    """More than 50 ids → only the first 50 are fetched and fired."""
+    ids = [_add_rule(store, f"rule {i}") for i in range(60)]
+
+    r = store.manage_rule("sess-limit-test", "get", ids=ids)
+    assert r["total"] == 50
+    assert set(r["returned_ids"]) == set(ids[:50])
+
+    for rid in ids[50:]:
+        row = store.db.execute(
+            "SELECT fire_count FROM rules WHERE id=?", (rid,)).fetchone()
+        assert row["fire_count"] == 0
+
+
+def test_manage_rule_get_rejects_missing_or_non_integer_ids(store):
+    """Bad input returns the {"error": ...} shape used by the sibling actions."""
+    assert "error" in store.manage_rule("sess-limit-test", "get")
+    assert "error" in store.manage_rule("sess-limit-test", "get", ids=[])
+    assert "error" in store.manage_rule("sess-limit-test", "get", ids=["7"])
+
+
+def test_self_rules_handler_get_via_real_inject_path(live_store):
+    """Drive the MCP dispatcher end-to-end for action="get", so a wiring
+    regression in the handler would be caught."""
+    s, server = live_store
+    ids = [_add_rule(s, f"rule {i}") for i in range(3)]
+
+    raw = asyncio.run(server._do("self_rules", {"action": "get", "ids": ids[:2]}))
+    out = json.loads(raw)
+    assert out["total"] == 2
+    assert sorted(out["returned_ids"]) == sorted(ids[:2])
+
+
+def test_self_rules_context_handler_returns_rules_index_via_real_inject_path(live_store):
+    """The truncated shape must survive JSON serialization through the dispatcher."""
+    s, server = live_store
+    ids = _add_ranked_rules(s, 10)
+
+    raw = asyncio.run(server._do("self_rules_context", {"project": "myproj", "limit": 3}))
+    out = json.loads(raw)
+    assert [x["id"] for x in out["rules_index"]] == ids[3:]
+    assert "hint" in out
+
+
 def test_self_rules_handler_list_honours_limit_via_real_inject_path(live_store):
     """Drive the MCP dispatcher end-to-end (`server._do`) for self_rules,
     not the Store method directly, so a wiring/signature regression in the
