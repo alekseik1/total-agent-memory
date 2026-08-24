@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -453,6 +454,43 @@ def run_pending(db, *, max_rows: int | None = None, store=None) -> dict[str, int
 # Daemon thread
 # ──────────────────────────────────────────────
 
+# Same value as server.DB_BUSY_TIMEOUT_MS; duplicated rather than imported
+# because `server` is a 300KB module that imports this one back.
+_BUSY_TIMEOUT_MS = 15000
+
+
+def _open_own_connection(store_db) -> sqlite3.Connection | None:
+    """Open a private connection to the same database file as `store_db`.
+
+    The worker must not write through the Store's Connection: sqlite3 keeps
+    the implicit-BEGIN state on the Connection, not on the thread, so a tick
+    firing while an MCP handler is mid-transaction corrupts the transaction
+    boundary — observed as "cannot start a transaction within a transaction"
+    and "bad parameter or other API misuse". WAL lets a second connection
+    write to the same file instead.
+
+    Returns None when the store's database has no file behind it (":memory:",
+    which tests inject): a private in-memory database cannot be reopened, so
+    the caller keeps sharing rather than silently draining a different, empty
+    queue.
+    """
+    try:
+        row = store_db.execute("PRAGMA database_list").fetchone()
+    except Exception as e:  # noqa: BLE001 — a closed/hostile db must not kill the thread
+        LOG(f"own connection unavailable, sharing the store's: {e}")
+        return None
+    path = row[2] if row else ""
+    if not path:
+        return None
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    # No journal_mode here: WAL is a persistent property of the file, already
+    # set by whoever opened it first (server.py), and re-declaring it needs a
+    # lock no other connection may hold — it fails with "database is locked"
+    # exactly when a second writer exists, which is the case this code is for.
+    conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+    return conn
+
 
 class _WorkerThread(threading.Thread):
     def __init__(self, store):
@@ -466,12 +504,18 @@ class _WorkerThread(threading.Thread):
     def run(self) -> None:
         tick = _tick_interval()
         LOG(f"started (tick={tick}s, batch={_batch_size()})")
-        while not self._stop.is_set():
-            try:
-                run_pending(self._store.db, store=self._store)
-            except Exception as e:
-                LOG(f"tick error: {e}")
-            self._stop.wait(tick)
+        own = _open_own_connection(self._store.db)
+        db = own if own is not None else self._store.db
+        try:
+            while not self._stop.is_set():
+                try:
+                    run_pending(db, store=self._store)
+                except Exception as e:
+                    LOG(f"tick error: {e}")
+                self._stop.wait(tick)
+        finally:
+            if own is not None:
+                own.close()
 
 
 def start_worker(store) -> _WorkerThread | None:

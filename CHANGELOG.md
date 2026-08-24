@@ -6,6 +6,24 @@ and versions use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — the enrichment worker corrupted transactions it did not own
+- `_WorkerThread` drained the queue through `store.db`, the same
+  `sqlite3.Connection` every MCP handler writes through. Python's sqlite3
+  keeps the implicit-BEGIN state on the Connection rather than on the thread,
+  so a tick landing inside a handler's transaction broke it — logged as
+  `[enrich-worker] tick error: cannot start a transaction within a
+  transaction`, and, in the opposite direction, as a failed reflection phase
+  (`graph_importance` lost the race most often, being the widest writer at
+  15931 rows). With `MEMORY_MODE=balanced` the worker ticks ten times a
+  second, so any busy session hit this.
+- The thread now opens its own connection to the same file for its lifetime
+  and closes it on stop; WAL already allows the second writer. It keeps
+  sharing the Store's connection when the database is `:memory:` (tests),
+  where a second connection would address a different, empty database.
+- Regression test drives both writers concurrently and asserts neither loses
+  a row. Against the previous code it fails 3 runs out of 3, twice with the
+  production error string and once with `bad parameter or other API misuse`.
+
 ### Added — truncated `self_rules_context` now carries the rules it cut
 - When `MEMORY_RULES_LIMIT` (or a per-call `limit`) truncates the result,
   `get_rules_for_context` adds `rules_index` — `{id, priority, category,

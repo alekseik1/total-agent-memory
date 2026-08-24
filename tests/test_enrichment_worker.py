@@ -14,7 +14,9 @@ Covers:
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -339,3 +341,77 @@ def test_start_worker_launches_thread_when_enabled(monkeypatch, db, seed_record)
         t.stop()
         t.join(timeout=1)
         assert not t.is_alive()
+
+
+def test_worker_ticks_do_not_corrupt_concurrent_store_writes(tmp_path, monkeypatch):
+    """A tick firing while the Store's connection is mid-transaction must not
+    break that transaction.
+
+    sqlite3 keeps the implicit-BEGIN state on the Connection, so a worker
+    sharing `store.db` raises "cannot start a transaction within a transaction"
+    / "bad parameter or other API misuse" in either thread. Both writers here
+    are real: the assertions check that neither lost a row.
+    """
+    from base_schema import apply_full_schema
+
+    store_conn = sqlite3.connect(str(tmp_path / "memory.db"), check_same_thread=False)
+    store_conn.row_factory = sqlite3.Row
+    # Mirror server.py:268-270 — WAL is what lets a second connection write.
+    store_conn.execute("PRAGMA journal_mode=WAL")
+    apply_full_schema(store_conn)
+    store_conn.execute(
+        "CREATE TABLE probe (id INTEGER PRIMARY KEY, writer TEXT NOT NULL)"
+    )
+    store_conn.commit()
+
+    monkeypatch.setenv("MEMORY_ASYNC_ENRICHMENT", "true")
+    monkeypatch.setenv("MEMORY_ENRICH_TICK_SEC", "0.001")
+
+    burst = 800
+    started = threading.Barrier(2, timeout=5)
+
+    def write_burst(conn, writer, errors):
+        """Commit every 7th row so a transaction spans several statements —
+        a one-statement-per-commit loop is too narrow to catch the race."""
+        for i in range(burst):
+            try:
+                conn.execute("INSERT INTO probe (writer) VALUES (?)", (writer,))
+                if i % 7 == 0:
+                    conn.commit()
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{type(e).__name__}: {e}")
+                return
+        conn.commit()
+
+    worker_errors: list[str] = []
+    ticked = threading.Event()
+
+    def fake_run(db_, store=None, **kw):
+        if not ticked.is_set():
+            ticked.set()
+            started.wait()
+            write_burst(db_, "worker", worker_errors)
+        return {"claimed": 0, "done": 0, "retried": 0, "failed": 0}
+
+    monkeypatch.setattr(ew, "run_pending", fake_run)
+    fake_store = type("S", (), {"db": store_conn})()
+
+    t = ew.start_worker(fake_store)
+    assert t is not None
+    main_errors: list[str] = []
+    try:
+        started.wait()
+        write_burst(store_conn, "main", main_errors)
+    finally:
+        t.stop()
+        t.join(timeout=10)
+
+    assert ticked.is_set(), "worker never ticked — the test proved nothing"
+    assert main_errors == []
+    assert worker_errors == []
+    counts = dict(
+        store_conn.execute("SELECT writer, count(*) FROM probe GROUP BY writer").fetchall()
+    )
+    assert counts.get("main") == burst
+    assert counts.get("worker") == burst
+    store_conn.close()
