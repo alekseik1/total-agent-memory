@@ -7159,13 +7159,33 @@ def _detect_project():
         return "general"
 
 
+def _session_id():
+    """The id this process records its session under.
+
+    The host's own session id when it publishes one, so that everything about
+    one human session shares an identity: knowledge saved through the tools,
+    and the summary the SessionEnd hook writes (which names the Claude Code
+    session, since that is all a hook knows). They used to be two ids for the
+    same session — the server minted `mcp_<ts>_<pid>` and never looked at the
+    environment it was handed — so the two halves could not be joined, and
+    `sessions` grew a row per identity space rather than per session.
+
+    Falls back to the minted form for hosts that publish nothing (Codex,
+    Cursor, the Docker image), which is also what every existing row uses.
+    """
+    host_session = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    if host_session:
+        return host_session
+    return f"mcp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+
+
 async def _bootstrap_session():
     """Common setup: build Store/Recall, start session, cleanup. Called
     by every transport. Populates module globals."""
     global store, recall, SID, BRANCH
     store = Store()
     recall = Recall(store)
-    SID = f"mcp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    SID = _session_id()
     BRANCH = _detect_git_branch()
     store.session_start(SID, project=_detect_project(), branch=BRANCH)
     cleaned = store.cleanup_old_observations()

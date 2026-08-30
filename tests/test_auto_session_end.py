@@ -26,17 +26,17 @@ def memory_dir(tmp_path):
     return tmp_path
 
 
-def _run(memory_dir, **kw):
+def _run(memory_dir, _env=None, **kw):
     args = [sys.executable, str(SCRIPT)]
     for k, v in kw.items():
         args += [f"--{k.replace('_', '-')}", v]
-    return subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        env={"PATH": "/usr/bin:/bin", "TAM_MEMORY_DIR": str(memory_dir),
-             "CLAUDE_MEMORY_DIR": str(memory_dir)},
-    )
+    env = {"PATH": "/usr/bin:/bin", "TAM_MEMORY_DIR": str(memory_dir),
+           "CLAUDE_MEMORY_DIR": str(memory_dir),
+           # Off unless a test says otherwise: the probe would reach for a live
+           # Ollama and make the result depend on the machine.
+           "MEMORY_LLM_ENABLED": "false"}
+    env.update(_env or {})
+    return subprocess.run(args, capture_output=True, text=True, env=env)
 
 
 def _rows(memory_dir, sql):
@@ -98,3 +98,22 @@ def test_a_missing_database_is_reported_not_crashed(tmp_path):
 
     assert r.returncode == 1
     assert "Memory DB not found" in r.stderr
+
+
+def test_the_deterministic_summary_survives_a_failed_compression(memory_dir, monkeypatch):
+    """`session_end` only asks the LLM when `summary` is None, so the fallback
+    cannot be passed alongside it — it is written afterwards instead. Without
+    that, a compression that yields nothing stores an empty summary."""
+    r = _run(
+        memory_dir,
+        session_id="compress_sess",
+        project="p",
+        reason="User exited",
+        user_context="the work that must survive",
+        _env={"MEMORY_LLM_ENABLED": "force", "MEMORY_LLM_API_BASE": "http://127.0.0.1:9"},
+    )
+    assert r.returncode == 0, r.stderr
+
+    rows = _rows(memory_dir, "SELECT summary FROM session_summaries")
+    assert len(rows) == 1
+    assert "the work that must survive" in rows[0]["summary"]

@@ -51,6 +51,16 @@ def _recent_duplicate(db: sqlite3.Connection, session_id: str) -> bool:
     return (datetime.now(timezone.utc) - last).total_seconds() < _DEDUP_WINDOW_SEC
 
 
+def _llm_available() -> bool:
+    """Whether the LLM gate is open. A probe must never fail the session end."""
+    try:
+        import config
+
+        return bool(config.has_llm())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def build_summary(reason: str, user_context: str, assistant_context: str) -> str:
     user = (user_context or "").strip()[:800]
     assistant = (assistant_context or "").strip()[:800]
@@ -88,12 +98,28 @@ def main() -> int:
     try:
         if _recent_duplicate(db, a.session_id):
             return 0
+        fallback = build_summary(a.reason, a.user_context, a.assistant_context)
+        # With an LLM reachable, let it write the summary from the session's
+        # own artifacts — the handful of messages the hook could extract is a
+        # thin thing to resume from. `session_end` only asks the LLM when
+        # `summary` is None (an explicit one always wins), so the deterministic
+        # text cannot be passed as a safety net: it would suppress the
+        # compression it is meant to back up. It is written afterwards instead,
+        # whenever compression did not actually produce anything.
+        compress = _llm_available()
         result = SessionContinuity(db).session_end(
             a.session_id,
-            build_summary(a.reason, a.user_context, a.assistant_context),
+            None if compress else fallback,
             project=a.project,
             branch=a.branch or None,
+            auto_compress=compress,
         )
+        if compress and not result.get("compressed_used"):
+            db.execute(
+                "UPDATE session_summaries SET summary = ? WHERE id = ?",
+                (fallback, result["id"]),
+            )
+            db.commit()
         print(f"session summary {result['id']} for {a.project} ({a.session_id})")
         return 0
     except Exception as e:  # noqa: BLE001 — a hook must not fail the session end
