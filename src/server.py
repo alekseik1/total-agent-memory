@@ -632,11 +632,25 @@ class Store:
             return None
 
     def embed(self, texts):
-        """Get embeddings.
+        """Get embeddings. See `embed_with_identity` for which backend ran."""
+        vectors, _identity = self.embed_with_identity(texts)
+        return vectors
+
+    def embed_with_identity(self, texts):
+        """Embeddings plus the (model, provider) that actually produced them.
 
         Dispatch order:
           1. Cloud providers (openai / cohere) via EmbeddingProvider when selected.
           2. Legacy FastEmbed → Ollama → SentenceTransformers chain.
+
+        The chain falls back silently, so the configured backend and the one
+        that ran are not the same thing. Labelling rows with the configured
+        name wrote 30 rows reading `nomic-embed-text` (768-dim) that hold
+        384-dim SentenceTransformer vectors, made on days the Ollama tunnel
+        was down — and `embed_set` cached them under that name too, so the
+        cache's `expected_model` guard matched and later served vectors from
+        the wrong space as if they were the right ones. Callers that record or
+        cache an identity must take it from here, never from configuration.
 
         v9 A2: when ``V9_CACHE_L2_ENABLED`` is set, individual texts are
         looked up in the persistent ``embedding_cache`` table first; misses
@@ -659,31 +673,37 @@ class Store:
             missing_idx = list(range(len(texts)))
 
         if not missing_idx:
-            return cached  # full L2 hit
+            # Full L2 hit. `embed_get` only returns rows whose stored model is
+            # the active one, so the cache's identity is the active identity.
+            return cached, (model_name, self._embed_mode)
 
         missing_texts = [texts[i] for i in missing_idx]
 
         # ── upstream embedding ─────────────────────────────
+        # Each branch reports the backend it used, so a fallback is recorded
+        # as itself rather than as whatever was configured.
         def _compute(batch):
             if self._embed_mode in ("openai", "cohere"):
                 r = self._provider_embed(batch)
                 if r:
-                    return r
+                    return r, self._active_embed_model_name(), self._embed_mode
             if self._embed_mode == "fastembed":
                 r = self._fastembed_embed(batch)
                 if r:
-                    return r
+                    return r, FASTEMBED_MODEL, "fastembed"
                 # v11: silent fallback to Ollama is forbidden in fast mode.
                 # Power users opt back in with MEMORY_ALLOW_OLLAMA_IN_HOT_PATH=true.
                 allow_ollama = os.environ.get(
                     "MEMORY_ALLOW_OLLAMA_IN_HOT_PATH", "false"
                 ).strip().lower() in ("1", "true", "yes", "on")
                 if allow_ollama and self._check_ollama():
-                    return self._ollama_embed(batch)
+                    r = self._ollama_embed(batch)
+                    if r:
+                        return r, OLLAMA_EMBED_MODEL, "ollama"
             if self._embed_mode == "ollama":
                 r = self._ollama_embed(batch)
                 if r:
-                    return r
+                    return r, OLLAMA_EMBED_MODEL, "ollama"
             # v11: SentenceTransformer fallback is also gated. Allowed when
             # the user explicitly opts in OR the mode is not "fastembed"
             # (i.e. they configured embed_mode=st on purpose).
@@ -695,27 +715,32 @@ class Store:
             )
             if allow_st and self._embed_mode in ("st", "ollama", "fastembed", "openai", "cohere") and self.embedder:
                 try:
-                    return self.embedder.encode(batch).tolist()
+                    return self.embedder.encode(batch).tolist(), EMBEDDING_MODEL, "st"
                 except Exception:
                     pass
-            return None
+            return None, None, None
 
-        fresh = _compute(missing_texts)
+        fresh, fresh_model, fresh_provider = _compute(missing_texts)
         if fresh is None:
             # Upstream failed — honour legacy contract and return None
             # only when nothing at all can be produced.
-            return None if all(v is None for v in cached) else cached
+            if all(v is None for v in cached):
+                return None, (model_name, self._embed_mode)
+            return cached, (model_name, self._embed_mode)
 
         # ── merge + persist back into L2 ───────────────────
+        # Cache under the model that actually produced the vector: `embed_get`
+        # guards on `expected_model`, and a wrong label makes that guard pass
+        # for a vector from another space.
         for local_i, global_i in enumerate(missing_idx):
             cached[global_i] = fresh[local_i]
             if l2 is not None and l2.l2.enabled and fresh[local_i] is not None:
                 try:
-                    l2.embed_set(texts[global_i], fresh[local_i], model_name)
+                    l2.embed_set(texts[global_i], fresh[local_i], fresh_model)
                 except Exception:
                     pass
 
-        return cached
+        return cached, (fresh_model, fresh_provider)
 
     # ── Binary Quantization ──
 
@@ -1674,7 +1699,13 @@ class Store:
                 LOG(f"per-space embed for space={_v11_space} fell back to text: {_emb_err}")
                 embs = None  # fall through to legacy text path
         if embs is None:
-            embs = self.embed([f"{content} {context}"])
+            # The identity comes back from the chain that ran, not from the
+            # configuration: with Ollama configured but unreachable this path
+            # returns SentenceTransformer vectors, and labelling them
+            # `nomic-embed-text` put 384-dim rows under a 768-dim model name.
+            embs, (model_name, _v11_provider_name) = self.embed_with_identity(
+                [f"{content} {context}"]
+            )
             if embs and _v11_space != "text":
                 # Honest record-keeping: the row IS in `text` model space
                 # because per-space encoder failed — degrade gracefully.
@@ -4948,6 +4979,14 @@ async def _tool_catalogue():
                         "description": "Optional: only re-encode rows in these spaces.",
                     },
                     "project": {"type": "string"},
+                    "stale_only": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Only rows whose stored embed_model is not the "
+                                       "active one — what a store left mixed by a backend "
+                                       "switch or a silent fallback needs. Rows with no "
+                                       "embedding at all are not touched.",
+                    },
                     "batch_size": {"type": "integer", "default": 32},
                     "limit": {"type": "integer"},
                 },
@@ -6556,6 +6595,13 @@ async def _do(name, a):
         proj = a.get("project")
         batch = max(1, int(a.get("batch_size", 32)))
         cap = a.get("limit")
+        # `embedding_space` describes the CONTENT (text vs code), not the model
+        # that encoded it, so it cannot select rows left behind by a backend
+        # switch — those are all `text` too. `stale_only` selects exactly the
+        # rows whose stored model is no longer the active one, which is what a
+        # drifted store needs re-encoded.
+        stale_only = bool(a.get("stale_only", False))
+        active_model = store._active_embed_model_name()
 
         # Build the candidate set: every active knowledge row whose existing
         # embedding row matches the requested space (or every active row
@@ -6574,6 +6620,11 @@ async def _do(name, a):
             ph = ",".join("?" * len(spaces))
             sql += f" AND COALESCE(e.embedding_space,'text') IN ({ph})"
             params.extend(spaces)
+        if stale_only:
+            # A row with no embedding at all is not stale, it is absent — a
+            # different job, and one this would silently take on.
+            sql += " AND e.knowledge_id IS NOT NULL AND e.embed_model <> ?"
+            params.append(active_model)
         if cap:
             sql += " LIMIT ?"
             params.append(int(cap))
@@ -6590,12 +6641,13 @@ async def _do(name, a):
                 f"{r['content']} {(r['context'] if 'context' in r.keys() else '') or ''}"
                 for r in chunk
             ]
-            embs = store.embed(texts)
+            # Same rule as the save path: the rebuilt row is labelled with the
+            # backend that produced it. Reading the name off configuration is
+            # what let a fallback masquerade as the configured model.
+            embs, (model_name, provider) = store.embed_with_identity(texts)
             if not embs or len(embs) != len(chunk):
                 skipped += len(chunk)
                 continue
-            model_name = store._active_embed_model_name()
-            provider = store._embed_mode or "fastembed"
             for r, vec in zip(chunk, embs):
                 try:
                     cls = _v11_classify(r["content"])
