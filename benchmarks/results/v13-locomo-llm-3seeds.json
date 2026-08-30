@@ -1,0 +1,145 @@
+{
+  "benchmark": "LoCoMo (LLM-judged accuracy)",
+  "run_date": "2026-08-27",
+  "version": "total-agent-memory v13.0.0",
+  "generator": "gpt-4o",
+  "judge": "gpt-4o-mini",
+  "seeds": [
+    1,
+    2,
+    3
+  ],
+  "flags": "--temporal-filter --over-fetch-k 20 --concurrency 8, record_usage=False",
+  "why_three_runs": "An LLM-judged run is one sample, not a measurement: temperature 0 does not make the API deterministic and OpenAI documents `seed` as best-effort only. A single number would not survive the question 'does it reproduce'. Three seeded runs; the spread is published.",
+  "per_category": {
+    "single-hop": {
+      "n": 282,
+      "per_seed": {
+        "1": 0.3582,
+        "2": 0.3723,
+        "3": 0.3688
+      },
+      "mean": 0.3664,
+      "min": 0.3582,
+      "max": 0.3723,
+      "range": 0.0141,
+      "stdev": 0.0073
+    },
+    "temporal": {
+      "n": 321,
+      "per_seed": {
+        "1": 0.4237,
+        "2": 0.4268,
+        "3": 0.4268
+      },
+      "mean": 0.4258,
+      "min": 0.4237,
+      "max": 0.4268,
+      "range": 0.0031,
+      "stdev": 0.0018
+    },
+    "multi-hop": {
+      "n": 96,
+      "per_seed": {
+        "1": 0.3021,
+        "2": 0.2917,
+        "3": 0.2812
+      },
+      "mean": 0.2917,
+      "min": 0.2812,
+      "max": 0.3021,
+      "range": 0.0209,
+      "stdev": 0.0105
+    },
+    "open-domain": {
+      "n": 841,
+      "per_seed": {
+        "1": 0.5707,
+        "2": 0.5731,
+        "3": 0.5672
+      },
+      "mean": 0.5703,
+      "min": 0.5672,
+      "max": 0.5731,
+      "range": 0.0059,
+      "stdev": 0.003
+    },
+    "adversarial": {
+      "n": 446,
+      "per_seed": {
+        "1": 0.8991,
+        "2": 0.9036,
+        "3": 0.9081
+      },
+      "mean": 0.9036,
+      "min": 0.8991,
+      "max": 0.9081,
+      "range": 0.009,
+      "stdev": 0.0045
+    }
+  },
+  "overall_no_adversarial": {
+    "n": 1540,
+    "per_seed": {
+      "1": 0.4844,
+      "2": 0.4883,
+      "3": 0.4838
+    },
+    "mean": 0.4855,
+    "min": 0.4838,
+    "max": 0.4883,
+    "range": 0.0045,
+    "stdev": 0.0024
+  },
+  "overall_all": {
+    "n": 1986,
+    "per_seed": {
+      "1": 0.5775,
+      "2": 0.5816,
+      "3": 0.5791
+    },
+    "mean": 0.5794,
+    "min": 0.5775,
+    "max": 0.5816,
+    "range": 0.0041,
+    "stdev": 0.0021
+  },
+  "retrieval_is_deterministic": {
+    "note": "Retrieval does not vary across seeds \u2014 only generation and judging do.",
+    "R@1": 0.361,
+    "R@5": 0.6019,
+    "R@10": 0.6831,
+    "identical_across_seeds": true
+  },
+  "tokens_total_all_runs": {
+    "input": 6689184,
+    "output": 53872
+  },
+  "supersedes": "benchmarks/results/v9_full_gpt4o_20260628-194133.json (0.582 no-adv). That run predates the record_usage=False fix, so it was partly measuring its own earlier queries and was inflated. The drop to 0.551 is the correction, not a regression.",
+  "judge_guard": {
+    "rules": [
+      "categories 1-4: a refusal cannot be correct when the gold is a concrete fact",
+      "category 5 with an empty gold: only a refusal can be correct"
+    ],
+    "why": "Two mirror-image defects in the same LLM judge. (a) On factual categories it answered YES to 'Not mentioned in the conversation.' against golds like 'Sweden' or 'June 2023', F1 exactly 0.00 \u2014 the adversarial rule bleeding across. (b) On adversarial, 99.6% of LoCoMo golds are the empty string, and the judge accepts almost any fluent answer against an empty reference, so hallucinations scored correct.",
+    "effect": {
+      "no_adversarial": "0.551 -> 0.486 (-6.6pp)",
+      "adversarial": "0.966 -> 0.904 (-6.2pp)",
+      "all": "0.645 -> 0.579 (-6.6pp)"
+    },
+    "per_category_bias_pp": {
+      "temporal": 14.33,
+      "multi-hop": 10.76,
+      "single-hop": 6.5,
+      "open-domain": 3.17,
+      "adversarial": 6.05
+    },
+    "not_proportional_to_refusal_rate": "Tested: correlation between per-category bias and per-category refusal rate is r = -0.466 over 5 categories \u2014 negative, and meaningless at that n. The driver is the share of refusals the judge ACCEPTS, which ranges 15%-43% by category, not how often the system refuses."
+  },
+  "judge_noise": {
+    "generator_answer_varied_across_seeds": "12.5%",
+    "judge_verdict_varied_across_seeds": "5.1%",
+    "judge_flipped_on_an_identical_answer": "2.7%",
+    "note": "The aggregate holds within +/-0.005 because flips roughly cancel, not because the instrument is precise. Quoting a single run to three decimals is unwarranted."
+  }
+}

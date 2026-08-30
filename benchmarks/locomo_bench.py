@@ -54,7 +54,7 @@ def setup_env(db_path: Path, disable_llm: bool) -> None:
 
 
 def import_store():
-    sys.path.insert(0, str(Path("/Users/vitalii-macpro/claude-memory-server/src")))
+    sys.path.insert(0, str(ROOT / "src"))
     import server  # noqa: F401  — triggers MEMORY_DIR resolution
     return server
 
@@ -147,7 +147,72 @@ def extract_dia_ids(entry: dict) -> list[str]:
             tags = json.loads(tags)
         except Exception:
             tags = []
-    return [t for t in tags if isinstance(t, str) and t.startswith("D") and ":" in t]
+    # Store lowercases tags on save; gold evidence ids are upper-case
+    # (e.g. "D14:6"). Match case-insensitively and normalise to upper.
+    return [t.upper() for t in tags
+            if isinstance(t, str) and t[:1].lower() == "d" and ":" in t]
+
+
+def negative_controls(samples: list[dict], top_k: int = 10,
+                      seed: int = 42) -> dict:
+    """Score degenerate baselines on the same questions.
+
+    A retrieval number means nothing on its own: if picking ten turns at random
+    scored about the same, the pipeline would not be what produced it. So the
+    floor ships next to the number.
+
+    Three controls, no embeddings and no model:
+      random  — ten turns drawn uniformly from the same conversation
+      first   — the ten earliest turns
+      recency — the ten most recent turns (the "just show the tail" strategy)
+
+    Borrowed from a sibling project, which caught a scoring metric that a
+    deliberate non-answer could beat. Ours survives: ~50x over random.
+    """
+    import random as _random
+
+    rng = _random.Random(seed)
+    tally = {name: {"n": 0, "r@1": 0, "r@5": 0, "r@10": 0}
+             for name in ("random", "first", "recency")}
+
+    for sample in samples:
+        conv = sample["conversation"]
+        session_keys = sorted(
+            [k for k in conv if k.startswith("session_") and not k.endswith("_date_time")],
+            key=lambda k: int(k.split("_")[1]),
+        )
+        pool: list[str] = []
+        for sk in session_keys:
+            turns = conv[sk] if isinstance(conv[sk], list) else []
+            pool += [t["dia_id"] for t in turns if t.get("dia_id") and t.get("text")]
+        if not pool:
+            continue
+
+        for qa in sample.get("qa", []):
+            evidence = set(qa.get("evidence") or [])
+            if qa.get("category") == 5 or not evidence:
+                continue
+            ranked = {
+                "random": rng.sample(pool, min(top_k, len(pool))),
+                "first": pool[:top_k],
+                "recency": pool[-top_k:][::-1],
+            }
+            for name, ids in ranked.items():
+                bucket = tally[name]
+                bucket["n"] += 1
+                for k in (1, 5, 10):
+                    bucket[f"r@{k}"] += int(any(d in evidence for d in ids[:k]))
+
+    out = {}
+    for name, b in tally.items():
+        n = b["n"] or 1
+        out[name] = {
+            "n": b["n"],
+            "R@1": round(b["r@1"] / n, 4),
+            "R@5": round(b["r@5"] / n, 4),
+            "R@10": round(b["r@10"] / n, 4),
+        }
+    return out
 
 
 def eval_samples(server_mod, samples: list[dict], top_k: int = 10,
@@ -171,8 +236,12 @@ def eval_samples(server_mod, samples: list[dict], top_k: int = 10,
             evidence = set(qa.get("evidence", []) or [])
 
             t0 = time.time()
+            # record_usage=False: search() otherwise bumps recall_count on every
+            # returned row, and `recall_boost` feeds that straight back into the
+            # score. Leaving it on makes each re-run against the same DB score
+            # higher than the last — the benchmark would measure its own history.
             res = recall.search(query=question, project=project, limit=top_k,
-                                detail="summary")
+                                detail="summary", record_usage=False)
             latencies.append((time.time() - t0) * 1000)
 
             # All entries are type="fact"
@@ -248,6 +317,14 @@ def eval_samples(server_mod, samples: list[dict], top_k: int = 10,
             "R@1": round(sum(d["r@1"] for c, d in per_cat.items() if c != 5) / total_n, 4),
             "R@5": round(sum(d["r@5"] for c, d in per_cat.items() if c != 5) / total_n, 4),
             "R@10": round(sum(d["r@10"] for c, d in per_cat.items() if c != 5) / total_n, 4),
+            "MRR": round(
+                sum(
+                    sum(1.0 / r for r in d["first_rank"])
+                    for c, d in per_cat.items() if c != 5
+                ) / total_n, 4),
+            "found_in_top10": round(
+                sum(d["gold_in_topk_cnt"] for c, d in per_cat.items() if c != 5)
+                / total_n, 4),
         }
         agg["overall"] = overall
 
@@ -267,10 +344,14 @@ def eval_samples(server_mod, samples: list[dict], top_k: int = 10,
     return {"per_category": agg, "latency": latency, "adversarial": adv}
 
 
+# Verified against benchmarks/data/locomo/data/locomo10.json: category 2 is
+# "When did ...?" (temporal, n=321) and category 3 is inference-style
+# multi-hop (n=96). The map used to have 2 and 3 swapped, which silently
+# mislabelled every per-category number this runner printed.
 CATEGORY_NAMES = {
     1: "single-hop",
-    2: "multi-hop",
-    3: "temporal",
+    2: "temporal",
+    3: "multi-hop",
     4: "open-domain",
     5: "adversarial",
 }
@@ -303,6 +384,20 @@ def format_report(ingest_stats: dict, eval_stats: dict) -> str:
         )
     lat = eval_stats.get("latency", {})
     adv = eval_stats.get("adversarial", {})
+    controls = eval_stats.get("negative_controls") or {}
+    if controls:
+        lines.append("")
+        lines.append("Negative controls — the floor this number stands on")
+        best = max(controls.values(), key=lambda d: d["R@5"])["R@5"] or 1e-9
+        for name in ("random", "first", "recency"):
+            d = controls.get(name)
+            if d:
+                lines.append(f"  {name:<20} {d['n']:>5}  {d['R@1']:>6.3f}  "
+                             f"{d['R@5']:>6.3f}  {d['R@10']:>6.3f}")
+        overall = per.get("overall", {}).get("R@5")
+        if overall:
+            lines.append(f"  → pipeline is {overall / best:.0f}x the best degenerate baseline")
+
     lines.append("")
     lines.append("Latency")
     lines.append(f"  p50: {lat.get('p50_ms', 0)} ms  p95: {lat.get('p95_ms', 0)} ms  "
@@ -356,6 +451,8 @@ def main() -> int:
     print(f"[locomo] eval (top_k={args.top_k}, limit_qa={args.limit_qa})")
     eval_stats = eval_samples(server_mod, dataset, top_k=args.top_k,
                               limit_qa=args.limit_qa)
+    # Always alongside: a retrieval score with no floor under it is not a claim.
+    eval_stats["negative_controls"] = negative_controls(dataset, top_k=args.top_k)
 
     report = format_report(ingest_stats, eval_stats)
     print(report)

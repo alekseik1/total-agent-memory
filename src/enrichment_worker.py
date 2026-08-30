@@ -459,39 +459,6 @@ def run_pending(db, *, max_rows: int | None = None, store=None) -> dict[str, int
 _BUSY_TIMEOUT_MS = 15000
 
 
-def _open_own_connection(store_db) -> sqlite3.Connection | None:
-    """Open a private connection to the same database file as `store_db`.
-
-    The worker must not write through the Store's Connection: sqlite3 keeps
-    the implicit-BEGIN state on the Connection, not on the thread, so a tick
-    firing while an MCP handler is mid-transaction corrupts the transaction
-    boundary — observed as "cannot start a transaction within a transaction"
-    and "bad parameter or other API misuse". WAL lets a second connection
-    write to the same file instead.
-
-    Returns None when the store's database has no file behind it (":memory:",
-    which tests inject): a private in-memory database cannot be reopened, so
-    the caller keeps sharing rather than silently draining a different, empty
-    queue.
-    """
-    try:
-        row = store_db.execute("PRAGMA database_list").fetchone()
-    except Exception as e:  # noqa: BLE001 — a closed/hostile db must not kill the thread
-        LOG(f"own connection unavailable, sharing the store's: {e}")
-        return None
-    path = row[2] if row else ""
-    if not path:
-        return None
-    conn = sqlite3.connect(path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    # No journal_mode here: WAL is a persistent property of the file, already
-    # set by whoever opened it first (server.py), and re-declaring it needs a
-    # lock no other connection may hold — it fails with "database is locked"
-    # exactly when a second writer exists, which is the case this code is for.
-    conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
-    return conn
-
-
 class _WorkerThread(threading.Thread):
     def __init__(self, store):
         super().__init__(daemon=True, name="enrich-worker")
@@ -501,11 +468,53 @@ class _WorkerThread(threading.Thread):
     def stop(self) -> None:
         self._stop.set()
 
+    def _path_from_connection(self) -> str | None:
+        """The file behind `store.db`, or None when there is none to reopen."""
+        try:
+            row = self._store.db.execute("PRAGMA database_list").fetchone()
+        except Exception as e:  # noqa: BLE001 — a test double must not kill the thread
+            LOG(f"own connection unavailable, sharing the store's: {e}")
+            return None
+        return (row[2] or None) if row else None
+
+    def _open_db(self):
+        """Private connection to the same database file.
+
+        Sharing the Store's Connection across threads corrupts sqlite3's
+        implicit transaction state — the worker's writes and the main thread's
+        writes interleave into "cannot start a transaction within a
+        transaction". WAL mode is what makes two connections to one file the
+        right answer here.
+
+        A Store that predates `db_path` still gets its own connection: the
+        file is asked of the connection itself via `PRAGMA database_list`.
+        Only when neither route yields a path — a test double whose `db` is
+        not a connection, or an in-memory database, which cannot be reopened
+        and whose private copy would silently drain a different, empty queue —
+        does the worker keep sharing, preserving previous behaviour rather
+        than refusing to start.
+        """
+        db_path = getattr(self._store, "db_path", None) or self._path_from_connection()
+        if db_path is None or str(db_path) in ("", ":memory:"):
+            return self._store.db, False
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        # No journal_mode here: WAL is a persistent property of the file, set
+        # by whoever opened it first (server.py). Re-declaring it takes a lock
+        # no other connection may hold, so it fails with "database is locked"
+        # exactly when a second writer exists — the case this code is for.
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        return conn, True
+
     def run(self) -> None:
         tick = _tick_interval()
+        try:
+            db, owned = self._open_db()
+        except Exception as e:
+            LOG(f"could not open worker connection: {e}")
+            return
         LOG(f"started (tick={tick}s, batch={_batch_size()})")
-        own = _open_own_connection(self._store.db)
-        db = own if own is not None else self._store.db
         try:
             while not self._stop.is_set():
                 try:
@@ -514,8 +523,11 @@ class _WorkerThread(threading.Thread):
                     LOG(f"tick error: {e}")
                 self._stop.wait(tick)
         finally:
-            if own is not None:
-                own.close()
+            if owned:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
 
 def start_worker(store) -> _WorkerThread | None:

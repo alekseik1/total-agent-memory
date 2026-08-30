@@ -40,19 +40,18 @@ except Exception as _v11_exc:  # pragma: no cover — never block startup
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool, TextContent, ToolAnnotations
 
-try:
-    import chromadb
-    HAS_CHROMA = True
-except ImportError:
-    HAS_CHROMA = False
+import importlib.util
 
-try:
-    from sentence_transformers import SentenceTransformer
-    HAS_ST = True
-except ImportError:
-    HAS_ST = False
+# chromadb (~70 MB RSS) and sentence_transformers (which pulls in torch,
+# ~450 MB) are *fallback* paths — when fastembed is healthy neither is ever
+# used. Importing them eagerly cost every user that memory anyway: a bare
+# `import server` measured 548 MB RSS with all three loaded. find_spec answers
+# "is it installed" without importing; the real import happens at first use.
+# Reported by d.snezhinskiy, who saw a 1.5 GB MCP server on a client machine.
+HAS_CHROMA = importlib.util.find_spec("chromadb") is not None
+HAS_ST = importlib.util.find_spec("sentence_transformers") is not None
 
 try:
     from fastembed import TextEmbedding
@@ -258,14 +257,18 @@ class Store:
         for d in ["raw", "chroma", "transcripts", "queue", "backups", "extract-queue"]:
             (MEMORY_DIR / d).mkdir(parents=True, exist_ok=True)
 
-        # check_same_thread=False is safe here because:
-        # 1. We run in WAL mode (concurrent readers + a single writer).
-        # 2. busy_timeout absorbs the rare write contention.
-        # 3. The async enrichment worker runs in a daemon thread that
-        #    needs to read/write through the same Connection object.
-        self.db = sqlite3.connect(
-            str(MEMORY_DIR / "memory.db"), check_same_thread=False
-        )
+        self.db_path = MEMORY_DIR / "memory.db"
+        # check_same_thread=False lets background threads *read* through this
+        # Connection (the enrichment worker calls Store._binary_search, and
+        # SELECT does not open an implicit transaction).
+        #
+        # It does NOT make writes from another thread safe: sqlite3's legacy
+        # isolation mode keeps the implicit BEGIN/COMMIT on the Connection, so
+        # two threads issuing DML interleave into "cannot start a transaction
+        # within a transaction" / "no transaction active". WAL and
+        # busy_timeout solve contention *between* connections, not this. The
+        # enrichment worker therefore opens its own connection to db_path.
+        self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
@@ -306,6 +309,8 @@ class Store:
         self._chroma_client = None
         if HAS_CHROMA and USE_BINARY_SEARCH != "true":
             try:
+                import chromadb  # noqa: PLC0415 — deferred: see HAS_CHROMA above
+
                 self._chroma_client = chromadb.PersistentClient(path=str(MEMORY_DIR / "chroma"))
                 # Default collection name `knowledge` == text space (legacy alias).
                 self.chroma = self._chroma_client.get_or_create_collection(
@@ -371,6 +376,10 @@ class Store:
     def embedder(self):
         if self._embedder is None and HAS_ST:
             try:
+                from sentence_transformers import (  # noqa: PLC0415 — deferred
+                    SentenceTransformer,
+                )
+
                 self._embedder = SentenceTransformer(EMBEDDING_MODEL)
             except Exception:
                 pass
@@ -1123,7 +1132,11 @@ class Store:
 
         migrations_dir = _Path(__file__).resolve().parent.parent / "migrations"
         if not migrations_dir.is_dir():
-            return
+            raise RuntimeError(
+                f"Bundled SQL migrations are missing: {migrations_dir}. "
+                "The installation artifact is incomplete; reinstall "
+                "total-agent-memory from a distribution that includes migrations/*.sql."
+            )
 
         # Ensure tracker table
         self.db.executescript(
@@ -1148,18 +1161,53 @@ class Store:
             if version in applied:
                 continue
             description = stem[len(version) + 1 :].replace("_", " ") or stem
+            script = sql_path.read_text()
             try:
-                self.db.executescript(sql_path.read_text())
-                self.db.execute(
-                    "INSERT OR IGNORE INTO migrations (version, description, applied_at) "
-                    "VALUES (?, ?, ?)",
-                    (version, description, _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
-                )
-                self.db.commit()
-                LOG(f"Applied migration {version}: {description}")
+                self.db.executescript(script)
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    LOG(f"Migration {version} failed: {e}")
+                    continue  # don't mark applied — will retry next startup
+                # SQLite has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS, so a
+                # DB where the column already exists (restored backup, column
+                # added out-of-band) fails here and, because executescript is
+                # all-or-nothing, never reaches the CREATE INDEX statements —
+                # the migration then re-fails on every startup forever.
+                # Replay statement by statement, skipping only the redundant
+                # ALTERs, then record it as applied.
+                if not self._replay_migration_skipping_existing(script, version):
+                    continue
             except Exception as e:
                 LOG(f"Migration {version} failed: {e}")
-                # don't mark applied — will retry next startup
+                continue  # don't mark applied — will retry next startup
+
+            self.db.execute(
+                "INSERT OR IGNORE INTO migrations (version, description, applied_at) "
+                "VALUES (?, ?, ?)",
+                (version, description, _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
+            )
+            self.db.commit()
+            LOG(f"Applied migration {version}: {description}")
+
+    def _replay_migration_skipping_existing(self, script: str, version: str) -> bool:
+        """Re-run `script` one statement at a time, tolerating existing columns.
+
+        Returns True when every statement either succeeded or was a redundant
+        ``ADD COLUMN``; False (with a log line) on any other error, so the
+        caller leaves the migration unrecorded and retries next startup.
+        """
+        for statement in script.split(";"):
+            if not statement.strip():
+                continue
+            try:
+                self.db.execute(statement)
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" in str(e).lower():
+                    continue
+                LOG(f"Migration {version} failed on replay: {e}")
+                self.db.rollback()
+                return False
+        return True
 
     def _create_observations_table(self):
         """Create lightweight observations table for auto-capture."""
@@ -2687,7 +2735,8 @@ class Recall:
         return self.s._check_ollama()
 
     def search(self, query, project=None, ktype="all", limit=10, detail="full", branch=None, fusion="rrf",
-               rerank=False, diverse=False, embedding_space=None, _explain=False):
+               rerank=False, diverse=False, embedding_space=None, _explain=False,
+               record_usage=True):
         # v11 Phase 5 — total wall-clock for this search; recorded into
         # `memory_core.telemetry.counters['search_total_ms']`.
         try:
@@ -2703,11 +2752,12 @@ class Recall:
                 query, project=project, ktype=ktype, limit=limit, detail=detail,
                 branch=branch, fusion=fusion, rerank=rerank, diverse=diverse,
                 embedding_space=embedding_space, _explain=_explain,
+                record_usage=record_usage,
             )
 
     def _search_impl(self, query, project=None, ktype="all", limit=10, detail="full",
                      branch=None, fusion="rrf", rerank=False, diverse=False,
-                     embedding_space=None, _explain=False):
+                     embedding_space=None, _explain=False, record_usage=True):
         """Underlying implementation; wrapped by `search` for telemetry.
 
         v11 Phase 6b — `embedding_space` (str | list[str] | None) filters
@@ -3422,9 +3472,15 @@ class Recall:
             except Exception as e:
                 LOG(f"graph_expand failed, keeping original ranked: {e}")
 
-        returned_ids = [item["r"]["id"] for item in ranked]
-        if returned_ids:
-            self.s.bump_recall(returned_ids)
+        # Spaced-repetition feedback: a recalled record scores higher next
+        # time (`recall_boost` below). Callers that measure retrieval rather
+        # than use it — benchmarks, evals, memory_explain_search — must pass
+        # record_usage=False, otherwise every re-run inflates the scores of
+        # whatever the previous run happened to return.
+        if record_usage:
+            returned_ids = [item["r"]["id"] for item in ranked]
+            if returned_ids:
+                self.s.bump_recall(returned_ids)
 
         total_tokens = 0
         grouped = {}
@@ -3841,15 +3897,77 @@ recall: Recall = None
 SID: str = None
 BRANCH: str = ""
 
+# mcp SDK 1.x exposed @Server.list_tools() / @Server.call_tool() decorators.
+# The 2.x line (protocol revision 2026-07-28) dropped them for
+# add_request_handler(method, params_model, handler). We support both so the
+# same source runs against an old pinned install and a fresh one.
+MCP_SDK_ERA = "1.x" if hasattr(app, "list_tools") else "2.x"
 
-@app.list_tools()
+
+# ── Tool behaviour hints (MCP `annotations`) ──────────────────────────
+# Clients use these to decide what may run without a confirmation prompt and
+# what to retry. They are hints, not guarantees — the classification below is
+# the source of truth for this server and is covered by a test that fails when
+# a new tool is added without being classified.
+#
+# Read-only: answers a question, writes nothing a later read can observe.
+# Counters like `recall_count` do not count as environment mutation.
+_READ_ONLY_TOOLS = frozenset({
+    "analogize", "benchmark", "classify_task", "file_context",
+    "kg_at", "kg_timeline", "list_intents",
+    "memory_concepts", "memory_consolidate_status", "memory_context_build",
+    "memory_episode_recall", "memory_eval_contradictions",
+    "memory_eval_entity_consistency", "memory_eval_locomo",
+    "memory_eval_long_context", "memory_eval_recall", "memory_eval_temporal",
+    "memory_explain_search", "memory_export", "memory_get", "memory_graph",
+    "memory_graph_stats", "memory_history", "memory_perf_report",
+    "memory_recall", "memory_recall_iterative", "memory_search_by_tag",
+    "memory_search_fast", "memory_self_assess", "memory_skill_get",
+    "memory_stats", "memory_temporal_query", "memory_timeline",
+    "search_intents", "self_patterns", "self_rules_context",
+    "task_phases_list", "workflow_predict",
+})
+
+# Destructive: removes or overwrites knowledge a user cannot trivially restore.
+_DESTRUCTIVE_TOOLS = frozenset({
+    "memory_delete", "memory_forget", "memory_update",
+    "kg_invalidate_fact", "memory_rebuild_embeddings", "memory_rebuild_fts",
+})
+
+# Idempotent writes: running twice with the same arguments changes nothing
+# beyond the first run.
+_IDEMPOTENT_TOOLS = frozenset({
+    "memory_delete", "memory_forget", "memory_rebuild_embeddings",
+    "memory_rebuild_fts", "memory_warmup", "memory_graph_index",
+    "memory_wiki_generate", "rule_set_phase", "memory_entity_resolve",
+})
+
+
+def _annotate(tool: Tool) -> Tool:
+    """Attach MCP behaviour hints to a tool definition."""
+    read_only = tool.name in _READ_ONLY_TOOLS
+    tool.annotations = ToolAnnotations(
+        readOnlyHint=read_only,
+        destructiveHint=False if read_only else tool.name in _DESTRUCTIVE_TOOLS,
+        idempotentHint=read_only or tool.name in _IDEMPOTENT_TOOLS,
+        # Memory is the canonical closed world: every tool acts on this
+        # machine's own store, never on an open set of external entities.
+        openWorldHint=False,
+    )
+    return tool
+
+
 async def list_tools():
+    return [_annotate(t) for t in await _tool_catalogue()]
+
+
+async def _tool_catalogue():
     return [
         Tool(
             name="memory_recall",
             description="Search ALL memory: decisions, solutions, facts, lessons from ALL past sessions. "
                         "6-stage pipeline: FTS5+BM25 → semantic → fuzzy → graph → (optional) CrossEncoder → (optional) MMR. "
-                        "Default: hybrid mode (BM25+semantic+RRF, 97.4% R@5 on LongMemEval). "
+                        "Default: hybrid mode (BM25 + semantic + RRF). "
                         "Use BEFORE starting any task. "
                         "v11.0: routes to fast hot path when MEMORY_MODE=fast (default). "
                         "Use memory_search_fast / memory_explain_search for explicit fast routing.",
@@ -5065,15 +5183,84 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
-async def call_tool(name, args):
-    store.raw_append(SID, {"type": "tool_call", "tool": name, "args": args})
+async def _call_tool_impl(name, args) -> tuple[list[TextContent], bool]:
+    """Run a tool and report whether it failed.
+
+    The bool is the MCP ``isError`` flag: a tool that raised is reported
+    inside the result so the model can see and self-correct, rather than as a
+    protocol-level error.
+    """
     try:
+        # Guarded: a client can call a tool before _bootstrap_session() has
+        # run (or after a failed bootstrap). Losing the audit line is fine;
+        # crashing the transport is not.
+        if store is not None:
+            store.raw_append(SID, {"type": "tool_call", "tool": name, "args": args})
         r = await _do(name, args)
-        return [TextContent(type="text", text=r)]
+        return [TextContent(type="text", text=r)], False
     except Exception as e:
         LOG(f"Error in {name}: {e}")
-        return [TextContent(type="text", text=f"Error: {e}")]
+        return [TextContent(type="text", text=f"Error: {e}")], True
+
+
+async def call_tool(name, args):
+    content, _is_error = await _call_tool_impl(name, args)
+    return content
+
+
+def _structured_content(content: list[TextContent], is_error: bool):
+    """Parsed payload for MCP `structuredContent`, or None when there isn't one.
+
+    Nearly every tool here answers with a JSON document rendered as text. On
+    protocol revision 2026-07-28 `structuredContent` accepts any JSON value, so
+    we hand clients the parsed object as well and they stop re-parsing strings.
+    Tools that answer in prose, and error results, carry text only.
+
+    No `outputSchema` is declared, so this stays additive: the spec only
+    constrains structuredContent against a schema when one is advertised.
+    """
+    if is_error or len(content) != 1:
+        return None
+    text = (content[0].text or "").lstrip()
+    if not text or text[0] not in "{[":
+        return None
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError):
+        return None
+
+
+def _register_mcp_handlers(server) -> str:
+    """Wire tools/list + tools/call onto `server` for either SDK era."""
+    if hasattr(server, "list_tools"):
+        server.list_tools()(list_tools)
+        server.call_tool()(call_tool)
+        return "1.x"
+
+    from mcp.types import (  # noqa: PLC0415 — 2.x-only symbols
+        CallToolRequestParams,
+        CallToolResult,
+        ListToolsResult,
+        PaginatedRequestParams,
+    )
+
+    async def _handle_list_tools(_ctx, _params):
+        return ListToolsResult(tools=await list_tools())
+
+    async def _handle_call_tool(_ctx, params):
+        content, is_error = await _call_tool_impl(params.name, params.arguments or {})
+        return CallToolResult(
+            content=list(content),
+            structured_content=_structured_content(content, is_error),
+            is_error=is_error,
+        )
+
+    server.add_request_handler("tools/list", PaginatedRequestParams, _handle_list_tools)
+    server.add_request_handler("tools/call", CallToolRequestParams, _handle_call_tool)
+    return "2.x"
+
+
+_register_mcp_handlers(app)
 
 
 # ──────────────────────────────────────────────
@@ -6257,6 +6444,9 @@ async def _do(name, a):
             rerank=False, diverse=False,
             embedding_space=a.get("embedding_space"),
             _explain=True,
+            # Diagnostics must not change what they diagnose: explaining a
+            # search would otherwise strengthen every record it reports on.
+            record_usage=False,
         )
         return J(result)
 
@@ -6906,7 +7096,10 @@ async def _do(name, a):
         from v11_handlers import handle_consolidate_status
         return J(handle_consolidate_status(a, conn=store.db))
 
-    return J({"error": "Unknown tool"})
+    # MCP: a name the server does not implement is an error, not a result.
+    # _call_tool_impl turns this into an isError=true CallToolResult so the
+    # model sees it and can self-correct.
+    raise ValueError(f"Unknown tool: {name}")
 
 
 def _detect_git_branch():

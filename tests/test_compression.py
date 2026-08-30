@@ -9,6 +9,10 @@ import pytest
 
 from base_schema import apply_full_schema
 
+# These tests stub the LLM seam; `llm_enabled` skips the has_llm() probe
+# so they do not depend on a live Ollama being present on the machine.
+pytestmark = pytest.mark.usefixtures("llm_enabled")
+
 
 @pytest.fixture
 def cmp_db():

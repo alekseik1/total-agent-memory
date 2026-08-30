@@ -4,6 +4,7 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+
 ## [Unreleased]
 
 ### Fixed — the enrichment worker corrupted transactions it did not own
@@ -177,6 +178,314 @@ and versions use [Semantic Versioning](https://semver.org/).
   pin, reproducing the same breakage — it now installs from
   `requirements.txt` instead of hand-rolling its dependency list, so there is
   a single source of truth for the pin.
+
+
+## [13.0.1] — 2026-08-27 — the write path was quadratic
+
+### Fixed — saves got slower as the store grew, and it was our own doing
+`graph/auto_link.py` runs on every save and constructed its own
+`ConceptExtractor` each time. The node-name cache lives on the instance, so it
+was discarded immediately and `_get_node_names` re-read the entire
+`graph_nodes` table per write — O(N) per save, O(N²) over an ingest.
+
+Measured, and deliberately by counting reads rather than timing, so the number
+does not depend on machine load:
+
+| | full reads of `graph_nodes` per 1,000 saves | rows read |
+|---|---:|---:|
+| before | **1,000** | 500,499 (at ~5k nodes) |
+| after | **1** | — |
+
+At the 139k nodes a BEAM-1M ingest reaches, those same 1,000 saves would have
+read roughly **139 million rows**. That is the throughput curve we published in
+v13.0.0 as an open question: **25.6 → 10.8 → 6.3 messages/second** across the
+100K / 500K / 1M scales, on identical code. It was not the storage engine and
+not the embedding model — it was a constructor in the wrong place.
+
+`shared_extractor(db)` returns one instance per connection. Three regression
+tests: a read counter over 40 saves, instance identity per connection, and a
+source guard against reintroducing the constructor call.
+
+> v13.0.0 also shipped an incremental `_cache_put` for this cache. That change
+> was correct and nearly useless on its own — the instance holding the cache
+> did not survive a single save, which is why its A/B measured 3%. Fixing the
+> cache without checking who owns it was the wrong order.
+
+### Fixed — dependencies declared in only one of two places
+- `fastembed`, `starlette`, `uvicorn`, `httpx` and `numpy` were in
+  `requirements.txt` but not in `pyproject` dependencies, so `install.sh` and
+  Docker users got them and every `pip` / `uvx` / `npx` / `brew` user did not.
+  The last four arrived transitively; `fastembed` did not arrive at all, and
+  without it the server falls back to sentence-transformers with a different,
+  English-only model — the two install paths retrieved differently.
+- Measured on one machine the fallback is in fact *lighter* (565 MB against
+  921 MB) because the models differ in size, so this is a consistency fix and
+  not a memory one. The ~1.5 GB users reported was eager torch, fixed in
+  v13.0.0.
+- `tests/test_dependency_declaration.py` compares the two lists and checks that
+  anything on the optional allow-list really is imported defensively.
+
+### Added — BEAM at the 1M scale
+- 74,630 messages, 625 gradable probes: **R@5 0.448**, R@1 0.227, MRR 0.327.
+  Recall decays gracefully — 13x the haystack from 100K costs 12.7 points — and
+  the abilities that hold up hold up at every scale (knowledge update 0.886,
+  contradiction resolution 0.871).
+- The run exposed a **second**, unrelated scaling problem: search p50 grew from
+  58 ms at 500K to **411 ms** at 1M for twice the data. `Store._binary_search`
+  loads every active record's binary vector into numpy per query, so search is
+  linear in store size. Not fixed here; recorded as the largest open
+  performance item rather than left for a user to discover.
+
+### Changed — benchmark methodology (no runtime effect)
+- The LoCoMo LLM judge scored refusals as correct answers on factual
+  categories, and hallucinations as correct abstentions on adversarial, where
+  99.6% of golds are the empty string. Both now overruled deterministically.
+  Published accuracy moved 0.551 → 0.486 (no-adv) and 0.966 → 0.904
+  (adversarial).
+- LLM-judged accuracy is published as a spread over three seeds rather than a
+  single run, with the judge's own noise measured: the verdict flips on 2.7% of
+  byte-identical answers.
+- Every LoCoMo run now scores three degenerate baselines alongside the metric,
+  so the floor ships with the number. The pipeline is 27× the best of them.
+
+## [13.0.0] — 2026-08-27 — MCP 2026-07-28, and honest benchmarks
+
+**Every install created since the MCP Python SDK went 2.0 was broken.** The
+2.x line dropped the `@Server.list_tools()` / `@Server.call_tool()` decorators
+this server was built on, and the dependency was floored at `mcp[cli]>=1.0.0`,
+so a fresh `pip` / `uvx` / `npx` / `brew` / `docker` install resolved 2.x and
+died at import with `AttributeError: 'Server' object has no attribute
+'list_tools'`. Existing installs kept working only because their pinned 1.x
+never moved. **If you installed after mcp 2.0 shipped, upgrade.**
+
+Fixing it turned out to be the whole story: once tools registered again, the
+server was already speaking the stateless 2026-07-28 protocol, because the SDK
+serves both eras from one process. This release makes that explicit, adds the
+2026 result shapes, and then goes back over the benchmark numbers — where a
+feedback loop had been quietly inflating them.
+
+### Fixed — MCP SDK 2.x (breaking for anyone on a fresh install)
+- `src/server.py` registers `tools/list` and `tools/call` through whichever
+  API the installed SDK exposes: the 1.x decorators, or 2.x's
+  `add_request_handler(method, params_model, handler)`. `MCP_SDK_ERA` reports
+  which path is live.
+- `mcp[cli]>=1.9,<3` in both `requirements.txt` and `pyproject.toml`. The
+  upper bound is the actual lesson: an unbounded floor is how 2.0 reached
+  users unannounced.
+- A tool call arriving before `_bootstrap_session()` crashed the transport —
+  `store.raw_append` sat outside the `try`. Now guarded.
+- An unknown tool name returned `{"error": "Unknown tool"}` with
+  `isError: false`. It now raises, so clients see a real error result.
+
+### Added — protocol revision 2026-07-28
+- **Stateless era served end-to-end.** `tools/list`, `server/discover` and
+  `tools/call` all answer without an `initialize` handshake, with protocol
+  metadata carried per-request in `params._meta`. The legacy handshake era
+  keeps working from the same process, so clients on older SDKs are
+  unaffected. `tests/test_mcp_protocol_e2e.py` drives both eras against a
+  real subprocess.
+- **`structuredContent` on every JSON-answering tool.** 2026-07-28 lets
+  structured content be any JSON value, so clients receive the parsed object
+  instead of re-parsing a string. Error results carry text only. No
+  `outputSchema` is declared, so this is purely additive.
+- **Behaviour annotations on all 74 tools** — `readOnlyHint`,
+  `destructiveHint`, `idempotentHint`, `openWorldHint`. Clients use these to
+  decide what runs without a confirmation prompt. 38 tools are read-only;
+  `memory_delete`, `memory_forget`, `memory_update`, `kg_invalidate_fact` and
+  the two rebuild tools are marked destructive. A test fails if a new tool
+  ships unclassified.
+
+### Added — Claude Code plugin
+- `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.mcp.json`
+  and `hooks/hooks.json`: the MCP server, the `memory-protocol` skill and the
+  seven capture hooks install in one step.
+
+      /plugin marketplace add vbcherepanov/total-agent-memory
+      /plugin install total-agent-memory@vbcherepanov
+
+- `bin/tam_plugin_bootstrap.py` resolves a runnable server in order —
+  an existing `.venv`, `PATH`, the plugin's own checkout, `uvx`/`npx`, and
+  finally a venv it creates — then `exec`s it, so the client always sees one
+  process. The first branch touches no network.
+- `hooks/pre-edit.sh` and `hooks/on-bash-error.sh` moved from
+  `examples/hooks/` into `hooks/` so the plugin references one directory.
+  `install.sh` copies the whole directory as before.
+
+### Fixed — benchmarks measured their own history
+`Recall.search` bumps `recall_count` on every row it returns, and the scorer
+adds `recall_boost = min(0.3, recall_count * 0.05)`. Spaced repetition is
+wanted in normal use and fatal for measurement: successive runs against one
+database scored 0.547 → 0.565 → 0.588 → 0.607 R@5 without a line of retrieval
+code changing.
+
+- `Recall.search(..., record_usage=False)` opts out. Both benchmark runners
+  and `memory_explain_search` now pass it — a diagnostic must not change what
+  it diagnoses. A clean run and a re-run are now byte-identical.
+- `benchmarks/locomo_bench.py` had categories 2 and 3 **swapped** (it printed
+  "multi-hop" over the temporal numbers and vice versa), and never computed
+  overall MRR. Verified against `locomo10.json` and corrected.
+
+### Added — BEAM (ICLR 2026)
+- `benchmarks/beam_bench.py` scores retrieval on
+  [BEAM](https://github.com/mohammadtavakoli78/BEAM) at the 100K / 500K / 1M
+  scales across its ten memory abilities, using each probe's `source_chat_ids`
+  as gold evidence. No LLM in the loop, so it is deterministic and free.
+- Measured: **R@5 0.575** at 100K (5,732 messages, p50 17.7 ms) and **0.490**
+  at 500K (38,058 messages, p50 58.5 ms). Contradiction resolution, knowledge
+  update and temporal reasoning hold above 0.78 at both scales;
+  `instruction_following` and `event_ordering` are near-zero at both, which is
+  a statement about the primitive rather than the tuning.
+- Ingest throughput halved between the two scales (25.6 → 10.8 msg/s), so the
+  write path scales with store size. Not yet profiled; recorded rather than
+  explained away.
+
+### Added — LLM-judged accuracy, reported as a spread
+- `benchmarks/locomo_bench_llm.py` gains `--seed`, threaded through to both the
+  generator and the judge. A single LLM-judged run is a *sample*: temperature 0
+  does not make the API deterministic and `seed` is documented as best-effort,
+  so one number cannot answer "does it reproduce".
+- Published as three seeded runs with the spread: **0.486 ± 0.002** over the
+  1,540 non-adversarial questions, **0.594 ± 0.003** over all 1,986, adversarial
+  **0.966**. Retrieval was byte-identical across all three seeds — only
+  generation and judging vary.
+- **The judge needed two deterministic guards, pointing opposite ways.** The
+  second: **99.6% of LoCoMo's adversarial golds are the empty string**, and the
+  judge accepts almost any fluent answer against an empty reference — 27-30
+  invented answers per run scored correct, inflating the one category we used to
+  lead on. With an empty gold only a refusal can be right. Effect: adversarial
+  **0.966 → 0.904**, all **0.645 → 0.579**.
+- **The first guard.** On ~100 of the 1,540
+  non-adversarial questions per run it answered YES to a refusal: "Not mentioned
+  in the conversation." scored correct against golds like `Sweden`, `June 2023`,
+  `Single`, with F1 exactly 0.00. Almost certainly the adversarial rule bleeding
+  across — the judge is told to accept a refusal when the gold also indicates no
+  information. On categories 1-4 the gold *is* a fact, so a refusal cannot be
+  correct; that is a rule, not a judgement, and it now runs at judging time
+  (`judge_overruled` is recorded per record). **Effect: 0.551 → 0.486, -6.6pp.**
+  Found by reading the judge's verdicts rather than its aggregate.
+- Judge noise, measured by aligning all 1,986 questions across seeds: the
+  generator's answer differed on 12.5%, the verdict on 5.1%, and on **2.7%** the
+  judge flipped on a byte-identical answer. The aggregate holds within ±0.005
+  because those flips roughly cancel, not because the instrument is precise.
+- **Supersedes the previously published 0.582.** That run predates
+  `record_usage=False` in this runner — it too was measuring its own earlier
+  queries. The drop is the correction, not a regression.
+- The report banner used to hardcode "v8" and "Haiku 4.5" whatever was actually
+  run, and labelled token counts "Haiku tokens". It now prints the real version,
+  models and seed, and the seed is recorded in the artifact — otherwise a
+  published number cannot be traced to the run that produced it.
+
+### Added — negative controls under the retrieval numbers
+- Every LoCoMo run now scores three degenerate baselines on the same questions:
+  ten random turns from the conversation (R@5 **0.012**), the ten earliest
+  (**0.023**), the ten most recent (**0.003**), against the pipeline's
+  **0.607** — **27x the best of them**.
+- They run in the same pass as the metric, so the floor ships with the number
+  instead of living in a script that stops being run. Technique borrowed from a
+  sibling project that used exactly this to catch a scoring metric a deliberate
+  non-answer could beat; ours survives it.
+
+### Added — LongMemEval measures the product now
+- The runner reimplemented its own BM25 / RRF / MMR / CrossEncoder stack, so
+  the published 96.2% described *an algorithm*, not this software. A new
+  `--modes store` ingests each question's haystack into a real `Store` and
+  queries `Recall.search` — the exact path an agent takes — and is now the
+  default mode. The reference implementations stay available for ablations,
+  with the docstring saying plainly that `full` and `store` are not the same
+  claim.
+
+### Fixed — the server was carrying ~450 MB it never used
+Reported by **d.snezhinskiy**, who noticed an MCP server sitting at ~1.5 GB and
+sent a patch.
+
+- `chromadb` and `sentence_transformers` were imported at module scope in
+  `src/server.py`. Both are *fallback* paths — when fastembed is healthy
+  neither is used — and `sentence_transformers` pulls in torch. Availability is
+  now decided by `importlib.util.find_spec` and the real import deferred to
+  first use. Measured on this machine:
+
+  | | before | after |
+  |---|---:|---:|
+  | `import server` | 558 MB | **116 MB** |
+  | serving, steady state | 1367 MB | **909 MB** |
+
+  torch is no longer loaded at all unless the fallback is actually reached.
+- A failed fastembed init used to be one log line, after which the server
+  quietly fell back to sentence-transformers and gained ~400 MB. It now names
+  the model cache and the memory cost, because the usual cause is macOS purging
+  the system tmp dir where fastembed caches models by default.
+- New `TAM_MODEL_CACHE` opts into a durable cache location. It is **not** the
+  default: moving the cache orphans models the user already downloaded, so
+  every install would re-fetch ~500 MB once and offline test runs would fail.
+  The contributor's patch pinned it unconditionally; this ships the diagnosis
+  loudly and leaves the move to the people who need it.
+
+> The patch's other half pinned `mcp[cli]<2`. That is the same bug this release
+> fixes, and pinning would cap every user at the 1.x SDK forever, so it is not
+> taken — but it independently confirmed the failure on a client machine, with
+> the symptom `MCP error -32000: Connection closed`.
+
+### Fixed — other
+- **`tree-sitter-language-pack` was in no requirements file.** The README sold
+  "AST codebase ingest, 9 languages" as a differentiator while every user's
+  `ingest_codebase` silently degraded to whole-file chunks. Now a dependency
+  (2 MB wheel).
+- **The enrichment worker shared the Store's sqlite connection.**
+  `check_same_thread=False` permits cross-thread *reads*; it does not make
+  writes safe, because sqlite3's implicit transaction lives on the Connection.
+  Concurrent writes interleaved into `cannot start a transaction within a
+  transaction`, which is what made long ingests die. The worker now opens its
+  own connection — which is what WAL mode is for.
+- **Migration 028 failed on every fresh database**, not just some. Root cause
+  reported by [@juicetin](https://github.com/juicetin) in the "separate
+  migration observation" section of #12: `Store._migrate()` added the
+  subagent-lineage columns *before* `_apply_sql_migrations()` ran
+  `028_agent_lineage.sql`, so 028 always hit `duplicate column name: agent_id`.
+  Because SQLite has no `ADD COLUMN IF NOT EXISTS` and `executescript` is
+  all-or-nothing, it aborted before its `CREATE INDEX` statements and was never
+  recorded as applied — so it retried on every startup, forever.
+  - The schema change now has exactly one owner: the SQL migration.
+    `_migrate()` no longer duplicates it, and a test fails if any column is
+    ever added by both `Store._migrate()` and a SQL migration again.
+  - The runner additionally replays a duplicate-column script statement by
+    statement, so databases already wedged by the old behaviour recover
+    instead of needing the operator to notice.
+- **`ai_layer/verifier.py` hardcoded `~/.claude-memory/nli_calibration.json`**
+  and stopped finding calibrations after the `~/.tam` migration. It now
+  follows the resolved memory dir, with the legacy path as a fallback.
+- **The graph node cache was invalidated on every write.** `_ensure_node`
+  dropped the whole `graph_nodes` name cache each time it created a node, and
+  `extract_and_link` dropped it again at the end — so the 60s TTL never
+  applied and the next save re-read the table. Created nodes are now inserted
+  into the cache incrementally; the TTL still picks up writes from other
+  processes. A clean A/B over 4,000 saves measured **103.0 vs 99.9 saves/s** —
+  about 3%, within noise at that size, since the re-read cost grows with the
+  node table. It is reported as measured rather than as the fix for the ingest
+  slowdown it was chasing: **that slowdown (25.6 → 10.8 msg/s between a 5.7k
+  and a 38k record store) is not explained by this and remains open.** Both
+  arms of the A/B degrade on the same curve.
+- **`vocabularies/` and `filters/` were missing from the wheel and the Docker
+  image.** Same shape as the migrations bug PR #12 fixed, and just as quiet:
+  `src/` resolves them as `parent.parent / <dir>`, so in a git checkout
+  everything worked, while every `pip` / `uvx` / `npx` / `docker` install fell
+  back to an empty tag vocabulary and turned every `memory_save(filter=…)`
+  into a no-op. An installed wheel now loads all 54 canonical topics and 11
+  filter configs. `tests/test_wheel_contents.py` builds the wheel, checks each
+  asset directory, and greps `src/` so a *new* sibling directory cannot go
+  missing the same way.
+
+### Fixed — test suite
+The suite was red on a clean checkout: 21 failed, 9 errors.
+- Eight modules stub the LLM seam but still had to pass `config.has_llm()`,
+  which probes for a live Ollama in `auto` mode — so they failed on any
+  machine without one. New `llm_enabled` fixture; the stub is what those tests
+  measure, so no network call should ever be attempted.
+- `benchmarks/data/` is gitignored, so the LoCoMo few-shot and NLI calibration
+  tests failed instead of skipping on a fresh clone.
+- Embedding tests asserted raw vectors; the production OpenAI path
+  L2-normalises so cosine equals dot product.
+
+**1881 passing, 0 failing.**
 
 ## [12.4.0] — 2026-05-26 — 100% functional through every install path
 

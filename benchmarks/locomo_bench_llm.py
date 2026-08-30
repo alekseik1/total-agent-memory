@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import re
+import re as _re
 import shutil
 import statistics
 import sys
@@ -72,7 +73,7 @@ def setup_env(db_path: Path, disable_llm_extraction: bool) -> None:
 
 
 def import_store():
-    sys.path.insert(0, "/Users/vitalii-macpro/claude-memory-server/src")
+    sys.path.insert(0, str(ROOT / "src"))
     import server
     return server
 
@@ -364,6 +365,19 @@ Rules:
 - Output ONE line. No prose, no quotes.
 """
 
+_REFUSAL_RE = _re.compile(
+    r"^\s*(not mentioned|not in the (conversation|excerpts)|no information|"
+    r"not specified|not stated|unknown|i don'?t know|i do not know|no mention|"
+    r"cannot be determined|can'?t be determined|there is no)\b",
+    _re.IGNORECASE,
+)
+
+
+def _is_refusal(text: str) -> bool:
+    """Does this answer decline to answer rather than answer?"""
+    return bool(_REFUSAL_RE.match(text or ""))
+
+
 JUDGE_SYSTEM = """You are an impartial evaluator checking whether a predicted answer is semantically correct given a gold (reference) answer.
 
 ACCEPT AS CORRECT:
@@ -382,10 +396,17 @@ REJECT:
 Respond with ONLY one word on the first line: YES or NO. Nothing else."""
 
 
+# Set once from --seed. An LLM-judged run is one *sample*: temperature 0 does
+# not make the API deterministic, so a single number is not a measurement.
+# Report the spread across several seeded runs instead.
+RUN_SEED: int | None = None
+
+
 def call_llm(client: LLMClient, system: str, user: str, max_tokens: int = 80,
              model: str = DEFAULT_GEN_MODEL) -> tuple[str, int, int]:
     """Provider-agnostic single completion. Returns (text, in_tok, out_tok)."""
-    r = client.complete(system, user, model=model, max_tokens=max_tokens)
+    r = client.complete(system, user, model=model, max_tokens=max_tokens,
+                        seed=RUN_SEED)
     return r.text, r.input_tokens, r.output_tokens
 
 
@@ -497,8 +518,11 @@ def process_qa(client, server_mod, store, recall, qa: dict, project: str,
     fetch_k = max(over_fetch_k if apply_temporal else cat_top_k, cat_top_k)
     t0 = time.time()
     with RETRIEVAL_LOCK:
+        # record_usage=False — search() otherwise bumps recall_count on every
+        # returned row and the scorer boosts on it, so the run would partly be
+        # measuring its own earlier queries. Same fix as locomo_bench.py.
         res = recall.search(query=search_query, project=project, limit=fetch_k,
-                            detail="summary")
+                            detail="summary", record_usage=False)
     retrieval_ms = (time.time() - t0) * 1000
     # Collect entries from ALL types (fact, synthesized_fact, etc.) — RRF
     # already ranked them. Flatten by descending score.
@@ -770,7 +794,8 @@ def process_qa(client, server_mod, store, recall, qa: dict, project: str,
             gen_in = gen_out = 0
             for temp in temps:
                 r = client.complete(system_prompt, user_prompt,
-                                    model=gen_model, max_tokens=80, temperature=temp)
+                                    model=gen_model, max_tokens=80,
+                                    temperature=temp, seed=RUN_SEED)
                 cand_preds.append(r.text)
                 gen_in += r.input_tokens
                 gen_out += r.output_tokens
@@ -852,6 +877,31 @@ def process_qa(client, server_mod, store, recall, qa: dict, project: str,
                                       max_tokens=4, model=judge_model)
     correct = judge_out.upper().startswith("YES")
 
+    # Deterministic guard on the judge.
+    #
+    # Measured on the v13 three-seed run: on ~100 of the 1540 non-adversarial
+    # questions the judge answered YES to a refusal — "Not mentioned in the
+    # conversation." scored correct against golds like "Sweden", "June 2023",
+    # "Single", with F1 exactly 0.00. That inflated accuracy by ~6.6 points.
+    #
+    # It is almost certainly the adversarial rule bleeding across: the judge is
+    # told to accept a refusal when the gold also indicates no information.
+    # For categories 1-4 the gold IS a fact, so a refusal cannot be correct —
+    # that is a rule, not a judgement call, so it does not need a model.
+    judge_overruled = False
+    if correct and cat != 5 and _is_refusal(pred) and not _is_refusal(str(gold)):
+        correct = False
+        judge_overruled = "refusal_on_factual"
+    elif correct and cat == 5 and not str(gold).strip() and not _is_refusal(pred):
+        # The mirror-image defect. 99.6% of LoCoMo adversarial golds are the
+        # empty string — the question is unanswerable and abstaining is the
+        # only right move. The judge accepts almost any fluent answer against
+        # an empty reference, so a hallucination scores correct: measured
+        # 27-30 per run, inflating adversarial accuracy by ~6 points. With an
+        # empty gold, only a refusal can be right.
+        correct = False
+        judge_overruled = "hallucination_on_adversarial"
+
     rec = {
         "question": question,
         "gold": gold,
@@ -861,6 +911,7 @@ def process_qa(client, server_mod, store, recall, qa: dict, project: str,
         "retrieved_dia_ids": ranked_dia_ids,
         "r@1": r_at_1, "r@5": r_at_5, "r@10": r_at_10,
         "correct": correct,
+        "judge_overruled": judge_overruled,
         "f1": f1_score(pred, gold),
         "bleu1": bleu1(pred, gold),
         "rouge_l": rouge_l(pred, gold),
@@ -930,10 +981,22 @@ def aggregate(records: list[dict]) -> dict:
     return out
 
 
-def format_report(ingest_stats: dict, agg: dict) -> str:
+def format_report(ingest_stats: dict, agg: dict, cfg: dict | None = None) -> str:
+    cfg = cfg or {}
+    # The banner used to hardcode "v8" and "Haiku 4.5" regardless of what was
+    # actually run — a report that misstates its own configuration is worse
+    # than one with no banner at all.
+    try:
+        from version import VERSION as _ver  # noqa: PLC0415
+    except Exception:
+        _ver = "unknown"
+    gen = cfg.get("gen_model", "?")
+    judge = cfg.get("judge_model", "?")
+    seed = cfg.get("seed")
+    seed_note = f"  seed={seed}" if seed is not None else "  seed=unset (non-deterministic)"
     lines = [
         "=" * 78,
-        "  LoCoMo — Claude Total Memory v8  (Haiku 4.5 RAG + LLM-judge)",
+        f"  LoCoMo — total-agent-memory v{_ver}  (gen={gen}, judge={judge}){seed_note}",
         "=" * 78,
         "",
         "Ingestion",
@@ -967,7 +1030,7 @@ def format_report(ingest_stats: dict, agg: dict) -> str:
     lines.extend([
         "",
         f"Retrieval latency  p50={lat.get('p50_ms', 0)} ms  p95={lat.get('p95_ms', 0)} ms  mean={lat.get('mean_ms', 0)} ms",
-        f"Haiku tokens       in={tok.get('input', 0):,}  out={tok.get('output', 0):,}",
+        f"LLM tokens         in={tok.get('input', 0):,}  out={tok.get('output', 0):,}",
         "",
     ])
     return "\n".join(lines)
@@ -1049,7 +1112,14 @@ def main() -> int:
                              "leaves the base pipeline's prediction intact.")
     parser.add_argument("--v11-skip-nli", action="store_true",
                         help="v11.0: skip NLI verifier (saves ~270MB model load + per-QA latency).")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Best-effort determinism for generator and judge. "
+                             "One LLM-judged run is a sample, not a measurement — "
+                             "run several seeds and publish the spread.")
     args = parser.parse_args()
+
+    global RUN_SEED
+    RUN_SEED = args.seed
 
     # v9 D4: propagate --reranker flag into env BEFORE any reranker import.
     # src/reranker.py reads V9_RERANKER_BACKEND lazily on each call, but model
@@ -1103,7 +1173,8 @@ def main() -> int:
     store = server_mod.Store()
     recall = server_mod.Recall(store)
     # Warm up lazy inits (binary search, fastembed) on main thread
-    recall.search(query="warmup", project="locomo_0", limit=1, detail="summary")
+    recall.search(query="warmup", project="locomo_0", limit=1, detail="summary",
+                  record_usage=False)
     patch_thread_safety(server_mod, store)
 
     client = LLMClient(provider=args.provider, default_model=gen_model)
@@ -1132,7 +1203,7 @@ def main() -> int:
     # Optional L2 structured lookup — loaded once, shared across threads.
     fact_index_obj = None
     if args.fact_index:
-        sys.path.insert(0, "/Users/vitalii-macpro/claude-memory-server/src")
+        sys.path.insert(0, str(ROOT / "src"))
         from fact_index import FactIndex  # noqa: PLC0415
         fact_index_obj = FactIndex(store.db)
         print(f"[locomo-llm] fact_index ON — stats={fact_index_obj.stats()}")
@@ -1184,7 +1255,11 @@ def main() -> int:
                       f"running_acc={acc:.3f}", flush=True)
 
     agg = aggregate(records)
-    report = format_report(ingest_stats, agg)
+    report = format_report(ingest_stats, agg, {
+        "gen_model": gen_model,
+        "judge_model": judge_model,
+        "seed": args.seed,
+    })
     print(report)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1197,6 +1272,7 @@ def main() -> int:
             "config": {
                 "gen_model": gen_model,
                 "judge_model": judge_model,
+                "seed": args.seed,
                 "db_path": str(db_path),
                 "top_k": args.top_k,
                 "concurrency": args.concurrency,
