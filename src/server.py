@@ -7113,6 +7113,39 @@ def _detect_git_branch():
         return ""
 
 
+def _detect_project():
+    """Project name for the session row: the repository this server was
+    spawned in, or the working directory's name outside a repository.
+
+    The server process is started by the client inside the project directory,
+    which is why `_detect_git_branch` above works — the same cwd names the
+    project. Without this every session row was written as 'general', so
+    `memory_timeline` and any per-project session analytics saw one bucket.
+
+    Mirrors hooks/lib/common.sh `hook_project_name`: MEMORY_PROJECT wins, then
+    the *common* git dir (so a worktree reports its main repository rather than
+    the branch-named worktree directory), then the directory name.
+    """
+    override = os.environ.get("MEMORY_PROJECT", "").strip()
+    if override:
+        return override
+    try:
+        common_dir = subprocess.check_output(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stderr=subprocess.DEVNULL, timeout=2
+        ).decode().strip()
+        if common_dir:
+            root = Path(common_dir).parent if Path(common_dir).name == ".git" else Path(common_dir)
+            if root.name:
+                return root.name.lower()
+    except Exception:
+        pass
+    try:
+        return Path.cwd().name.lower() or "general"
+    except Exception:
+        return "general"
+
+
 async def _bootstrap_session():
     """Common setup: build Store/Recall, start session, cleanup. Called
     by every transport. Populates module globals."""
@@ -7121,7 +7154,7 @@ async def _bootstrap_session():
     recall = Recall(store)
     SID = f"mcp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
     BRANCH = _detect_git_branch()
-    store.session_start(SID, branch=BRANCH)
+    store.session_start(SID, project=_detect_project(), branch=BRANCH)
     cleaned = store.cleanup_old_observations()
     if cleaned:
         LOG(f"Cleaned {cleaned} old observations (>{OBSERVATION_RETENTION_DAYS}d)")

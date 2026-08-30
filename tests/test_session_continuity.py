@@ -161,3 +161,67 @@ def test_mark_unconsumed_replays_summary(sc):
     # Reopen
     assert sc.mark_unconsumed(r["id"]) is True
     assert sc.session_init(project="p") is not None
+
+
+# ──────────────────────────────────────────────
+# session_end closes the session row (not just the summary)
+# ──────────────────────────────────────────────
+
+def _open_session(db, sid, *, project="general", branch=""):
+    db.execute(
+        "INSERT INTO sessions (id, started_at, project, branch) VALUES (?,?,?,?)",
+        (sid, "2026-08-30T06:00:00Z", project, branch),
+    )
+    db.commit()
+
+
+def test_session_end_stamps_ended_at_on_the_session_row(sc, sc_db):
+    """The row in `sessions` must stop looking like a running session.
+
+    Writing only `session_summaries` left every row open forever, so
+    memory_timeline reported long-finished sessions as still running.
+    """
+    _open_session(sc_db, "sess_close")
+
+    r = sc.session_end("sess_close", "did the thing", project="claude-memory-server")
+
+    row = sc_db.execute(
+        "SELECT ended_at, project FROM sessions WHERE id='sess_close'"
+    ).fetchone()
+    assert row["ended_at"] == r["ended_at"]
+    assert row["project"] == "claude-memory-server"
+
+
+def test_session_end_does_not_downgrade_a_project_the_row_already_knows(sc, sc_db):
+    """A caller who omits `project` must not overwrite a real one with 'general'."""
+    _open_session(sc_db, "sess_known", project="core-monorepo")
+
+    sc.session_end("sess_known", "no project passed")
+
+    row = sc_db.execute(
+        "SELECT project FROM sessions WHERE id='sess_known'"
+    ).fetchone()
+    assert row["project"] == "core-monorepo"
+
+
+def test_session_end_fills_branch_only_when_the_row_has_none(sc, sc_db):
+    _open_session(sc_db, "sess_branch", branch="main")
+    _open_session(sc_db, "sess_nobranch")
+
+    sc.session_end("sess_branch", "s", project="p", branch="feature/x")
+    sc.session_end("sess_nobranch", "s", project="p", branch="feature/x")
+
+    kept = sc_db.execute("SELECT branch FROM sessions WHERE id='sess_branch'").fetchone()
+    filled = sc_db.execute("SELECT branch FROM sessions WHERE id='sess_nobranch'").fetchone()
+    assert kept["branch"] == "main"
+    assert filled["branch"] == "feature/x"
+
+
+def test_session_end_without_a_session_row_still_saves_the_summary(sc, sc_db):
+    """Hook-driven ends can name a session the server never inserted."""
+    r = sc.session_end("sess_absent", "summary survives", project="p")
+
+    assert r["id"]
+    assert sc_db.execute(
+        "SELECT COUNT(*) FROM session_summaries WHERE session_id='sess_absent'"
+    ).fetchone()[0] == 1

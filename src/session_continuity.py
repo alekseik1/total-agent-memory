@@ -117,6 +117,23 @@ class SessionContinuity:
                 context_blob, started_at, now, now,
             ),
         )
+        # Close the session row itself. Writing only `session_summaries` left
+        # every row in `sessions` open forever and stamped 'general' (the
+        # default `Store.session_start` uses), so `memory_timeline` reported
+        # sessions that had ended hours ago as still running, all in one
+        # project bucket. Project and branch are only overwritten while they
+        # still hold that placeholder — a row that already knows better is not
+        # downgraded by a caller who omitted the argument.
+        self.db.execute(
+            """UPDATE sessions
+                  SET ended_at = ?,
+                      project = CASE WHEN COALESCE(project, 'general') = 'general'
+                                     THEN ? ELSE project END,
+                      branch = CASE WHEN COALESCE(branch, '') = ''
+                                    THEN ? ELSE branch END
+                WHERE id = ?""",
+            (now, project, branch or "", session_id),
+        )
         self.db.commit()
 
         result: dict[str, Any] = {

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from active_context import read_active_context, write_active_context
+from base_schema import apply_full_schema
 from session_continuity import SessionContinuity
 
 
@@ -20,8 +21,10 @@ from session_continuity import SessionContinuity
 def sc_db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    migration = Path(__file__).parent.parent / "migrations" / "010_session_continuity.sql"
-    conn.executescript(migration.read_text())
+    # The full schema, not one hand-picked migration: session_end writes the
+    # summary *and* closes the row in `sessions`, so a fixture carrying only
+    # 010 tests a database no installation ever has.
+    apply_full_schema(conn)
     yield conn
     conn.close()
 
