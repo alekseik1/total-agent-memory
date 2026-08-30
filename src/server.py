@@ -4783,17 +4783,25 @@ async def _tool_catalogue():
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string"},
+                    "session_id": {
+                        "type": "string",
+                        "description": "Omit it: this server's own session is used. "
+                                       "Pass one only to end a session this process "
+                                       "does not own (a hook naming the Claude Code "
+                                       "session, a subagent) — a session row is "
+                                       "created for it if none exists.",
+                    },
                     "summary": {"type": "string"},
                     "highlights": {"type": "array", "items": {"type": "string"}},
                     "pitfalls": {"type": "array", "items": {"type": "string"}},
                     "next_steps": {"type": "array", "items": {"type": "string"}},
                     "open_questions": {"type": "array", "items": {"type": "string"}},
                     "project": {"type": "string", "default": "general"},
+                    "branch": {"type": "string"},
                     "auto_compress": {"type": "boolean", "default": False},
                     "transcript": {"type": "string"},
                 },
-                "required": ["session_id"],
+                "required": [],
             },
         ),
         # ── v7.0 AST ingest ──
@@ -6265,13 +6273,18 @@ async def _do(name, a):
     elif name == "session_end":
         from session_continuity import SessionContinuity
         sc = SessionContinuity(store.db)
+        # No tool hands the live SID to a caller, so one that has to supply
+        # `session_id` invents it — 231 of 256 stored summaries name a session
+        # that never existed. Defaulting to this process's own session is the
+        # only value a caller could not have known to pass.
         return J(sc.session_end(
-            a["session_id"], a.get("summary"),
+            a.get("session_id") or SID, a.get("summary"),
             highlights=a.get("highlights"),
             pitfalls=a.get("pitfalls"),
             next_steps=a.get("next_steps"),
             open_questions=a.get("open_questions"),
             project=a.get("project", "general"),
+            branch=a.get("branch", BRANCH),
             auto_compress=a.get("auto_compress", False),
             transcript=a.get("transcript"),
         ))

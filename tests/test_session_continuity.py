@@ -225,3 +225,61 @@ def test_session_end_without_a_session_row_still_saves_the_summary(sc, sc_db):
     assert sc_db.execute(
         "SELECT COUNT(*) FROM session_summaries WHERE session_id='sess_absent'"
     ).fetchone()[0] == 1
+
+
+def test_session_end_creates_the_row_for_a_session_it_never_opened(sc, sc_db):
+    """Ends arrive under identities the MCP process does not own.
+
+    A hook names the Claude Code session, a subagent names itself, a caller
+    invents an id. Each is a real session; without a row it has nowhere to
+    belong, which is how 231 of 256 stored summaries ended up orphaned.
+    """
+    r = sc.session_end(
+        "7733731d-4bba-4fa2-95df-7e4dbf51474f",
+        "ended by a hook",
+        project="core-monorepo",
+        branch="dev",
+    )
+
+    row = sc_db.execute(
+        "SELECT * FROM sessions WHERE id='7733731d-4bba-4fa2-95df-7e4dbf51474f'"
+    ).fetchone()
+    assert row is not None
+    assert row["ended_at"] == r["ended_at"]
+    assert row["project"] == "core-monorepo"
+    assert row["branch"] == "dev"
+
+
+def test_a_created_row_starts_no_earlier_than_the_end_it_was_created_for(sc, sc_db):
+    """No invented start time: the end is the only moment known for certain."""
+    r = sc.session_end("unknown_sess", "s", project="p")
+
+    row = sc_db.execute(
+        "SELECT started_at, ended_at FROM sessions WHERE id='unknown_sess'"
+    ).fetchone()
+    assert row["started_at"] == r["ended_at"]
+
+
+def test_an_explicit_started_at_is_used_for_the_created_row(sc, sc_db):
+    sc.session_end("with_start", "s", project="p", started_at="2026-08-30T06:00:00Z")
+
+    row = sc_db.execute(
+        "SELECT started_at FROM sessions WHERE id='with_start'"
+    ).fetchone()
+    assert row["started_at"] == "2026-08-30T06:00:00Z"
+
+
+def test_an_existing_row_is_not_replaced_by_the_insert(sc, sc_db):
+    """INSERT OR IGNORE must leave a real session's own start time alone."""
+    _open_session(sc_db, "sess_real", project="core-monorepo")
+    sc_db.execute(
+        "UPDATE sessions SET started_at='2026-08-30T06:00:00Z' WHERE id='sess_real'"
+    )
+    sc_db.commit()
+
+    sc.session_end("sess_real", "s", project="core-monorepo")
+
+    row = sc_db.execute(
+        "SELECT started_at FROM sessions WHERE id='sess_real'"
+    ).fetchone()
+    assert row["started_at"] == "2026-08-30T06:00:00Z"

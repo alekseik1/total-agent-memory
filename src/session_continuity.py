@@ -117,6 +117,16 @@ class SessionContinuity:
                 context_blob, started_at, now, now,
             ),
         )
+        # A session the server never opened still gets a row. Ends arrive under
+        # identities the MCP process does not own — a hook naming the Claude
+        # Code session, a subagent, a caller that made an id up — and without
+        # this `sessions` and `session_summaries` stay two disconnected lists:
+        # 231 of 256 summaries had no row to belong to. `started_at` is the
+        # caller's if given, else the end time, never a guess at when it began.
+        self.db.execute(
+            "INSERT OR IGNORE INTO sessions (id, started_at, project, branch) VALUES (?,?,?,?)",
+            (session_id, started_at or now, project, branch or ""),
+        )
         # Close the session row itself. Writing only `session_summaries` left
         # every row in `sessions` open forever and stamped 'general' (the
         # default `Store.session_start` uses), so `memory_timeline` reported
