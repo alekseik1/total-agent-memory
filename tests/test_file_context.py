@@ -6,37 +6,16 @@ import sqlite3
 import pytest
 
 from file_context import FileContextGuard
-from base_schema import apply_full_schema
+from base_schema import apply_core_column_migrations, apply_full_schema, base_schema_sql
 
 
 @pytest.fixture
 def fcdb():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    # apply_full_schema now creates errors/rules itself (base_schema.py
+    # apply_self_improvement_tables) — no need to hand-roll them here.
     apply_full_schema(conn)
-    conn.executescript("""
-        CREATE TABLE errors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            category TEXT NOT NULL,
-            severity TEXT NOT NULL DEFAULT 'medium',
-            description TEXT NOT NULL,
-            context TEXT DEFAULT '',
-            fix TEXT DEFAULT '',
-            project TEXT DEFAULT 'general',
-            tags TEXT DEFAULT '[]',
-            status TEXT DEFAULT 'open',
-            resolved_at TEXT,
-            insight_id INTEGER,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE rules (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT, context TEXT, category TEXT,
-            priority INTEGER DEFAULT 5, success_rate REAL DEFAULT 0.0,
-            status TEXT DEFAULT 'active'
-        );
-    """)
     yield conn
     conn.close()
 
@@ -72,7 +51,10 @@ def _add_knowledge(db, *, content, tags=None, type="solution",
 
 def _add_rule(db, *, content, context=""):
     db.execute(
-        "INSERT INTO rules (content, context) VALUES (?, ?)",
+        """INSERT INTO rules (session_id, content, context, category,
+           created_at, updated_at)
+           VALUES ('s', ?, ?, 'convention',
+                   '2026-04-14T10:00:00Z', '2026-04-14T10:00:00Z')""",
         (content, context),
     )
     db.commit()
@@ -228,9 +210,12 @@ def test_summary_counts_errors_and_knowledge(guard, fcdb):
 # ──────────────────────────────────────────────
 
 def test_no_errors_table_does_not_crash():
+    # Deliberately skip apply_self_improvement_tables (unlike the fcdb
+    # fixture) so errors/rules genuinely don't exist here.
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    apply_full_schema(conn)
+    conn.executescript(base_schema_sql())
+    apply_core_column_migrations(conn)
     g = FileContextGuard(conn)
     # Should not raise even with no errors/rules tables
     result = g.get_file_warnings("any.py")

@@ -108,7 +108,11 @@ try:
 except ImportError:
     HAS_CACHE = False
 
-from base_schema import apply_core_column_migrations, base_schema_sql  # noqa: E402
+from base_schema import (  # noqa: E402
+    apply_core_column_migrations,
+    apply_self_improvement_tables,
+    base_schema_sql,
+)
 from paths import memory_dir as _resolve_memory_dir  # noqa: E402
 MEMORY_DIR = _resolve_memory_dir()
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
@@ -1014,94 +1018,7 @@ class Store:
 
     def _create_self_improvement_tables(self):
         """Create errors, insights, rules tables for Self-Improving Agent."""
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS errors (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                category TEXT NOT NULL,
-                severity TEXT NOT NULL DEFAULT 'medium',
-                description TEXT NOT NULL,
-                context TEXT DEFAULT '',
-                fix TEXT DEFAULT '',
-                project TEXT DEFAULT 'general',
-                tags TEXT DEFAULT '[]',
-                status TEXT DEFAULT 'open',
-                resolved_at TEXT,
-                insight_id INTEGER,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_e_category ON errors(category);
-            CREATE INDEX IF NOT EXISTS idx_e_project ON errors(project);
-            CREATE INDEX IF NOT EXISTS idx_e_status ON errors(status);
-            CREATE INDEX IF NOT EXISTS idx_e_session ON errors(session_id);
-            CREATE INDEX IF NOT EXISTS idx_e_created ON errors(created_at DESC);
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS errors_fts USING fts5(
-                description, context, fix, tags,
-                content='errors', content_rowid='id'
-            );
-            CREATE TRIGGER IF NOT EXISTS e_fts_i AFTER INSERT ON errors BEGIN
-                INSERT INTO errors_fts(rowid, description, context, fix, tags)
-                VALUES (new.id, new.description, new.context, new.fix, new.tags);
-            END;
-            CREATE TRIGGER IF NOT EXISTS e_fts_u AFTER UPDATE ON errors BEGIN
-                INSERT INTO errors_fts(errors_fts, rowid, description, context, fix, tags)
-                VALUES ('delete', old.id, old.description, old.context, old.fix, old.tags);
-                INSERT INTO errors_fts(rowid, description, context, fix, tags)
-                VALUES (new.id, new.description, new.context, new.fix, new.tags);
-            END;
-            CREATE TRIGGER IF NOT EXISTS e_fts_d AFTER DELETE ON errors BEGIN
-                INSERT INTO errors_fts(errors_fts, rowid, description, context, fix, tags)
-                VALUES ('delete', old.id, old.description, old.context, old.fix, old.tags);
-            END;
-
-            CREATE TABLE IF NOT EXISTS insights (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                content TEXT NOT NULL,
-                context TEXT DEFAULT '',
-                category TEXT NOT NULL,
-                importance INTEGER NOT NULL DEFAULT 2,
-                confidence REAL NOT NULL DEFAULT 0.5,
-                source_error_ids TEXT DEFAULT '[]',
-                project TEXT DEFAULT 'general',
-                tags TEXT DEFAULT '[]',
-                status TEXT DEFAULT 'active',
-                promoted_to_rule_id INTEGER,
-                fire_count INTEGER DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_i_status ON insights(status);
-            CREATE INDEX IF NOT EXISTS idx_i_category ON insights(category);
-            CREATE INDEX IF NOT EXISTS idx_i_project ON insights(project);
-            CREATE INDEX IF NOT EXISTS idx_i_importance ON insights(importance DESC);
-
-            CREATE TABLE IF NOT EXISTS rules (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                content TEXT NOT NULL,
-                context TEXT DEFAULT '',
-                category TEXT NOT NULL,
-                scope TEXT DEFAULT 'global',
-                priority INTEGER NOT NULL DEFAULT 5,
-                source_insight_id INTEGER,
-                project TEXT DEFAULT 'general',
-                tags TEXT DEFAULT '[]',
-                status TEXT DEFAULT 'active',
-                fire_count INTEGER DEFAULT 0,
-                success_count INTEGER DEFAULT 0,
-                fail_count INTEGER DEFAULT 0,
-                success_rate REAL DEFAULT 0.0,
-                last_fired TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_r_status ON rules(status);
-            CREATE INDEX IF NOT EXISTS idx_r_scope ON rules(scope);
-            CREATE INDEX IF NOT EXISTS idx_r_priority ON rules(priority DESC);
-            CREATE INDEX IF NOT EXISTS idx_r_project ON rules(project);
-        """)
+        apply_self_improvement_tables(self.db)
 
     def _check_fts(self):
         """Verify FTS5 index integrity on startup, rebuild if corrupted."""

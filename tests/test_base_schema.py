@@ -113,3 +113,37 @@ def test_apply_full_schema_seeds_fact_merge_session():
 
     row = conn.execute("SELECT id FROM sessions WHERE id='fact-merge'").fetchone()
     assert row is not None
+
+
+def test_the_shared_schema_creates_the_self_improvement_tables():
+    """`apply_full_schema` must build the same tables production has.
+
+    It used to omit errors/insights/rules — they were created only by
+    `Store._create_self_improvement_tables`, which the test fixture never
+    called. Nothing noticed until migration 032 became the first migration to
+    touch `errors` and broke every fixture built this way. A schema the tests
+    use that production does not have (or the reverse) makes green meaningless.
+    """
+    from base_schema import apply_full_schema
+
+    db = sqlite3.connect(":memory:")
+    try:
+        apply_full_schema(db)
+        tables = {
+            r[0] for r in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert {"errors", "insights", "rules"} <= tables, sorted(tables)
+    finally:
+        db.close()
+
+
+def test_production_and_the_fixture_build_the_self_improvement_tables_alike():
+    """Both paths delegate to one function, so they cannot drift apart again."""
+    import inspect
+
+    import server
+
+    src = inspect.getsource(server.Store._create_self_improvement_tables)
+    assert "apply_self_improvement_tables" in src, src

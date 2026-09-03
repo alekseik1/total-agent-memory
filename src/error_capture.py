@@ -82,15 +82,16 @@ class ErrorCapture:
         context = f"root_cause: {root_cause} | pattern: {pattern}"
         description = error
         now = _now()
+        status = "resolved" if fix else "open"
 
         cur = self.db.cursor()
         cur.execute(
             """INSERT INTO errors
                (session_id, category, severity, description, context, fix,
-                project, tags, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)""",
+                project, tags, status, resolved_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, category, severity, description, context, fix,
-             project, json.dumps(tags), now),
+             project, json.dumps(tags), status, now if fix else None, now),
         )
         error_id = cur.lastrowid
         self.db.commit()
