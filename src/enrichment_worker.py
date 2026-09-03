@@ -338,7 +338,7 @@ def _run_contradiction_detector(db, task: EnrichmentTask, store=None) -> None:
     if not embs:
         return
     cand_pool = store._binary_search(
-        embs[0], n_candidates=50, project=task.project, n_results=10
+        embs[0], n_candidates=50, project=task.project, n_results=10, db=db
     )
     cand_pool = [(cid, cos) for cid, cos in cand_pool if cid != task.knowledge_id]
     if not cand_pool:

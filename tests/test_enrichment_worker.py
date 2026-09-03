@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -415,3 +416,76 @@ def test_worker_ticks_do_not_corrupt_concurrent_store_writes(tmp_path, monkeypat
     assert counts.get("main") == burst
     assert counts.get("worker") == burst
     store_conn.close()
+
+
+@pytest.fixture
+def file_store(monkeypatch, tmp_path):
+    """A real Store on a tmp SQLite file (not the in-memory `db` fixture) —
+    the dirty-read test below needs a second real connection to the same
+    file, which an in-memory database cannot provide."""
+    monkeypatch.setenv("MEMORY_QUALITY_GATE_ENABLED", "false")
+    monkeypatch.setenv("MEMORY_CONTRADICTION_DETECT_ENABLED", "false")
+    monkeypatch.setenv("MEMORY_OUTBOX_ENABLED", "false")
+    monkeypatch.setenv("MEMORY_EPISODIC_ENABLED", "false")
+
+    import server as srv
+    monkeypatch.setattr(srv, "MEMORY_DIR", tmp_path)
+    s = srv.Store()
+    yield s
+    try:
+        s.db.close()
+    except Exception:
+        pass
+
+
+def test_contradiction_detector_stage_does_not_dirty_read_uncommitted_row(file_store):
+    """`_run_contradiction_detector` must read through the worker's OWN
+    connection (`db=db`), not `store.db` — the connection the main thread
+    may hold an uncommitted transaction open on.
+
+    Reproduces the race by hand: seed a committed candidate, open a second
+    connection to the same file (standing in for `_WorkerThread._open_db`),
+    leave a second knowledge row uncommitted on `store.db`, then read the
+    candidate pool from a worker thread through the second connection. It
+    must see only the committed row.
+    """
+    rng = np.random.default_rng(7)
+    now = "2026-04-27T00:00:00Z"
+
+    file_store.db.execute(
+        "INSERT INTO knowledge (id, session_id, type, content, project, status, created_at) "
+        "VALUES (1, 's', 'fact', 'committed row', 'p', 'active', ?)",
+        (now,),
+    )
+    file_store._upsert_embedding(1, rng.standard_normal(32).astype(np.float32).tolist(), "test-model")
+    file_store.db.commit()
+
+    worker_conn = sqlite3.connect(str(file_store.db_path), check_same_thread=False)
+    worker_conn.row_factory = sqlite3.Row
+
+    file_store.db.execute(
+        "INSERT INTO knowledge (id, session_id, type, content, project, status, created_at) "
+        "VALUES (2, 's', 'fact', 'uncommitted row', 'p', 'active', ?)",
+        (now,),
+    )
+    file_store._upsert_embedding(2, rng.standard_normal(32).astype(np.float32).tolist(), "test-model")
+    # Deliberately not committed — mirrors a save mid-flight on the main
+    # thread's connection while the worker ticks.
+
+    query = rng.standard_normal(32).astype(np.float32).tolist()
+    results: list = []
+
+    def read_from_worker_thread():
+        results.extend(
+            file_store._binary_search(query, n_candidates=5, project="p", db=worker_conn)
+        )
+
+    t = threading.Thread(target=read_from_worker_thread)
+    t.start()
+    t.join(timeout=5)
+
+    file_store.db.rollback()
+    worker_conn.close()
+
+    seen = {kid for kid, _score in results}
+    assert seen == {1}, f"dirty read: worker connection saw uncommitted row(s) {seen}"

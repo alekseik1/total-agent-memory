@@ -155,11 +155,15 @@ def _read_rules_limit(env=None):
 
 RULES_CONTEXT_LIMIT = _read_rules_limit()  # None = no cap
 
-# Shared ranking policy for active rules: unrated rules (no ratings yet)
-# score as neutral (0.5) rather than the DB default 0.0, so they don't rank
-# below rules with recorded failures. Used by both get_rules_for_context and
-# manage_rule(action="list").
-_RULE_SCORE_SQL = "CASE WHEN (success_count + fail_count) = 0 THEN 0.5 ELSE success_rate END"
+# Rule ranking does NOT tie-break on success_rate/rated-ness. Measured on the
+# live store: 75 active rules, 24653 fires, 1519 ratings, of which only 6 are
+# failures — 61 rules score exactly 1.0, and unrated rules default to a 0.5
+# stand-in, so the "score" mostly just encodes whether a rule happened to get
+# rated, not any real quality signal. Priority 9 is oversubscribed (40 rules
+# for the 14 slots a limit=22 slice leaves after priority 10), so this
+# tie-break decides real delivery: sorting on it let two unrated, heavily
+# fired rules (200+ fires each) lose to rated peers with indistinguishable
+# scores. `created_at DESC` is used instead — deterministic, no pseudo-signal.
 
 # v10 — importance multipliers applied to the final recall score so a
 # `critical` decision outranks ten `medium` observations at the same RRF
@@ -901,15 +905,23 @@ class Store:
             LOG(f"outbox reconcile skipped: {exc}")
 
     def _binary_search(self, query_embedding, n_candidates=50, project=None, n_results=10,
-                       embedding_spaces=None):
+                       embedding_spaces=None, db=None):
         """Two-level binary quantization search: Hamming pre-filter → cosine re-rank.
 
         v11 Phase 6b — `embedding_spaces` (list[str] | None) restricts the
         candidate pool to rows tagged with one of the listed spaces.
         Pre-v11 rows were backfilled to `embedding_space='text'` by
         migration 021, so the filter is safe on legacy data.
+
+        `db` lets a caller on another thread (e.g. the enrichment worker)
+        pass its own Connection instead of reading through `self.db` —
+        reading the main thread's Connection from a worker thread is a
+        dirty read: an uncommitted INSERT on `self.db` is visible here
+        until rollback, then vanishes.
         """
         import numpy as np
+
+        conn = db if db is not None else self.db
 
         # 1. Load binary vectors for active records.
         conds = ["k.status='active'"]
@@ -926,7 +938,7 @@ class Store:
             "FROM embeddings e JOIN knowledge k ON e.knowledge_id = k.id "
             f"WHERE {' AND '.join(conds)}"
         )
-        rows = self.db.execute(sql, params).fetchall()
+        rows = conn.execute(sql, params).fetchall()
 
         if not rows:
             return []
@@ -954,7 +966,7 @@ class Store:
         # 5. Load float32 vectors for candidates → cosine re-rank
         candidate_kids = [int(kid_list[i]) for i in top_indices]
         placeholders = ",".join("?" * len(candidate_kids))
-        f32_rows = self.db.execute(
+        f32_rows = conn.execute(
             f"SELECT knowledge_id, float32_vector FROM embeddings WHERE knowledge_id IN ({placeholders})",
             candidate_kids
         ).fetchall()
@@ -2303,7 +2315,7 @@ class Store:
                 conds.append("scope=?"); params.append(kw["scope"])
             rows = self.q(
                 f"SELECT * FROM rules WHERE {' AND '.join(conds)} "
-                f"ORDER BY priority DESC, {_RULE_SCORE_SQL} DESC", params)
+                f"ORDER BY priority DESC, created_at DESC", params)
 
             total_matched = len(rows)
             effective = limit if limit is not None else RULES_CONTEXT_LIMIT
@@ -2324,7 +2336,7 @@ class Store:
             rows = self.q(
                 f"SELECT * FROM rules WHERE status='active' "
                 f"AND id IN ({','.join('?' * len(ids))}) "
-                f"ORDER BY priority DESC, {_RULE_SCORE_SQL} DESC, created_at DESC", ids)
+                f"ORDER BY priority DESC, created_at DESC", ids)
             if rows:
                 self.db.execute(
                     f"UPDATE rules SET fire_count=fire_count+1, last_fired=?, updated_at=? "
@@ -2443,7 +2455,6 @@ class Store:
             SELECT * FROM rules
             WHERE status='active' AND scope IN ({','.join(scopes)})
             ORDER BY priority DESC,
-                     {_RULE_SCORE_SQL} DESC,
                      created_at DESC
         """)
 

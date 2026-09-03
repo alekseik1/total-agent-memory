@@ -781,8 +781,8 @@ class ReflectionAgent:
 
         columns = [
             "id", "period_start", "period_end", "type",
-            "new_nodes", "patterns_found", "skills_refined",
-            "rules_proposed", "contradictions", "archived",
+            "edges_strengthened", "clusters_found", "skills_proposed",
+            "contradictions", "archived",
             "focus_areas", "key_findings", "proposed_changes", "created_at",
         ]
         values = [
@@ -793,7 +793,6 @@ class ReflectionAgent:
             synthesis.get("edges_strengthened", 0),
             synthesis.get("clusters_found", 0),
             synthesis.get("skills_proposed", 0),
-            0,  # rules_proposed
             digest.get("contradictions_found", 0),
             digest.get("decay", {}).get("archived", 0),
             json.dumps((report.get("weekly_digest") or {}).get("focus_areas", [])),

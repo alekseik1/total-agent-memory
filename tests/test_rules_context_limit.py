@@ -166,18 +166,27 @@ def test_explicit_limit_overrides_env_derived_default(store, monkeypatch):
     assert len(r["rules"]) == 5
 
 
-def test_unrated_rule_ranks_above_failed_rule_at_same_priority(store):
-    """An unrated rule (0 successes, 0 fails) ranks ABOVE a rule with recorded
-    failures at the same priority — unrated is neutral (0.5), not worst."""
-    failed_id = _add_rule(store, "failed rule", priority=5)
+def test_ranking_tiebreak_ignores_rating_status(store):
+    """Rating must not decide a same-priority tie — only recency does.
+
+    On the live store 61/75 active rules score exactly 1.0 and unrated rules
+    default to 0.5, so success_rate barely distinguishes anything; it just
+    means a rule that never got rated always sorts last regardless of how
+    often it fired. A newer rule with a perfect success_rate ranks below an
+    even newer unrated rule at the same priority — restoring a
+    success_rate-based tie-break would put the rated rule first instead and
+    fail this assertion."""
+    rated_id = _add_rule(store, "rated rule", priority=5, created_at="2026-04-19T00:00:00Z")
     store.db.execute(
-        "UPDATE rules SET fail_count=5, success_rate=0.0 WHERE id=?", (failed_id,))
-    unrated_id = _add_rule(store, "unrated rule", priority=5)
+        "UPDATE rules SET success_count=10, fail_count=0, success_rate=1.0 WHERE id=?",
+        (rated_id,),
+    )
+    unrated_id = _add_rule(store, "unrated newer rule", priority=5, created_at="2026-04-20T00:00:00Z")
     store.db.commit()
 
     r = store.get_rules_for_context(project="myproj")
     ids = [x["id"] for x in r["rules"]]
-    assert ids.index(unrated_id) < ids.index(failed_id)
+    assert ids.index(unrated_id) < ids.index(rated_id)
 
 
 def test_created_at_desc_tiebreak_newer_rule_first(store):
@@ -313,6 +322,23 @@ def test_manage_rule_list_negative_limit_returns_error(store):
     r = store.manage_rule("sess-limit-test", "list", project="myproj", limit=-1)
     assert "error" in r
     assert "rules" not in r
+
+
+def test_manage_rule_list_tiebreak_ignores_rating_status(store):
+    """Same tie-break contract as get_rules_for_context: manage_rule(action=
+    "list") must not let success_rate decide a same-priority tie either —
+    restoring the score there would independently flip this ordering back."""
+    rated_id = _add_rule(store, "rated rule", priority=5, created_at="2026-04-19T00:00:00Z")
+    store.db.execute(
+        "UPDATE rules SET success_count=10, fail_count=0, success_rate=1.0 WHERE id=?",
+        (rated_id,),
+    )
+    unrated_id = _add_rule(store, "unrated newer rule", priority=5, created_at="2026-04-20T00:00:00Z")
+    store.db.commit()
+
+    r = store.manage_rule("sess-limit-test", "list", project="myproj")
+    ids = [x["id"] for x in r["rules"]]
+    assert ids.index(unrated_id) < ids.index(rated_id)
 
 
 def _add_ranked_rules(store, n=10, content=None):

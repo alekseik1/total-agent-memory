@@ -989,10 +989,9 @@ class ReflectionReport:
     period_start: str
     period_end: str
     type: str = "session"  # session | periodic | weekly | manual
-    new_nodes: int = 0
-    patterns_found: int = 0
-    skills_refined: int = 0
-    rules_proposed: int = 0
+    edges_strengthened: int = 0
+    clusters_found: int = 0
+    skills_proposed: int = 0
     contradictions: int = 0
     archived: int = 0
     focus_areas: list[str] = field(default_factory=list)
@@ -1006,10 +1005,9 @@ class ReflectionReport:
             "period_start": self.period_start,
             "period_end": self.period_end,
             "type": self.type,
-            "new_nodes": self.new_nodes,
-            "patterns_found": self.patterns_found,
-            "skills_refined": self.skills_refined,
-            "rules_proposed": self.rules_proposed,
+            "edges_strengthened": self.edges_strengthened,
+            "clusters_found": self.clusters_found,
+            "skills_proposed": self.skills_proposed,
             "contradictions": self.contradictions,
             "archived": self.archived,
             "focus_areas": self.focus_areas,
@@ -1025,10 +1023,9 @@ class ReflectionReport:
             period_start=data["period_start"],
             period_end=data["period_end"],
             type=data.get("type", "session"),
-            new_nodes=int(data.get("new_nodes", 0)),
-            patterns_found=int(data.get("patterns_found", 0)),
-            skills_refined=int(data.get("skills_refined", 0)),
-            rules_proposed=int(data.get("rules_proposed", 0)),
+            edges_strengthened=int(data.get("edges_strengthened", 0)),
+            clusters_found=int(data.get("clusters_found", 0)),
+            skills_proposed=int(data.get("skills_proposed", 0)),
             contradictions=int(data.get("contradictions", 0)),
             archived=int(data.get("archived", 0)),
             focus_areas=data.get("focus_areas") or [],
@@ -1040,7 +1037,7 @@ class ReflectionReport:
     @classmethod
     def from_row(cls, row: tuple) -> ReflectionReport:
         """Construct from DB row: (id, period_start, period_end, type,
-        new_nodes, patterns_found, skills_refined, rules_proposed,
+        edges_strengthened, clusters_found, skills_proposed,
         contradictions, archived, focus_areas_json, key_findings_json,
         proposed_changes_json, created_at)."""
         return cls(
@@ -1048,16 +1045,15 @@ class ReflectionReport:
             period_start=row[1],
             period_end=row[2],
             type=row[3] or "session",
-            new_nodes=int(row[4]) if row[4] is not None else 0,
-            patterns_found=int(row[5]) if row[5] is not None else 0,
-            skills_refined=int(row[6]) if row[6] is not None else 0,
-            rules_proposed=int(row[7]) if row[7] is not None else 0,
-            contradictions=int(row[8]) if row[8] is not None else 0,
-            archived=int(row[9]) if row[9] is not None else 0,
-            focus_areas=json_loads_safe(row[10], []),
-            key_findings=json_loads_safe(row[11], []),
-            proposed_changes=json_loads_safe(row[12], []),
-            created_at=row[13] or _iso_now(),
+            edges_strengthened=int(row[4]) if row[4] is not None else 0,
+            clusters_found=int(row[5]) if row[5] is not None else 0,
+            skills_proposed=int(row[6]) if row[6] is not None else 0,
+            contradictions=int(row[7]) if row[7] is not None else 0,
+            archived=int(row[8]) if row[8] is not None else 0,
+            focus_areas=json_loads_safe(row[9], []),
+            key_findings=json_loads_safe(row[10], []),
+            proposed_changes=json_loads_safe(row[11], []),
+            created_at=row[12] or _iso_now(),
         )
 
     def to_row_values(self) -> tuple:
@@ -1066,10 +1062,9 @@ class ReflectionReport:
             self.period_start,
             self.period_end,
             self.type,
-            self.new_nodes,
-            self.patterns_found,
-            self.skills_refined,
-            self.rules_proposed,
+            self.edges_strengthened,
+            self.clusters_found,
+            self.skills_proposed,
             self.contradictions,
             self.archived,
             _json_dumps(self.focus_areas),
