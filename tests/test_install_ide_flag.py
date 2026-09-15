@@ -38,7 +38,7 @@ def _run_install(home: Path, *args: str, extra_env: dict | None = None):
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["INSTALL_TEST_MODE"] = "1"
-    # Pin memory dir inside sandbox; keep inherited PATH so python3 (3.10+) is found.
+    # Pin memory dir inside sandbox; keep inherited PATH so python3 (3.11+) is found.
     env["CLAUDE_MEMORY_DIR"] = str(home / ".claude-memory")
     env["TAM_MEMORY_DIR"] = env["CLAUDE_MEMORY_DIR"]
     env["XDG_CONFIG_HOME"] = str(home / ".config")

@@ -48,7 +48,7 @@ foreach ($cmd in @("python3", "python")) {
         $ver = & $cmd -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
         if ($ver) {
             $major, $minor = $ver.Split(".")
-            if ([int]$major -ge 3 -and [int]$minor -ge 10) {
+            if ([int]$major -gt 3 -or ([int]$major -eq 3 -and [int]$minor -ge 11)) {
                 $pythonCmd = $cmd
                 Write-Host "  Python $ver found ($cmd)" -ForegroundColor Green
                 break
@@ -58,7 +58,7 @@ foreach ($cmd in @("python3", "python")) {
 }
 
 if (-not $pythonCmd) {
-    Write-Host "  ERROR: Python 3.10+ not found. Install from https://python.org" -ForegroundColor Red
+    Write-Host "  ERROR: Python 3.11+ not found. Install from https://python.org" -ForegroundColor Red
     exit 1
 }
 

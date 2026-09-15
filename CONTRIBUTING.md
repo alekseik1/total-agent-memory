@@ -16,7 +16,7 @@ python3 -m venv .venv
 .venv/bin/python -m pytest tests/
 ```
 
-Python 3.10 or newer. The base install pulls ~97 packages; the reranker
+Python 3.11 or newer. The base install pulls ~97 packages; the reranker
 stack lives behind an extra because it resolves torch and the whole
 `nvidia-cu*` set:
 

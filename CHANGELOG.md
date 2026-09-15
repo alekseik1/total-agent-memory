@@ -6,6 +6,7 @@ and versions use [Semantic Versioning](https://semver.org/).
 
 ## [14.0.0] - 2026-09-15
 
+- Require Python 3.11 or newer. 13.x already imported `tomllib` and `datetime.UTC`, so it never ran on 3.10 despite declaring support; package metadata, installers and CI now state the real minimum.
 - Reject contradictory grounded answers that declare both support and a missing premise after the bounded repair attempt.
 - Set OpenMP/BLAS budgets before PyTorch import in rerankers, embeddings, NLI verification and calibration.
 - Keep personal, team and shared workers warm by default; search cached workers first under smaller limits while preserving result ordering.

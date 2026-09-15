@@ -171,7 +171,7 @@ foreach ($cmd in @("python3", "python")) {
         if ($ver) {
             $parts = $ver.Split(".")
             $major = [int]$parts[0]; $minor = [int]$parts[1]
-            if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 10)) {
+            if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 11)) {
                 $pythonCmd = $cmd
                 Write-Host "  Python $ver found ($cmd)" -ForegroundColor Green
                 break
@@ -181,7 +181,7 @@ foreach ($cmd in @("python3", "python")) {
 }
 
 if (-not $pythonCmd) {
-    Write-Host "  ERROR: Python 3.10+ not found. Install from https://python.org" -ForegroundColor Red
+    Write-Host "  ERROR: Python 3.11+ not found. Install from https://python.org" -ForegroundColor Red
     exit 1
 }
 

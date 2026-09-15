@@ -278,7 +278,7 @@ echo "  OK: $MEMORY_DIR"
 echo "-> Step 2: Setting up Python environment..."
 
 if ! command -v python3 &>/dev/null; then
-    echo "  ERROR: python3 not found. Please install Python 3.10+"
+    echo "  ERROR: python3 not found. Please install Python 3.11+"
     exit 1
 fi
 
@@ -286,8 +286,8 @@ PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.versi
 PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
 PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
 
-if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }; then
-    echo "  ERROR: Python 3.10+ required, found $PY_VERSION"
+if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 11 ]; }; then
+    echo "  ERROR: Python 3.11+ required, found $PY_VERSION"
     exit 1
 fi
 

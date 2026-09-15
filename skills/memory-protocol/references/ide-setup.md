@@ -15,7 +15,7 @@ content into your system-prompt or rules file.
 ## Universal preconditions
 
 ```
-- Python 3.10+ (3.13 recommended)
+- Python 3.11+ (3.13 recommended)
 - One of: Ollama (local LLM, recommended) or any cloud provider
   (OpenAI / Anthropic / Cohere / OpenAI-compat)
 - ~/total-agent-memory checked out (or installed via any package channel)
