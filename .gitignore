@@ -44,8 +44,10 @@ backups/
 .env
 .env.local
 
-# Benchmark datasets (large, downloaded on demand)
-benchmarks/data/
+# Benchmark datasets (large, downloaded on demand). The memory-contracts
+# fixture is small, synthetic and read by tests/test_memory_quality_eval.py.
+benchmarks/data/*
+!benchmarks/data/memory-contracts-v1.json
 benchmarks/longmemeval_s*.json
 
 # Personal/local tooling — never push

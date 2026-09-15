@@ -134,17 +134,23 @@ jobs:
     needs: package
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.tam-models
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: candidate-package
           path: dist
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.FASTEMBED_CACHE_PATH }}
+          key: tam-models-source-v14-${{ runner.os }}-${{ hashFiles('src/config.py') }}
       - name: Test the unpacked source distribution
         run: |
           docker build -f docker/Dockerfile.dev -t tam-release-dev .
-          docker run --rm -v "$PWD:/workspace" -w /workspace tam-release-dev sh -c \
-            'set -eu; mkdir -p /tmp/source-candidate; tar -xzf dist/*.tar.gz --strip-components=1 -C /tmp/source-candidate; cd /tmp/source-candidate; python -m pytest tests -q --junitxml=/workspace/source-results.xml'
+          docker run --rm -v "$PWD:/workspace" -w /workspace -e FASTEMBED_CACHE_PATH=/workspace/.tam-models tam-release-dev sh -c \
+            'set -eu; mkdir -p /tmp/source-candidate; tar -xzf dist/*.tar.gz --strip-components=1 -C /tmp/source-candidate; cd /tmp/source-candidate; python tests/smoke/prewarm_models.py; python -m pytest tests -q --junitxml=/workspace/source-results.xml'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
