@@ -170,10 +170,8 @@ class ChromaVectorStore:
 class SQLiteBinaryVectorStore:
     """Phase 3 shim over `Store._binary_search` and the `embeddings` table.
 
-    Search delegates to the injected store; the only logic this class
-    owns is the `embedding_space` filter. We pre-resolve eligible
-    knowledge ids via SQL, then ask the store for raw binary scores
-    and intersect. Phase 5 will replace this with a native binary HNSW.
+    Search delegates to the injected store with scope filters applied
+    before candidate selection.
     """
 
     backend = "sqlite-binary"
@@ -206,44 +204,17 @@ class SQLiteBinaryVectorStore:
         embedding_space: str | Iterable[str] | None = None,
         project: str | None = None,
     ) -> list[tuple[str, float]]:
-        if not query_vec:
+        if not query_vec or top_k <= 0:
             return []
-        # Step 1 — ask the store for raw binary candidates.
         raw = self._store._binary_search(  # noqa: SLF001 — intentional shim
             query_vec,
             n_candidates=max(top_k * 5, 50),
             project=project,
-            n_results=max(top_k * 2, top_k),
+            n_results=top_k,
+            embedding_spaces=_as_space_filter(embedding_space),
+            exact_small_pool=True,
         )
-        spaces = _as_space_filter(embedding_space)
-        if not spaces:
-            return [
-                (str(row["id"]), float(row.get("score") or 0.0))
-                for row in raw[: top_k]
-            ]
-
-        # Step 2 — intersect with embeddings.embedding_space filter.
-        ids = [row["id"] for row in raw]
-        if not ids:
-            return []
-        placeholder = ",".join(["?"] * len(ids))
-        space_placeholder = ",".join(["?"] * len(spaces))
-        rows = self._store.q(
-            f"""
-            SELECT knowledge_id FROM embeddings
-            WHERE knowledge_id IN ({placeholder})
-              AND embedding_space IN ({space_placeholder})
-            """,
-            (*ids, *spaces),
-        )
-        eligible = {r["knowledge_id"] for r in rows}
-        out: list[tuple[str, float]] = []
-        for row in raw:
-            if row["id"] in eligible:
-                out.append((str(row["id"]), float(row.get("score") or 0.0)))
-            if len(out) >= top_k:
-                break
-        return out
+        return [(str(identity), float(score)) for identity, score in raw]
 
 
 __all__ = [

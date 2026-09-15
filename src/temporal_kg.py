@@ -29,6 +29,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _normalize_timestamp(value: str) -> str:
+    stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if stamp.tzinfo is None:
+        raise ValueError("Temporal timestamps require a timezone")
+    return stamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _new_id() -> str:
     return uuid.uuid4().hex
 
@@ -71,7 +78,8 @@ class TemporalKG:
         if not (0.0 <= confidence <= 1.0):
             raise ValueError("confidence must be in [0, 1]")
 
-        now = valid_from or _now()
+        recorded_at = _now()
+        now = _normalize_timestamp(valid_from) if valid_from else recorded_at
         new_id = _new_id()
 
         cur = self.db.cursor()
@@ -81,9 +89,10 @@ class TemporalKG:
             existing = cur.execute(
                 """SELECT id FROM fact_assertions
                    WHERE subject = ? AND predicate = ? AND object = ?
-                   AND valid_to IS NULL AND project = ?
+                   AND (valid_to IS NULL OR ? IS NOT NULL) AND project = ?
+                   AND (? IS NULL OR julianday(valid_from)=julianday(?))
                    LIMIT 1""",
-                (subject, predicate, object, project),
+                (subject, predicate, object, valid_from, project, valid_from, now),
             ).fetchone()
             if existing:
                 return existing[0]
@@ -95,16 +104,16 @@ class TemporalKG:
                     confidence, context, source, project, valid_from, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (new_id, subject, predicate, object, subject_name, object_name,
-                 confidence, context, source, project, now, now),
+                 confidence, context, source, project, now, recorded_at),
             )
 
             if invalidate_previous:
                 # Close any currently-valid assertion with same (s,p) but different object
                 to_close = cur.execute(
                     """SELECT id FROM fact_assertions
-                       WHERE subject = ? AND predicate = ? AND object != ?
-                       AND valid_to IS NULL AND project = ?""",
-                    (subject, predicate, object, project),
+                       WHERE subject = ? AND predicate = ? AND id != ?
+                       AND (valid_to IS NULL OR julianday(valid_to) > julianday(?)) AND project = ? AND julianday(valid_from) <= julianday(?)""",
+                    (subject, predicate, new_id, now, project, now),
                 ).fetchall()
                 for (old_id,) in to_close:
                     cur.execute(
@@ -115,6 +124,15 @@ class TemporalKG:
                         (now, new_id, old_id),
                     )
 
+            if invalidate_previous:
+                newer = cur.execute(
+                    "SELECT id, valid_from FROM fact_assertions WHERE subject=? AND predicate=? "
+                    "AND project=? AND julianday(valid_from)>julianday(?) ORDER BY julianday(valid_from) LIMIT 1",
+                    (subject, predicate, project, now),
+                ).fetchone()
+                if newer is not None:
+                    cur.execute("UPDATE fact_assertions SET valid_to=?, superseded_by=? WHERE id=?",
+                                (newer[1], newer[0], new_id))
             self.db.commit()
         except sqlite3.Error:
             self.db.rollback()
@@ -136,15 +154,15 @@ class TemporalKG:
 
         Returns the number of assertions closed.
         """
-        now = at or _now()
+        now = _normalize_timestamp(at) if at else _now()
         cur = self.db.cursor()
         try:
             cur.execute(
                 """UPDATE fact_assertions
                    SET valid_to = ?, invalidation_reason = ?
                    WHERE subject = ? AND predicate = ? AND object = ?
-                   AND valid_to IS NULL AND project = ?""",
-                (now, reason, subject, predicate, object, project),
+                   AND valid_to IS NULL AND project = ? AND julianday(valid_from) <= julianday(?)""",
+                (now, reason, subject, predicate, object, project, now),
             )
             closed = cur.rowcount
             self.db.commit()
@@ -155,13 +173,13 @@ class TemporalKG:
 
     def invalidate_assertion(self, assertion_id: str, *, reason: str = "manual", at: str | None = None) -> bool:
         """Close a specific assertion by id. Returns True if it was open."""
-        now = at or _now()
+        now = _normalize_timestamp(at) if at else _now()
         cur = self.db.cursor()
         cur.execute(
             """UPDATE fact_assertions
                SET valid_to = ?, invalidation_reason = ?
-               WHERE id = ? AND valid_to IS NULL""",
-            (now, reason, assertion_id),
+               WHERE id = ? AND valid_to IS NULL AND julianday(valid_from) <= julianday(?)""",
+            (now, reason, assertion_id, now),
         )
         changed = cur.rowcount > 0
         self.db.commit()
@@ -206,8 +224,9 @@ class TemporalKG:
         if timestamp is None:
             conditions.append("valid_to IS NULL")
         else:
-            conditions.append("valid_from <= ?")
-            conditions.append("(valid_to IS NULL OR valid_to > ?)")
+            timestamp = _normalize_timestamp(timestamp)
+            conditions.append("julianday(valid_from) <= julianday(?)")
+            conditions.append("(valid_to IS NULL OR julianday(valid_to) > julianday(?))")
             params.extend([timestamp, timestamp])
 
         if subject is not None:

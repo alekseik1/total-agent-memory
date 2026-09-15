@@ -1,0 +1,8 @@
+services:
+  team-memory:
+    environment:
+      MEMORY_LLM_ENABLED: 'false'
+      MEMORY_MODE: fast
+      MEMORY_QUALITY_GATE_ENABLED: 'false'
+    volumes:
+      - ${TAM_CHECK_SOURCE:?Set candidate source directory}:/checks:ro

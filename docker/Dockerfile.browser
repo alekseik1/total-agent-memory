@@ -1,0 +1,6 @@
+ARG DEVELOPMENT_IMAGE=tam-development:14.0.0
+FROM ${DEVELOPMENT_IMAGE}
+ARG PLAYWRIGHT_VERSION=1.62.0
+RUN python -m pip install --no-cache-dir playwright==${PLAYWRIGHT_VERSION} \
+    && python -m playwright install --with-deps chromium firefox webkit
+CMD ["python", "-m", "pytest", "tests/browser", "-q"]

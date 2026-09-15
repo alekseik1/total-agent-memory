@@ -2,18 +2,16 @@
 
 <!-- mcp-name: io.github.vbcherepanov/total-agent-memory -->
 
-> **The only memory layer that learns _how_ you work — not just _what_ you said.**
+> **Persistent memory for your facts, decisions and working practices.**
 > Persistent, local memory for AI coding agents: Claude Code, Codex CLI, Cursor, any MCP client.
 > Temporal knowledge graph · procedural memory · AST codebase ingest · cross-project analogy · 3D WebGL visualization.
 
-[![Version](https://img.shields.io/badge/version-13.0.4-8ad.svg)](https://pypi.org/project/total-agent-memory/)
-[![Tests](https://img.shields.io/badge/tests-1881%20passing-4a9.svg)]()
+[![Version](https://img.shields.io/badge/version-14.0.0-8ad.svg)](https://pypi.org/project/total-agent-memory/)
+[![Tests](https://img.shields.io/badge/tests-2162%20passing-4a9.svg)](docs/benchmarks/release-final-v14-20260915/RESULTS.md)
 [![IDEs](https://img.shields.io/badge/IDEs-9%20supported-4a9.svg)]()
 [![LongMemEval R@5](https://img.shields.io/badge/LongMemEval%20R@5-95.1%25-4a9.svg)](evals/longmemeval-2026-08-27-v13-store.json)
 [![LoCoMo R@5](https://img.shields.io/badge/LoCoMo%20R@5-0.607-4a9.svg)](benchmarks/results/v13-locomo-retrieval.json)
 [![BEAM R@5](https://img.shields.io/badge/BEAM%201M%20R@5-0.448-4a9.svg)](benchmarks/results/v13-beam-1M.json)
-[![vs Supermemory](https://img.shields.io/badge/vs%20Supermemory-%2B9.7pp-4a9.svg)](docs/vs-competitors.md)
-[![p50 latency](https://img.shields.io/badge/p50%20warm-0.065ms-4a9.svg)](evals/results-2026-04-17.json)
 [![Local-First](https://img.shields.io/badge/100%25-local-4a9.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-fa4.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-2026--07--28-blue.svg)](https://modelcontextprotocol.io)
@@ -27,97 +25,150 @@
 
 ---
 
-## v13.0.0 — MCP 2026-07-28, and honest benchmarks (2026-08-27)
+## Version 14.0.0 — what is new
 
-> **Upgrade if you installed after the MCP Python SDK went 2.0.** The 2.x line
-> dropped the `@Server.list_tools()` / `@Server.call_tool()` decorators this
-> server was built on, and the dependency was floored at `mcp[cli]>=1.0.0` — so
-> every fresh `pip` / `uvx` / `npx` / `brew` / `docker` install resolved 2.x and
-> died at import. Existing installs kept working only because their pinned 1.x
-> never moved.
+**Release date: 2026-09-15 · Status: release candidate; registry publication pending.**
+Use the prepared wheel or this source checkout for v14. The general package-manager commands below follow their published channels and do not guarantee v14 before publication.
 
-**Protocol.** Tools now register through whichever API the installed SDK
-exposes, and the server serves both protocol eras from one process: the
-stateless **2026-07-28** revision — `tools/list`, `server/discover` and
-`tools/call` with no `initialize` handshake, protocol metadata per request —
-alongside the legacy handshake for clients on older SDKs. JSON-answering tools
-return `structuredContent`, so clients stop re-parsing strings, and all 74
-tools carry `readOnlyHint` / `destructiveHint` / `idempotentHint` annotations
-that clients use to decide what runs without a confirmation prompt.
+| Change | How you use it |
+|---|---|
+| **Personal, team and shared memory** | Install one server; give Vasya and Petya separate tokens. Select a scope when saving; search all areas you can access. Each area has its own database, graph and index. |
+| **Authorship and revision history** | The token identifies the author and client. See who changed a record, when and why; revision checks prevent overwriting another person's edit. |
+| **Remote MCP and team web interface** | Connect an IDE through the lightweight Python bridge. In the browser, select a scope, search, browse, save, edit and inspect history. The interface displays the product name, version and release date. |
+| **Lower CPU pressure** | Fast mode remains the default. Embedding and optional PyTorch models default to one compute thread. The team server retains three workspace workers to avoid repeated model loading. |
+| **Configurable internal LLMs** | Use Ollama, an OpenAI-compatible endpoint or Anthropic for internal text tasks; explicitly select a vision model for images. |
+| **Safer retrieval and answers** | Scoped context, model-aware vector search and privacy-safe write intents. The optional grounded reader checks supporting evidence and rejects contradictory claims; it is not the default answer path. |
+| **Installation and packaging fixes** | Wheel, source archive and Docker checks cover Linux, Windows and macOS; the source archive now includes test fixtures and installation support files. |
 
-**Claude Code plugin.** The MCP server, the `memory-protocol` skill and the
-seven capture hooks now install in one step:
+**Validation:** 2,162 tests passed in the checkout; 2,145 passed from the source archive. Native wheel checks passed on Ubuntu, Windows and macOS; 12 browser scenarios passed across Chromium, Firefox and WebKit. The expanded CI matrix still requires execution. See the [final verification report](docs/benchmarks/release-final-v14-20260915/RESULTS.md) for skips, exact platforms and artifact hashes.
 
-```bash
-/plugin marketplace add vbcherepanov/total-agent-memory
-/plugin install total-agent-memory@vbcherepanov
+**Performance limits:** BGE is optional. On the measured Linux ARM64 setup, its one-thread p95 was about **2,179 ms**, above the 200 ms target. Limiting threads reduces parallel CPU load; it does not eliminate CPU work. No top-10 ranking or new default answer-quality improvement is claimed. [CPU measurements](docs/benchmarks/grounded-v14/CPU_RESULTS.md).
+
+[Full v14 release notes](docs/RELEASE_V14.md) · [Changelog and previous releases](CHANGELOG.md)
+
+## Getting started with v14
+
+### Choose local or server mode
+
+| Mode | Install and use |
+|---|---|
+| **Local, one person** | Follow [native or Docker installation](#install), then [Quick start](#quick-start). Memory and models run on your machine; the local MCP catalogue has 74 tools. |
+| **Server, multiple people** | Follow the setup below. Memory and models run on the server; clients need only Python and their token. The remote catalogue exposes eight core tools. |
+
+The server instructions work with the prepared v14 wheel on Linux, macOS and Windows. Run commands in a directory where you can create the data folder and token files.
+
+### Start a server without Docker
+
+Install the candidate wheel in a dedicated environment. Linux/macOS:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install ./dist/total_agent_memory-14.0.0-py3-none-any.whl
 ```
 
-**LongMemEval now measures the product.** The runner had its own
-self-contained BM25 / RRF / MMR / CrossEncoder stack, so the published 96.2%
-described an algorithm rather than this software. A new `--modes store` — now
-the default — ingests each haystack into a real `Store` and queries
-`Recall.search`. Re-measured: **95.1% R@5**, 27.6 ms per query.
+Windows PowerShell, using the environment directly without changing the execution policy:
 
-**Benchmarks that no longer measure themselves.** `Recall.search` bumps
-`recall_count` on every row it returns, and the scorer adds
-`recall_boost = min(0.3, recall_count * 0.05)`. Spaced repetition is wanted in
-normal use and fatal for measurement: successive runs against one database
-scored 0.547 → 0.565 → 0.588 → 0.607 R@5 without a line of retrieval code
-changing. Both runners now pass `record_usage=False`, a clean run and a re-run
-are byte-identical, and every number below was re-measured on that basis. The
-LoCoMo runner had also been printing categories 2 and 3 under each other's
-labels.
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install .\dist\total_agent_memory-14.0.0-py3-none-any.whl
+$env:PATH = "$PWD\.venv\Scripts;$env:PATH"
+```
 
-**[BEAM](https://github.com/mohammadtavakoli78/BEAM) (ICLR 2026)** is now part
-of the suite — retrieval across its ten memory abilities at the 100K / 500K /
-1M scales, graded against each probe's `source_chat_ids` with no LLM in the
-loop.
+Then, on any of these systems:
 
-**And ~3 GB it could not reach (13.0.2).** The base install resolved
-`sentence-transformers`, `transformers`, `FlagEmbedding` and `peft`, each of
-which resolves torch, which on Linux resolves the entire `nvidia-cu*` set: 147
-packages and ~3,108 MB of wheels against 97 and ~113 MB without them. The
-[Glama](https://glama.ai) build sandbox simply ran out of disk unpacking
-`nvidia-cudnn-cu13`. Yet the default configuration cannot touch any of it —
-`MEMORY_MODE=fast` disables the reranker, and the same mode's
-`MEMORY_ALLOW_OLLAMA_IN_HOT_PATH=false` is the flag that gates the
-`SentenceTransformer` fall-through in `Recall._compute`. The stack now lives in
-a `rerank` extra, and the mirror of the dependency-drift test keeps it there.
-Every installer was also warming `all-MiniLM-L6-v2` — the fallback model, not
-the one the server embeds with — into a cache nothing reads.
+```sh
+tam-team --root ./team-data user-add vasya 'Vasya'
+tam-team --root ./team-data user-add petya 'Petya'
+tam-team --root ./team-data team-add engineering 'Engineering'
+tam-team --root ./team-data member vasya engineering editor
+tam-team --root ./team-data member petya engineering editor
+tam-team --root ./team-data token-create vasya --client codex --out ./vasya.token
+tam-team --root ./team-data token-create petya --client cursor --out ./petya.token
+tam-team --root ./team-data serve --host 127.0.0.1 --port 3738
+```
 
-**The server was carrying ~450 MB it never used.** `chromadb` and
-`sentence_transformers` were imported at module scope, both are fallback paths,
-and the second pulls in torch — so every user paid for a stack that fastembed
-made unnecessary. Deferring them took `import server` from 558 MB to **116 MB**
-and a serving process from 1367 MB to **909 MB**. Reported by d.snezhinskiy.
-A failed fastembed init also stops being a single log line: it now names the
-cache and the memory cost, because a macOS-purged model cache is the usual
-reason a memory server suddenly wants 1.5 GB.
+Open `http://127.0.0.1:3738/` and sign in with the contents of your token file. Keep each token private; give Petya his own token, not Vasya's. For access from other machines, configure an HTTPS reverse proxy to the server's `/mcp/` endpoint and web interface. [Permissions, backup, restore and server configuration](docs/TEAM_SERVER_V14.md).
 
-**Bugs worth naming — all of the "works in a checkout, silently dead when
-installed" kind.** `tree-sitter-language-pack` was in no requirements file, so
-"AST codebase ingest, 9 languages" degraded to whole-file chunks for everyone.
-`vocabularies/` and `filters/` never made it into the wheel or the image, so
-canonical tag normalisation ran against an empty vocabulary and every
-`memory_save(filter=…)` was a no-op. The enrichment worker shared the Store's
-sqlite connection — safe for reads, not for writes — and long ingests died on
-`cannot start a transaction within a transaction`. Migration 028 failed on every fresh
-database and could never record itself, so it retried on every startup forever
-(root cause spotted by @juicetin in #12: two owners for one schema change). And
-`ai_layer/verifier.py` looked for NLI calibrations at the pre-`.tam` path.
+### Start a server with Docker Compose
 
-Full notes in [`CHANGELOG.md`](CHANGELOG.md#1300--2026-08-27--mcp-2026-07-28-and-honest-benchmarks).
-Earlier releases: [v12.4.0](CHANGELOG.md#1240--2026-05-26--100-functional-through-every-install-path) ·
-[v12.0.0](CHANGELOG.md#1200--2026-05-16) ·
-[v11.0](CHANGELOG.md#1100).
+From this checkout, with port 3738 available:
+
+```sh
+docker compose -f docker-compose.team.yml build
+docker compose -f docker-compose.team.yml run --rm team-memory python /app/src/team_memory/cli.py user-add vasya 'Vasya'
+docker compose -f docker-compose.team.yml run --rm team-memory python /app/src/team_memory/cli.py token-create vasya --client codex --out /team-data/vasya.token
+docker compose -f docker-compose.team.yml up -d
+docker compose -f docker-compose.team.yml cp team-memory:/team-data/vasya.token ./vasya.token
+```
+
+The web interface is at `http://127.0.0.1:3738/`. The token copied to the host is a credential: restrict file access to its owner. To add Petya, a team and membership, use the same CLI subcommands shown above through `docker compose -f docker-compose.team.yml run --rm team-memory python /app/src/team_memory/cli.py`.
+
+Compose keeps data and model caches in persistent volumes. Set `TAM_TEAM_PORT`, `TAM_TEAM_MAX_WORKERS` and LLM settings in `.env` as needed; see [.env.example](.env.example). Plan at least 4 GiB RAM for three warm MiniLM workers and measure your own workload. [Docker server details](docs/TEAM_SERVER_V14.md#docker).
+
+### Connect a remote IDE
+
+Copy `src/team_memory/remote.py` to the client and supply its personal token file. This bridge uses only the Python standard library. For clients with an `mcpServers` configuration:
+
+```json
+{
+  "mcpServers": {
+    "total-agent-memory": {
+      "command": "python3",
+      "args": ["/absolute/path/remote.py"],
+      "env": {
+        "TAM_REMOTE_URL": "https://YOUR_SERVER/mcp/",
+        "TAM_REMOTE_TOKEN_FILE": "/absolute/path/vasya.token"
+      }
+    }
+  }
+}
+```
+
+Replace the paths and server address. On Windows use the path to `python.exe` and Windows file paths. Local testing may use `http://127.0.0.1:3738/mcp/`; remote connections require HTTPS. If the package is installed on the client, `tam-remote` is also available. [Client configuration details](docs/TEAM_SERVER_V14.md#лёгкий-удалённый-клиент).
+
+### Save, search and see who changed what
+
+Ask your agent to call `memory_scopes` first to list available areas. These are example arguments for the remote `memory_save` tool:
+
+```jsonl
+{"content":"My investigation notes", "scope":{"kind":"personal"}, "tags":["release-v14"]}
+{"content":"Engineering release checklist", "scope":{"kind":"team","team_id":"engineering"}, "tags":["release-v14"]}
+{"content":"Company-wide onboarding guide", "scope":{"kind":"shared"}, "tags":["onboarding"]}
+```
+
+- **Personal:** visible only to the token's owner; this is the default for saves.
+- **Team:** visible to members; `reader` can read, `editor` can also change records.
+- **Shared:** readable and editable by every authenticated user of this server.
+- **Tags:** organize topics. Access comes from `scope` and membership; reserved `scope:`, `team:` and `user:` tags are managed by the server.
+
+Call `memory_recall` with `{"query":"release checklist"}` to search all accessible areas, or add a `scope` to narrow the search. Use `memory_get` and `memory_history` with the returned record's `id` and `scope` to inspect content, author and changes. `memory_update` requires those fields plus `expected_revision`, `content` and `reason`; use the new ID returned by the update for subsequent operations. The author is taken from the token automatically.
+
+The remote tools are `memory_scopes`, `memory_save`, `memory_recall`, `memory_get`, `memory_update`, `memory_delete`, `memory_history` and `memory_export`. History and export are paginated. [Full behavior and retry rules](docs/TEAM_SERVER_V14.md).
+
+### Configure internal models and CPU
+
+Fast mode works without an LLM. To use a local model for optional internal tasks, set these environment variables (or `.env` for Compose):
+
+```dotenv
+MEMORY_LLM_ENABLED=true
+MEMORY_LLM_PROVIDER=ollama
+MEMORY_LLM_MODEL=YOUR_INSTALLED_MODEL
+OLLAMA_URL=http://127.0.0.1:11434
+MEMORY_EMBED_THREADS=1
+MEMORY_TORCH_THREADS=1
+```
+
+For Docker, the Ollama address must be reachable from the container; the team profile defaults to `http://host.docker.internal:11434`. For another compatible server, select `MEMORY_LLM_PROVIDER=openai-compatible` and set `MEMORY_LLM_API_BASE`, `MEMORY_LLM_MODEL` and, if required, `MEMORY_LLM_API_KEY`. Compatibility means Chat Completions, with JSON Schema support for structured tasks. Set `MEMORY_VISION_MODEL` separately for images. Restart after changing environment settings. [Provider settings and CPU limits](docs/LLM_V14.md).
+
+Optional remote LLM providers receive the content used in those tasks. Keep Ollama local or set `MEMORY_LLM_ENABLED=false` if that content must stay on your own infrastructure.
 
 ---
 
 ## Table of contents
 
-- [v13.0.0 — what changed](#v1300--mcp-2026-07-28-and-honest-benchmarks-2026-08-27)
+- [Version 14.0.0 — what is new](#version-1400--what-is-new)
+- [Getting started with v14](#getting-started-with-v14)
 - [The problem it solves](#the-problem-it-solves)
 - [60-second demo](#60-second-demo)
 - [Benchmarks — how it compares](#benchmarks--how-it-compares)
@@ -154,7 +205,7 @@ Every decision, solution, error, fact, file change, and session summary is:
 - **Captured** — explicitly via `memory_save` or implicitly via hooks on file edits / bash errors / session end
 - **Linked** — automatically extracted into a knowledge graph (entities, relations, temporal facts)
 - **Searchable** — 6-stage hybrid retrieval (BM25 + dense + graph + CrossEncoder + MMR + RRF fusion), **95.1% R@5 on public LongMemEval**
-- **Private** — 100% local. SQLite + FastEmbed + optional Ollama. No data leaves your machine.
+- **Private by default** — SQLite + FastEmbed + optional local Ollama. In server mode, memory stays on your server; external LLMs receive content only when configured and used.
 
 ---
 
@@ -565,6 +616,8 @@ Full side-by-side with pricing, latency, accuracy, "when to pick each" → [docs
 ## Install
 
 ### Quickstart — pick one
+
+These are the published distribution channels. For the unpublished v14 candidate, use the [wheel or source-based Compose instructions above](#getting-started-with-v14).
 
 | Channel | Command | What it does |
 |---|---|---|

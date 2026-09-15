@@ -19,13 +19,10 @@ Usage:
 
 import os
 import sys
-import json
-import urllib.request
 from pathlib import Path
 
 LOG = lambda msg: sys.stderr.write(f"[memory-ocr] {msg}\n")
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
 # Try to import Apple Vision
 _HAS_VISION = False
@@ -166,43 +163,29 @@ class OCREngine:
             LOG(f"Tesseract OCR error: {e}")
             return ""
 
-    def describe_image(self, image_path: str, model: str = "llava:13b") -> str | None:
+    def describe_image(self, image_path: str, model: str | None = None) -> str | None:
         """
-        Describe image content using Ollama vision model.
+        Describe image content using the configured vision-capable model.
 
         Args:
             image_path: Path to image file
-            model: Ollama vision model (default: llava:13b)
+            model: Vision model override; otherwise MEMORY_VISION_MODEL.
 
         Returns:
             Description string or None if unavailable
         """
+        import config
+        from ingestion.vision_provider import ImageInput, describe
+
+        selected_model = model or os.environ.get("MEMORY_VISION_MODEL")
+        if not selected_model or not config.has_llm():
+            return None
         path = Path(image_path)
         if not path.exists():
             return None
 
         try:
-            import base64
-            image_data = base64.b64encode(path.read_bytes()).decode()
-
-            payload = json.dumps({
-                "model": model,
-                "prompt": "Describe this image in detail. If it contains code, transcribe it. "
-                          "If it contains a diagram, describe the structure.",
-                "images": [image_data],
-                "stream": False,
-                "options": {"temperature": 0.3, "num_predict": 500},
-            }).encode()
-
-            req = urllib.request.Request(
-                f"{OLLAMA_URL}/api/generate",
-                data=payload,
-                headers={"Content-Type": "application/json"},
-            )
-
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read())
-                return data.get("response", "").strip()
+            return describe(ImageInput.read(path), selected_model)
 
         except Exception as e:
             LOG(f"Image description error: {e}")

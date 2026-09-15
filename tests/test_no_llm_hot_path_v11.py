@@ -222,8 +222,9 @@ def test_save_decision_makes_no_llm_calls(fast_store, tripwire):
 # ──────────────────────────────────────────────
 
 
-def test_search_makes_no_llm_calls(fast_store, tripwire):
+def test_search_makes_no_llm_calls(fast_store, tripwire, monkeypatch):
     """HyDE / analyze_query / query_rewriter must not fire in fast search."""
+    monkeypatch.setenv("MEMORY_QUERY_REWRITE", "1")
     fast_store.save_knowledge(
         sid="s1",
         content="kubernetes operator pattern with custom resource definitions",
@@ -236,9 +237,14 @@ def test_search_makes_no_llm_calls(fast_store, tripwire):
 
     import server as _srv
 
+    rewrite_calls = []
+    monkeypatch.setattr(_srv, "HAS_QUERY_REWRITER", True)
+    monkeypatch.setattr(_srv, "_qr_decomposable", lambda query: True)
+    monkeypatch.setattr(_srv, "_qr_rewrite", lambda *args, **kwargs: rewrite_calls.append(args) or {})
     recall = _srv.Recall(fast_store)
     result = recall.search(query="kubernetes operator", project="demo", limit=5)
     assert result is not None
+    assert rewrite_calls == []
     tripwire.assert_zero()
 
 
@@ -343,10 +349,6 @@ def test_existing_vectors_get_text_space_after_migration(fast_store):
     )
 
 
-@pytest.mark.xfail(
-    reason="Phase 6b: Recall.search does not accept embedding_space yet.",
-    strict=False,
-)
 def test_search_filter_by_embedding_space(fast_store):
     """Searching with embedding_space='code' must return only code rows."""
     fast_store.save_knowledge(
@@ -424,11 +426,6 @@ def test_code_save_uses_code_specific_embedding_model_by_default(fast_store):
 # ──────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    reason="memory_core/ does not exist yet (created in Phase 3). "
-    "This guard goes green after Phase 3.",
-    strict=False,
-)
 def test_memory_core_does_not_import_llm_provider():
     """Phase 3+ contract: `src/memory_core/*` must not import `llm_provider`.
 

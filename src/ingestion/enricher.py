@@ -8,15 +8,17 @@ beyond urllib for Ollama calls.
 
 from __future__ import annotations
 
-import json
+import logging
 import re
 import sqlite3
 import sys
 import urllib.error
-import urllib.request
 
-OLLAMA_URL = "http://localhost:11434"
-OLLAMA_MODEL = "qwen2.5-coder:32b"
+import config
+from llm_provider import make_provider
+
+SUMMARY_MAX_TOKENS = 256
+SUMMARY_TEMPERATURE = 0.1
 LOG = lambda msg: sys.stderr.write(f"[memory-enricher] {msg}\n")
 
 # Known project names to match against content
@@ -198,6 +200,8 @@ class MetadataEnricher:
         """
         if not text or len(text) < 50:
             return text[:max_length] if text else None
+        if not config.has_llm():
+            return None
 
         # Truncate input to avoid overwhelming the model
         truncated = text[:4000] if len(text) > 4000 else text
@@ -208,31 +212,14 @@ class MetadataEnricher:
             f"Content:\n{truncated}"
         )
 
-        payload = json.dumps(
-            {
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.1, "num_predict": 256},
-            }
-        ).encode("utf-8")
-
-        req = urllib.request.Request(
-            f"{OLLAMA_URL}/api/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                summary = data.get("response", "").strip()
-                if summary:
-                    return summary[:max_length]
-                return None
-        except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
-            LOG(f"Ollama summarize failed: {exc}")
+            summary = make_provider(config.get_llm_provider()).complete(
+                prompt, model=config.get_llm_model_for_provider(), max_tokens=SUMMARY_MAX_TOKENS,
+                temperature=SUMMARY_TEMPERATURE, timeout=config.get_llm_timeout_sec(),
+            ).strip()
+            return summary[:max_length] if summary else None
+        except (ValueError, RuntimeError, urllib.error.URLError, OSError) as exc:
+            logging.getLogger(__name__).warning("Summary generation failed", extra={"error": str(exc)})
             return None
 
     @staticmethod

@@ -29,6 +29,8 @@ import time
 from contextlib import contextmanager
 from typing import Iterator
 
+LATENCY_BUCKETS_MS = (1, 5, 10, 25, 50, 100, 250, 1000, 5000, 60000)
+
 
 class Counter:
     """Thread-safe in-process counter / timer accumulator."""
@@ -86,6 +88,11 @@ def op_timer(name: str) -> Iterator[None]:
     finally:
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         counters.bump(name, elapsed_ms)
+        counters.bump(f"{name}_count")
+        for bound in LATENCY_BUCKETS_MS:
+            if elapsed_ms <= bound:
+                counters.bump(f"{name}_bucket_le_{bound}")
+        counters.bump(f"{name}_bucket_le_inf")
 
 
 __all__ = ["Counter", "counters", "op_timer"]

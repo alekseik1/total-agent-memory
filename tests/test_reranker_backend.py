@@ -7,7 +7,6 @@ the suite runs without sentence-transformers / FlagEmbedding installed.
 from __future__ import annotations
 
 import importlib
-import os
 import sys
 from pathlib import Path
 
@@ -54,7 +53,7 @@ def test_bge_v2_m3_backend(monkeypatch):
 
 def test_bge_large_backend(monkeypatch):
     monkeypatch.setenv("V9_RERANKER_BACKEND", "bge-large")
-    cfg, rr = _fresh_modules()
+    _, rr = _fresh_modules()
     assert rr._resolve_reranker_model("bge-large") == "BAAI/bge-reranker-large"
 
 
@@ -98,6 +97,33 @@ def test_empty_results_short_circuit(monkeypatch):
     assert rr.rerank_results("q", [], top_k=5) == []
 
 
+@pytest.mark.parametrize("backend", ["ce", "llm"])
+def test_middle_fact_reaches_legacy_reranker(monkeypatch, backend):
+    _, rr = _fresh_modules()
+    fact = "Morgan owns the billing database."
+    content = "Unrelated weather notes.\n" * 200 + fact + "\n" + "Other notes.\n" * 200
+    candidates = [{"r": {"content": content, "project": "p"}, "score": 0.5}]
+    captured = []
+
+    def score(model, kind, pairs):
+        captured.extend(pair[1] for pair in pairs)
+        return [1.0]
+
+    def generate(prompt, model, **kwargs):
+        captured.append(prompt)
+        return "[9]"
+
+    monkeypatch.setattr(rr, "_score_pairs", score)
+    monkeypatch.setattr(rr, "_ollama_generate", generate)
+    query = "Who owns the billing database?"
+    if backend == "ce":
+        rr._rerank_with_model(None, "ce", query, candidates, 1)
+    else:
+        rr._rerank_llm(query, candidates, 1)
+    assert fact in captured[0]
+    assert candidates[0]["r"]["content"] == content
+
+
 def test_dispatch_uses_flag_kind_for_bge(monkeypatch):
     """If the FlagReranker stub exposes compute_score, kind=='flag'."""
     monkeypatch.setenv("V9_RERANKER_BACKEND", "bge-v2-m3")
@@ -106,7 +132,7 @@ def test_dispatch_uses_flag_kind_for_bge(monkeypatch):
     calls = {"count": 0}
 
     class _StubFlag:
-        def compute_score(self, pairs):  # noqa: D401
+        def compute_score(self, pairs):
             calls["count"] += 1
             return [float(len(p[1])) for p in pairs]
 

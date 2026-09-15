@@ -1,3 +1,8 @@
 -r requirements.txt
 pytest>=8.0.0
 build>=1.2.0
+ruff>=0.16.6
+scipy>=1.14
+pyarrow>=18
+setuptools>=68
+wheel>=0.43

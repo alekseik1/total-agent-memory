@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    total-agent-memory v8.0 - One-Command Installer (Windows, multi-IDE)
+    total-agent-memory - One-Command Installer (Windows, multi-IDE)
 
 .DESCRIPTION
     Creates Python venv, installs dependencies, downloads embedding model,
@@ -35,22 +35,45 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Write-Utf8File {
+    param([string]$Path, [string]$Content)
+    [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
+}
+
 # TestMode can also be forced via env (parity with INSTALL_TEST_MODE=1 in bash)
 if (-not $TestMode -and $env:INSTALL_TEST_MODE -eq "1") {
     $TestMode = $true
 }
 
+$InstallDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$versionSource = Get-Content ([System.IO.Path]::Combine($InstallDir, "src", "version.py")) -Raw
+if ($versionSource -notmatch 'VERSION\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
+    throw "Cannot read release version from src/version.py"
+}
+$ReleaseVersion = $Matches[1]
+
 Write-Host ""
 Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host "  total-agent-memory v8.0.0 - Installer (Windows)"       -ForegroundColor Cyan
+Write-Host "  total-agent-memory v$ReleaseVersion - Installer (Windows)" -ForegroundColor Cyan
 Write-Host "  IDE: $Ide$(if ($TestMode) {' [TEST MODE]'})"            -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 Write-Host ""
 
 # -- Config --
-$InstallDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
-$MemoryDir = if ($env:CLAUDE_MEMORY_DIR) { $env:CLAUDE_MEMORY_DIR } else { [System.IO.Path]::Combine($HomeDir, ".claude-memory") }
+$MemoryDir = if ($env:TAM_MEMORY_DIR) {
+    $env:TAM_MEMORY_DIR
+} elseif ($env:CLAUDE_MEMORY_DIR) {
+    $env:CLAUDE_MEMORY_DIR
+} elseif (Test-Path ([System.IO.Path]::Combine($HomeDir, ".tam"))) {
+    [System.IO.Path]::Combine($HomeDir, ".tam")
+} elseif (Test-Path ([System.IO.Path]::Combine($HomeDir, ".claude-memory"))) {
+    [System.IO.Path]::Combine($HomeDir, ".claude-memory")
+} else {
+    [System.IO.Path]::Combine($HomeDir, ".tam")
+}
+$env:TAM_MEMORY_DIR = $MemoryDir
+$env:CLAUDE_MEMORY_DIR = $MemoryDir
 $VenvDir = [System.IO.Path]::Combine($InstallDir, ".venv")
 $ClaudeDir = [System.IO.Path]::Combine($HomeDir, ".claude")
 $ClaudeSettings = [System.IO.Path]::Combine($ClaudeDir, "settings.json")
@@ -82,7 +105,7 @@ function Invoke-Uninstall {
     # Claude Code settings.json - drop memory MCP + our hooks
     if (Test-Path $ClaudeSettings) {
         try {
-            $raw = Get-Content $ClaudeSettings -Raw
+            $raw = Get-Content $ClaudeSettings -Raw -Encoding UTF8
             $settings = $raw | ConvertFrom-Json
             $changed = $false
 
@@ -102,7 +125,7 @@ function Invoke-Uninstall {
             }
 
             if ($changed) {
-                $settings | ConvertTo-Json -Depth 10 | Set-Content -Path $ClaudeSettings -Encoding UTF8
+                Write-Utf8File -Path $ClaudeSettings -Content ($settings | ConvertTo-Json -Depth 10)
                 Write-Host "  OK: Cleaned memory entries from $ClaudeSettings" -ForegroundColor Green
             }
         } catch {
@@ -148,7 +171,7 @@ foreach ($cmd in @("python3", "python")) {
         if ($ver) {
             $parts = $ver.Split(".")
             $major = [int]$parts[0]; $minor = [int]$parts[1]
-            if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 10)) {
+            if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 11)) {
                 $pythonCmd = $cmd
                 Write-Host "  Python $ver found ($cmd)" -ForegroundColor Green
                 break
@@ -158,12 +181,11 @@ foreach ($cmd in @("python3", "python")) {
 }
 
 if (-not $pythonCmd) {
-    Write-Host "  ERROR: Python 3.10+ not found. Install from https://python.org" -ForegroundColor Red
+    Write-Host "  ERROR: Python 3.11+ not found. Install from https://python.org" -ForegroundColor Red
     exit 1
 }
 
 $VenvPython = [System.IO.Path]::Combine($VenvDir, "Scripts", "python.exe")
-$VenvPip = [System.IO.Path]::Combine($VenvDir, "Scripts", "pip.exe")
 
 if ($TestMode) {
     Write-Host "  SKIP (test mode): venv creation and pip install" -ForegroundColor DarkYellow
@@ -177,16 +199,18 @@ if ($TestMode) {
     if (-not (Test-Path $VenvPython)) {
         Write-Host "  Creating virtual environment..."
         & $pythonCmd -m venv $VenvDir
+        if ($LASTEXITCODE -ne 0) { throw "Virtual environment creation failed" }
     }
     if (-not (Test-Path $VenvPython)) {
         Write-Host "  ERROR: Failed to create virtual environment" -ForegroundColor Red
         exit 1
     }
-    & $VenvPip install -q --upgrade pip 2>$null
+    & $VenvPython -m pip install -q --upgrade pip
+    if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed" }
     Write-Host "  Installing dependencies (this may take 2-3 minutes on first run)..."
     $req = [System.IO.Path]::Combine($InstallDir, "requirements.txt")
-    $reqDev = [System.IO.Path]::Combine($InstallDir, "requirements-dev.txt")
-    & $VenvPip install -q -r $req -r $reqDev 2>&1 | Select-Object -Last 1
+    & $VenvPython -m pip install -q -r $req -e $InstallDir
+    if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed" }
     Write-Host "  OK: Dependencies installed" -ForegroundColor Green
 }
 
@@ -228,7 +252,7 @@ function Merge-JsonMcp {
     $data = [ordered]@{}
     if (Test-Path $ConfigPath) {
         try {
-            $raw = Get-Content $ConfigPath -Raw
+            $raw = Get-Content $ConfigPath -Raw -Encoding UTF8
             if ($raw -and $raw.Trim()) {
                 # ConvertFrom-Json returns PSCustomObject; convert to hashtable for editing
                 $parsed = $raw | ConvertFrom-Json
@@ -237,8 +261,7 @@ function Merge-JsonMcp {
                 }
             }
         } catch {
-            # Broken file -> start fresh
-            $data = [ordered]@{}
+            throw "Cannot parse existing MCP config $ConfigPath : $($_.Exception.Message)"
         }
     }
 
@@ -250,12 +273,13 @@ function Merge-JsonMcp {
         command = $VenvPython
         args    = @($SrvPath)
         env     = [ordered]@{
+            TAM_MEMORY_DIR = $MemoryDir
             CLAUDE_MEMORY_DIR = $MemoryDir
         }
     }
 
     $json = ($data | ConvertTo-Json -Depth 10)
-    Set-Content -Path $ConfigPath -Value $json -Encoding UTF8
+    Write-Utf8File -Path $ConfigPath -Content $json
     Write-Host "  OK: MCP memory registered in $ConfigPath (key: $ParentKey)" -ForegroundColor Green
 }
 
@@ -269,9 +293,13 @@ function ConvertTo-HashtableFromPSObject {
             return $out
         }
         if ($InputObject -is [System.Collections.IEnumerable] -and -not ($InputObject -is [string])) {
-            return @($InputObject | ForEach-Object { ConvertTo-HashtableFromPSObject $_ })
+            $items = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($item in $InputObject) {
+                $items.Add((ConvertTo-HashtableFromPSObject $item))
+            }
+            return ,($items.ToArray())
         }
-        if ($InputObject.PSObject -and $InputObject.PSObject.Properties) {
+        if ($InputObject -is [System.Management.Automation.PSCustomObject]) {
             $out = [ordered]@{}
             foreach ($p in $InputObject.PSObject.Properties) { $out[$p.Name] = ConvertTo-HashtableFromPSObject $p.Value }
             return $out
@@ -336,7 +364,7 @@ function Register-Mcp-ClaudeCode {
     $data = [ordered]@{}
     if (Test-Path $ClaudeSettings) {
         try {
-            $raw = Get-Content $ClaudeSettings -Raw
+            $raw = Get-Content $ClaudeSettings -Raw -Encoding UTF8
             if ($raw -and $raw.Trim()) {
                 $data = ConvertTo-HashtableFromPSObject ($raw | ConvertFrom-Json)
             }
@@ -370,7 +398,7 @@ function Register-Mcp-ClaudeCode {
         @{ matcher = "*";          hooks = @(@{ type = "command"; command = $pwshPrefix + "`"$HookPostToolUse`"" }) }
     )
 
-    ($data | ConvertTo-Json -Depth 10) | Set-Content -Path $ClaudeSettings -Encoding UTF8
+    Write-Utf8File -Path $ClaudeSettings -Content ($data | ConvertTo-Json -Depth 10)
     Write-Host "  OK: v8.0 hooks registered (SessionStart/End, Stop, UserPromptSubmit, PreToolUse, PostToolUse)" -ForegroundColor Green
 }
 
@@ -415,6 +443,7 @@ startup_timeout_sec = 15.0
 tool_timeout_sec = 120.0
 
 [mcp_servers.memory.env]
+TAM_MEMORY_DIR = "$memEsc"
 CLAUDE_MEMORY_DIR = "$memEsc"
 MEMORY_TRIPLE_TIMEOUT_SEC = "120"
 MEMORY_ENRICH_TIMEOUT_SEC = "90"
@@ -425,12 +454,12 @@ MEMORY_TRIPLE_MAX_PREDICT = "512"
 
     $content = ""
     if (Test-Path $configPath) {
-        $content = Get-Content $configPath -Raw
+        $content = Get-Content $configPath -Raw -Encoding UTF8
         if (-not $content) { $content = "" }
     }
 
     $fenceRegex = '(?s)# --- Claude Total Memory MCP Server ---.*?# --- End Claude Total Memory ---'
-    $sectionRegex = '(?s)\[mcp_servers\.memory\].*?(?=\n\[|\z)'
+    $sectionRegex = '(?ms)^\[mcp_servers\.memory(?:\.[^\]\r\n]+)?\].*?(?=^\[|\z)'
 
     # MatchEvaluator avoids dollar-sign / backslash interpolation in the
     # replacement string (parity with bash re.sub behavior).
@@ -443,7 +472,7 @@ MEMORY_TRIPLE_MAX_PREDICT = "512"
         if ([System.Text.RegularExpressions.Regex]::IsMatch($content, $fenceRegex)) {
             $content = [System.Text.RegularExpressions.Regex]::Replace($content, $fenceRegex, $evaluator)
         } else {
-            $content = [System.Text.RegularExpressions.Regex]::Replace($content, $sectionRegex, $evaluator)
+            $content = [System.Text.RegularExpressions.Regex]::Replace($content, $sectionRegex, '').TrimEnd() + "`n" + $tomlBlock
         }
         Write-Host "  OK: Updated existing memory config in $configPath" -ForegroundColor Green
     } else {
@@ -452,7 +481,7 @@ MEMORY_TRIPLE_MAX_PREDICT = "512"
     }
 
     $content = $content.TrimStart("`r", "`n")
-    Set-Content -Path $configPath -Value $content -Encoding UTF8
+    Write-Utf8File -Path $configPath -Content $content
 
     # -- 4b. Install Codex Skill --
     $skillTarget = [System.IO.Path]::Combine($HomeDir, ".agents", "skills", "memory")
@@ -476,6 +505,7 @@ switch ($Ide) {
     "gemini-cli"  { Register-Mcp-GeminiCli }
     "opencode"    { Register-Mcp-OpenCode }
     "codex"       { Register-Mcp-Codex }
+    default       { throw "Unsupported IDE: $Ide" }
 }
 
 # ===================================================================
@@ -498,8 +528,8 @@ function Register-BackgroundTask {
 
     try { Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
-    $argList = @("`"$ScriptPath`"") + ($ScriptArgs | ForEach-Object { "`"$_`"" })
-    $action = New-ScheduledTaskAction -Execute $VenvPython -Argument ($argList -join " ") -WorkingDirectory $InstallDir
+    $launcher = Write-PythonLauncher -FileName "$Name.py" -ScriptPath $ScriptPath -ScriptArgs $ScriptArgs
+    $action = New-ScheduledTaskAction -Execute $VenvPython -Argument "`"$launcher`"" -WorkingDirectory $InstallDir
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
@@ -555,25 +585,49 @@ function Install-BackgroundTasks {
         -Trigger $tUpdates
 }
 
+function Write-PythonLauncher {
+    param(
+        [Parameter(Mandatory=$true)][string]$FileName,
+        [Parameter(Mandatory=$true)][string]$ScriptPath,
+        [string[]]$ScriptArgs = @()
+    )
+    $wrapperPath = [System.IO.Path]::Combine($MemoryDir, $FileName)
+    $scriptLiteral = $ScriptPath | ConvertTo-Json -Compress
+    $argumentsLiteral = ConvertTo-Json -InputObject @($ScriptArgs) -Compress
+    $sourceLiteral = [System.IO.Path]::Combine($InstallDir, "src") | ConvertTo-Json -Compress
+    $memoryPath = $MemoryDir | ConvertTo-Json -Compress
+    $dashboardPort = if ($env:DASHBOARD_PORT) { $env:DASHBOARD_PORT } else { "37737" }
+    $portLiteral = $dashboardPort | ConvertTo-Json -Compress
+    $wrapperContent = @"
+import os
+import runpy
+import sys
+
+os.environ.update(TAM_MEMORY_DIR=$memoryPath, CLAUDE_MEMORY_DIR=$memoryPath, DASHBOARD_PORT=$portLiteral)
+sys.path.insert(0, $sourceLiteral)
+sys.argv = [$scriptLiteral] + $argumentsLiteral
+runpy.run_path($scriptLiteral, run_name="__main__")
+"@
+    Write-Utf8File -Path $wrapperPath -Content $wrapperContent
+    return $wrapperPath
+}
+
+function Write-DashboardLauncher {
+    return Write-PythonLauncher -FileName "start-dashboard.py" `
+        -ScriptPath ([System.IO.Path]::Combine($InstallDir, "src", "dashboard.py"))
+}
+
 function Install-DashboardService {
     Write-Host "-> Step 5b: Setting up dashboard service..." -ForegroundColor Yellow
-    $DashboardPath = [System.IO.Path]::Combine($InstallDir, "src", "dashboard.py")
 
     try { Unregister-ScheduledTask -TaskName $TaskDashboard -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
     try {
-        $WrapperPath = [System.IO.Path]::Combine($InstallDir, "start-dashboard.cmd")
-        $wrapperContent = @"
-@echo off
-set CLAUDE_MEMORY_DIR=$MemoryDir
-set DASHBOARD_PORT=37737
-"$VenvPython" "$DashboardPath"
-"@
-        Set-Content -Path $WrapperPath -Value $wrapperContent -Encoding ASCII
+        $WrapperPath = Write-DashboardLauncher
 
-        $Action = New-ScheduledTaskAction -Execute "cmd.exe" `
-            -Argument "/c `"$WrapperPath`"" -WorkingDirectory $InstallDir
-        $Trigger = New-ScheduledTaskTrigger -AtLogon
+        $Action = New-ScheduledTaskAction -Execute $VenvPython `
+            -Argument "`"$WrapperPath`"" -WorkingDirectory $InstallDir
+        $Trigger = New-ScheduledTaskTrigger -AtLogon -User ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
         $Settings = New-ScheduledTaskSettingsSet `
             -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
             -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
@@ -581,19 +635,19 @@ set DASHBOARD_PORT=37737
 
         Register-ScheduledTask -TaskName $TaskDashboard -Action $Action `
             -Trigger $Trigger -Settings $Settings `
-            -Description "Claude Total Memory web dashboard on port 37737" `
+            -Description "total-agent-memory web dashboard" `
             -RunLevel Limited | Out-Null
 
         Start-ScheduledTask -TaskName $TaskDashboard -ErrorAction SilentlyContinue
         Write-Host "  OK: Dashboard scheduled task created (auto-starts on login)" -ForegroundColor Green
-        Write-Host "  OK: http://localhost:37737" -ForegroundColor Green
     } catch {
-        Write-Host "  INFO: Could not create scheduled task (run as admin for auto-start)" -ForegroundColor DarkYellow
+        Write-Host "  WARN: Dashboard task failed: $($_.Exception.Message)" -ForegroundColor DarkYellow
         Write-Host "  Run manually: .venv\Scripts\python.exe src\dashboard.py" -ForegroundColor DarkYellow
     }
 }
 
 if ($TestMode) {
+    if ($Ide -eq "claude-code") { $null = Write-DashboardLauncher }
     Write-Host "-> Step 5: SKIP (test mode) scheduled tasks + dashboard service" -ForegroundColor DarkYellow
 } else {
     try {
@@ -627,7 +681,7 @@ function Test-McpRegistered {
         return
     }
     if ($IsToml) {
-        $c = Get-Content $ConfigPath -Raw
+        $c = Get-Content $ConfigPath -Raw -Encoding UTF8
         if ($c -match "mcp_servers\.memory") {
             Write-Host "  OK: MCP server configured in $ConfigPath" -ForegroundColor Green
         } else {
@@ -635,7 +689,7 @@ function Test-McpRegistered {
         }
     } else {
         try {
-            $data = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+            $data = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($data.$ParentKey -and $data.$ParentKey.memory) {
                 Write-Host "  OK: MCP server configured in $ConfigPath" -ForegroundColor Green
             } else {

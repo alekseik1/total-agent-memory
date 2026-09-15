@@ -41,10 +41,11 @@ import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from memory_core.evidence_excerpt import excerpt
 
 # Resolved model id for tests/operators that want the canonical name —
 # matches the alias in benchmarks/_llm_adapter.MODEL_ALIASES.
-DEFAULT_MODEL = "haiku"
+DEFAULT_MODEL = "configured"
 
 # Cap on evidence chars per snippet sent to the LLM. Real LoCoMo
 # snippets are short paragraphs, but pathological 50KB blobs would
@@ -120,13 +121,13 @@ def _build_user_prompt(question: str, evidence: list[str]) -> str:
         if not text:
             continue
         if len(text) > _MAX_SNIPPET_CHARS:
-            text = text[:_MAX_SNIPPET_CHARS] + "…"
+            text = excerpt(text, question, _MAX_SNIPPET_CHARS, len)
         budget_left = _MAX_TOTAL_EVIDENCE_CHARS - total
         if budget_left <= 0:
             pieces.append(f"[{i}] …[truncated, evidence cap reached]")
             break
         if len(text) > budget_left:
-            text = text[:budget_left] + "…"
+            text = excerpt(text, question, budget_left, len)
         pieces.append(f"[{i}] {text}")
         total += len(text)
     pieces.append("")
@@ -265,15 +266,10 @@ def _parse_response(raw: Any) -> AnswerabilityResult | None:
 
 
 def _default_llm_client() -> _LLMLike:
-    """Build the shared adapter once per process.
+    from ai_layer.planner_client import PlannerClient
 
-    Importing the bench adapter eagerly would force ``anthropic`` /
-    ``openai`` into every test that touches answerability, even when a
-    fake client is injected. We import lazily so unit tests stay
-    offline.
-    """
-    from benchmarks._llm_adapter import LLMClient  # noqa: PLC0415
-    return LLMClient(provider="auto", default_model=DEFAULT_MODEL)
+    return PlannerClient()
+
 
 
 # ──────────────────────────────────────────────

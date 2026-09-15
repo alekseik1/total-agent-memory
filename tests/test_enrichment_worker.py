@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import enrichment_worker as ew
 
-
 # ──────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────
@@ -64,6 +63,7 @@ def db():
             attempts INTEGER NOT NULL DEFAULT 0,
             last_error TEXT,
             enqueued_at TEXT NOT NULL,
+            lease_token TEXT, heartbeat_at TEXT, atomic_only INTEGER DEFAULT 0,
             started_at TEXT, finished_at TEXT
         );
 
@@ -153,6 +153,76 @@ def test_claim_pending_moves_rows_to_processing(db, seed_record):
 
 def test_claim_returns_empty_when_no_pending(db):
     assert ew._claim_pending(db, limit=5) == []
+
+
+def test_old_owner_cannot_finish_or_fail_reclaimed_task(db, seed_record):
+    ew.enqueue(db, knowledge_id=seed_record, session_id='s1', project='p', ktype='fact',
+               content_snapshot='payload', tags_snapshot=[])
+    old = ew._claim_pending(db, 1)[0]
+    db.execute("UPDATE enrichment_queue SET heartbeat_at='2020-01-01T00:00:00Z'")
+    assert ew.reclaim_stale(db) == 1
+    new = ew._claim_pending(db, 1)[0]
+    assert old.lease_token != new.lease_token
+    assert not ew._mark_done(db, old)
+    assert not ew._mark_failed_or_retry(db, old, 'late failure')
+    assert ew._mark_done(db, new)
+
+
+def test_heartbeat_protects_long_running_task(db, seed_record):
+    import logging
+
+    from memory_core.leases import LeaseHeartbeat
+    ew.enqueue(db, knowledge_id=seed_record, session_id='s1', project='p', ktype='fact',
+               content_snapshot='payload', tags_snapshot=[])
+    task = ew._claim_pending(db, 1)[0]
+    db.execute("UPDATE enrichment_queue SET started_at='2020-01-01T00:00:00Z'")
+    heartbeat = LeaseHeartbeat(db, [(task.id, task.lease_token)], 1, logging.getLogger(__name__))
+    heartbeat.renew(db)
+    assert ew.reclaim_stale(db) == 0
+
+
+def test_lease_loss_stops_subsequent_stages(db, seed_record, monkeypatch):
+    from memory_core.leases import LeaseLost
+    ew.enqueue(db, knowledge_id=seed_record, session_id='s1', project='p', ktype='fact',
+               content_snapshot='payload', tags_snapshot=[])
+    task = ew._claim_pending(db, 1)[0]
+    calls = []
+    def first(connection, task, store=None):
+        calls.append('first')
+        connection.execute("UPDATE enrichment_queue SET lease_token='new-owner'")
+    def second(connection, task, store=None):
+        calls.append('second')
+    monkeypatch.setattr(ew, '_STAGES', [('first', first), ('second', second)])
+    with pytest.raises(LeaseLost):
+        ew.process_task(db, task)
+    assert calls == ['first']
+
+
+def test_heartbeat_renews_via_separate_file_connection(db, seed_record, tmp_path):
+    import logging
+
+    from memory_core.leases import LeaseHeartbeat
+    ew.enqueue(db, knowledge_id=seed_record, session_id='s1', project='p', ktype='fact',
+               content_snapshot='payload', tags_snapshot=[])
+    task = ew._claim_pending(db, 1)[0]
+    db.execute("UPDATE enrichment_queue SET heartbeat_at='2020-01-01T00:00:00Z'")
+    db.commit()
+    path = tmp_path / 'heartbeat.db'
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    try:
+        db.backup(connection)
+        with LeaseHeartbeat(connection, [(task.id, task.lease_token)], 0.02, logging.getLogger(__name__)):
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                value = connection.execute('SELECT heartbeat_at FROM enrichment_queue').fetchone()[0]
+                if value != '2020-01-01T00:00:00Z':
+                    break
+                time.sleep(0.01)
+            assert value != '2020-01-01T00:00:00Z'
+            assert ew.reclaim_stale(connection) == 0
+    finally:
+        connection.close()
 
 
 # ──────────────────────────────────────────────

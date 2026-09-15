@@ -62,7 +62,7 @@ WORKDIR /app
 # Non-root user (kept as `memory` — `tam` was a leftover from an
 # earlier build; keeping `memory` matches repo Dockerfile + compose).
 RUN useradd -m -u 1000 memory && \
-    mkdir -p /data && chown memory:memory /data
+    mkdir -p /data /team-data /model-cache && chown memory:memory /data /team-data /model-cache
 
 COPY --from=builder /install /usr/local
 COPY --chown=memory:memory src/ ./src/

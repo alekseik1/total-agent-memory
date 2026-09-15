@@ -1,0 +1,7 @@
+services:
+  ollama:
+    profiles: [local-models]
+  model-init:
+    profiles: [local-models]
+  mcp:
+    depends_on: !reset {}
