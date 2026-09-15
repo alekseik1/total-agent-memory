@@ -220,7 +220,7 @@ def test_classifier_handles_string_response():
     assert len(fake.calls) == 1
     # System prompt must forbid world knowledge — guard the wording.
     assert "world knowledge" in fake.calls[0]["system"]
-    assert fake.calls[0]["model"] == "haiku"
+    assert fake.calls[0]["model"] == "configured"
 
 
 def test_classifier_handles_object_with_text_attribute():

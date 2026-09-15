@@ -4,6 +4,34 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+## [14.0.0] - 2026-09-15
+
+- Reject contradictory grounded answers that declare both support and a missing premise after the bounded repair attempt.
+- Set OpenMP/BLAS budgets before PyTorch import in rerankers, embeddings, NLI verification and calibration.
+- Keep personal, team and shared workers warm by default; search cached workers first under smaller limits while preserving result ordering.
+- Add Chromium, Firefox and WebKit tests for the team interface and local dashboard, with a required browser CI gate.
+- Fix Windows UTF-8 storage, file locking, pip self-upgrade, background memory paths and per-user dashboard startup.
+- Add an authenticated team server with isolated personal, team and shared stores, bounded worker processes, attributed history and revision conflicts.
+- Add a server web interface and a standard-library-only remote MCP bridge; provide a separate Docker Compose server profile.
+- Route internal text and image tasks through configured Ollama, OpenAI-compatible or Anthropic providers; require an explicit vision model.
+- Bound embedding and PyTorch threads; stabilize NLI batch results with float32.
+- Correct installer skip-heavy validation and show consistent product/version/release metadata.
+
+- Redact private content before durable write intents; clear completed replay payloads.
+- Handle nested and unfinished private sections without leaking their contents.
+- Enforce project, branch, type and space scope after retrieval expansion; invalidate caches on database changes.
+- Query each embedding space with its matching model and dimensions; expose incompatible-model diagnostics.
+- Use typed iterative retrieval results and the installed runtime LLM provider.
+- Bound context evidence, attach source references and scope cognitive retrieval.
+- Separate recall usage from confirmation time; handle backdated temporal assertions without overlapping intervals.
+- Claim representation jobs atomically; fix enrichment thread shutdown.
+- Correct LoCoMo category routing and require explicit oracle mode for category prompts.
+- Filter question stopwords from lexical retrieval; preserve negation and code identifiers.
+- Add scoped full-evidence context windows and guidance for qualified, grounded inference.
+- Use the configured provider for decomposition and enforce the no-LLM fast-path gate.
+- Apply final scope checks to timeline neighbors.
+- Withdraw the invalid retrieval-versus-answer-accuracy comparison; record controlled development measurements in docs/LOCOMO_V14_RESULTS.md.
+
 ## [13.0.4] — 2026-09-07 — the Docker image can finally speak stdio
 
 ### Added

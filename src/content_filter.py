@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import re
 import sys
-import tomllib  # Python 3.11+
 from pathlib import Path
 from typing import Any
+
+import tomllib  # Python 3.11+
 
 LOG = lambda msg: sys.stderr.write(f"[content-filter] {msg}\n")
 
@@ -122,12 +123,10 @@ def tail_lines(text: str, n: int) -> str:
 
 def _extract_whitelist(text: str) -> tuple[list[str], list[str], list[str], list[str]]:
     """Extract (urls, paths, tilde_paths, inline_codes) from text."""
-    urls = list({m.group(0) for m in _URL_RE.finditer(text)})
-    # Trim trailing punctuation from URLs
-    urls = [u.rstrip(".,;:!?") for u in urls]
-    paths = list({m.group(1) for m in _ABS_PATH_RE.finditer(text)})
-    tildes = list({m.group(1) for m in _TILDE_PATH_RE.finditer(text)})
-    inlines = list({m.group(0) for m in _INLINE_CODE_RE.finditer(text)})
+    urls = list(dict.fromkeys(m.group(0).rstrip(".,;:!?") for m in _URL_RE.finditer(text)))
+    paths = list(dict.fromkeys(m.group(1) for m in _ABS_PATH_RE.finditer(text)))
+    tildes = list(dict.fromkeys(m.group(1) for m in _TILDE_PATH_RE.finditer(text)))
+    inlines = list(dict.fromkeys(m.group(0) for m in _INLINE_CODE_RE.finditer(text)))
     return urls, paths, tildes, inlines
 
 

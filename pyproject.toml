@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "total-agent-memory"
-version = "13.0.4"
+version = "14.0.0"
 description = "Persistent local memory MCP server for Claude Code, Codex CLI, Cursor and any MCP client: 74 tools — temporal knowledge graph, procedural memory, episodic memory, AST codebase ingest, pre-edit guard, auto-consolidating error capture"
 readme = "README.md"
 license = "MIT"
@@ -87,7 +87,8 @@ dependencies = [
 # Turn the reranker on with MEMORY_MODE=deep (or MEMORY_RERANK_ENABLED=true)
 # and install it with:  pip install "total-agent-memory[rerank]"
 rerank = [
-    "sentence-transformers>=2.2.0",
+    "threadpoolctl>=3.6,<4",
+    "sentence-transformers>=5,<6",
     "transformers>=4.40",
     "FlagEmbedding>=1.2.10",
     "peft>=0.7.0",
@@ -102,6 +103,8 @@ Issues = "https://github.com/vbcherepanov/total-agent-memory/issues"
 [project.scripts]
 total-agent-memory = "total_agent_memory.server:main_sync"
 tam = "total_agent_memory.server:main_sync"
+tam-team = "total_agent_memory.team:main"
+tam-remote = "total_agent_memory.remote:main"
 tam-lookup = "total_agent_memory.lookup:main"
 lookup-memory = "total_agent_memory.lookup:main"
 # Backward-compat aliases (v11.x users keep working; pip prints a

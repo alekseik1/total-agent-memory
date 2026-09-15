@@ -77,6 +77,56 @@ def test_ollama_provider_roundtrip(monkeypatch):
     assert "Authorization" not in sink["headers"]
 
 
+@pytest.mark.parametrize("api_key", [None, "local-token"])
+def test_compatible_provider_preserves_optional_auth(monkeypatch, api_key):
+    import config
+    import llm_provider
+
+    sink = {}
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("MEMORY_LLM_API_BASE", "http://127.0.0.1:8080/v1")
+    monkeypatch.setenv("MEMORY_LLM_MODEL", "local-model")
+    monkeypatch.delenv("MEMORY_LLM_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "unrelated-cloud-key")
+    if api_key:
+        monkeypatch.setenv("MEMORY_LLM_API_KEY", api_key)
+    monkeypatch.setattr(llm_provider.urllib.request, "urlopen", _capture_urlopen(
+        {"choices": [{"message": {"content": "ok"}}]}, sink,
+    ))
+    provider = llm_provider.make_provider(config.get_llm_provider())
+    assert provider.complete("question") == "ok"
+    assert sink["url"] == "http://127.0.0.1:8080/v1/chat/completions"
+    assert sink["body"]["model"] == "local-model"
+    assert sink["headers"].get("Authorization") == (f"Bearer {api_key}" if api_key else None)
+    assert provider.complete_structured("question", {"type": "object"}) == "ok"
+    assert sink["body"]["response_format"]["type"] == "json_schema"
+
+
+def test_compatible_provider_requires_explicit_endpoint_and_model(monkeypatch):
+    import llm_provider
+
+    monkeypatch.delenv("MEMORY_LLM_API_BASE", raising=False)
+    monkeypatch.delenv("MEMORY_LLM_MODEL", raising=False)
+    with pytest.raises(ValueError, match="MEMORY_LLM_MODEL"):
+        llm_provider.make_provider("openai-compatible")
+    monkeypatch.setenv("MEMORY_LLM_MODEL", "local-model")
+    with pytest.raises(ValueError, match="explicit API base"):
+        llm_provider.make_provider("openai-compatible")
+
+
+def test_compatible_availability_without_cloud_credentials(monkeypatch):
+    import llm_provider
+
+    sink = {}
+    monkeypatch.setattr(llm_provider.urllib.request, "urlopen", _capture_urlopen({}, sink))
+    llm_provider._available_cache.clear()
+    provider = llm_provider.make_provider(
+        "openai-compatible", api_base="http://127.0.0.1:8080/v1", model="local-model",
+    )
+    assert provider.available()
+    assert sink["url"].endswith("/models")
+
+
 def test_ollama_provider_model_override(monkeypatch):
     import llm_provider
 

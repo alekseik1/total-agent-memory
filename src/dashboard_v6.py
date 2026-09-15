@@ -575,7 +575,7 @@ GRAPH_LIVE_HTML = r"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Graph Live 3D — Claude Total Memory</title>
+<title>Graph Live 3D — total-agent-memory</title>
 <style>
   html,body { margin:0; padding:0; background:#0e0e0e; color:#ddd;
               font-family:-apple-system,Segoe UI,sans-serif; height:100%; overflow:hidden; }
@@ -1132,7 +1132,7 @@ const id=map[p]; if(id) document.getElementById(id).classList.add('active');})()
 
 
 GRAPH_HIVE_HTML = r"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Hive Plot — Claude Memory</title>
+<html><head><meta charset="utf-8"><title>Hive Plot — total-agent-memory</title>
 """ + _VIEW_TABS + r"""
 <style>
   #vmain { display:flex; flex-direction:column; }
@@ -1279,7 +1279,7 @@ load();
 
 
 GRAPH_MATRIX_HTML = r"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Matrix — Claude Memory</title>
+<html><head><meta charset="utf-8"><title>Matrix — total-agent-memory</title>
 """ + _VIEW_TABS + r"""
 <style>
   #vmain { display:flex; flex-direction:column; }

@@ -778,6 +778,8 @@ def _score_with_model(
     batch_size: int = 16,
 ) -> list[tuple[float, float, float]]:
     """Run the chosen NLI model on every triple. Returns per-row probs."""
+    from cpu_budget import configure_torch_threads
+    configure_torch_threads()
     import torch  # noqa: WPS433
     from transformers import (  # noqa: WPS433
         AutoModelForSequenceClassification,
@@ -785,7 +787,6 @@ def _score_with_model(
     )
 
     from ai_layer.verifier import NLIDecision, _NLIModel  # type: ignore  # noqa: WPS433
-
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForSequenceClassification.from_pretrained(model_id)
     model.eval()
@@ -795,7 +796,7 @@ def _score_with_model(
         device = torch.device("cuda")
     else:
         device = torch.device("cpu")
-    model.to(device)
+    model.to(device=device, dtype=torch.float32)
 
     id2label = getattr(model.config, "id2label", None) or {}
     idx_map = _NLIModel._resolve_label_indices(id2label)

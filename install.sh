@@ -70,14 +70,16 @@ case "$IDE" in
         ;;
 esac
 
+INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
+RELEASE_VERSION=$(sed -n 's/^VERSION = "\([0-9.]*\)"/\1/p' "$INSTALL_DIR/src/version.py")
+[ -n "$RELEASE_VERSION" ] || { echo "ERROR: release version is missing" >&2; exit 1; }
 echo ""
 echo "======================================================="
-echo "  total-agent-memory v7.0 — Installer (IDE: $IDE)"
+echo "  total-agent-memory v$RELEASE_VERSION — Installer (IDE: $IDE)"
 echo "======================================================="
 echo ""
 
 # -- Config --
-INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Resolution: TAM_MEMORY_DIR > legacy CLAUDE_MEMORY_DIR > ~/.tam > migrate ~/.claude-memory > fresh ~/.tam
 if [ -n "$TAM_MEMORY_DIR" ]; then
     MEMORY_DIR="$TAM_MEMORY_DIR"
@@ -100,6 +102,12 @@ DASHBOARD_SERVICE="$INSTALL_DIR/scripts/dashboard-service.sh"
 
 # Test mode: skip heavy steps (pip, model DL, launchctl, dashboard install)
 TEST_MODE="${INSTALL_TEST_MODE:-0}"
+SKIP_DEPENDENCY_SETUP=0
+case "$TEST_MODE" in
+    1|skip-heavy) SKIP_DEPENDENCY_SETUP=1 ;;
+    0) ;;
+    *) echo "ERROR: INSTALL_TEST_MODE must be 0, 1 or skip-heavy" >&2; exit 1 ;;
+esac
 
 # -----------------------------------------------------------------
 # Linux helpers: WSL detection + systemd --user services setup
@@ -289,7 +297,7 @@ echo "  Python $PY_VERSION found"
 # a separate `python3-venv` package. Without it `python3 -m venv` errors on
 # ensurepip with a cryptic message that does not mention the actual fix.
 # Detect and surface a clear, actionable hint before failing.
-if [ "$TEST_MODE" != "1" ] && ! [ -d "$VENV_DIR" ]; then
+if [ "$SKIP_DEPENDENCY_SETUP" = "0" ] && ! [ -d "$VENV_DIR" ]; then
     if ! python3 -c "import ensurepip" >/dev/null 2>&1; then
         echo "  ERROR: python3 venv module is missing (ensurepip unavailable)."
         echo "  Install it first, then re-run this script:"
@@ -302,7 +310,7 @@ if [ "$TEST_MODE" != "1" ] && ! [ -d "$VENV_DIR" ]; then
     fi
 fi
 
-if [ "$TEST_MODE" = "1" ]; then
+if [ "$SKIP_DEPENDENCY_SETUP" = "1" ]; then
     echo "  SKIP (test mode): venv creation and pip install"
     PY_PATH="$(command -v python3)"
 else
@@ -310,20 +318,20 @@ else
         echo "  Existing venv found, updating dependencies..."
         # shellcheck disable=SC1091
         source "$VENV_DIR/bin/activate"
-        pip install -q --upgrade -r "$INSTALL_DIR/requirements.txt" -r "$INSTALL_DIR/requirements-dev.txt" 2>&1 | tail -1
+        pip install -q --upgrade -r "$INSTALL_DIR/requirements.txt"
     else
         python3 -m venv "$VENV_DIR"
         # shellcheck disable=SC1091
         source "$VENV_DIR/bin/activate"
         pip install -q --upgrade pip
         echo "  Installing dependencies (this may take 2-3 minutes on first run)..."
-        pip install -q -r "$INSTALL_DIR/requirements.txt" -r "$INSTALL_DIR/requirements-dev.txt" 2>&1 | tail -1
+        pip install -q -r "$INSTALL_DIR/requirements.txt"
     fi
     # v9 — editable install registers `[project.scripts]` entry-points
     # (total-agent-memory, tam, tam-lookup, lookup-memory + legacy:
     # claude-total-memory, ctm-lookup) on PATH inside the venv.
     echo "  Installing total-agent-memory package (registers tam / tam-lookup / lookup-memory + legacy claude-total-memory / ctm-lookup)..."
-    pip install -q -e "$INSTALL_DIR" 2>&1 | tail -1 || echo "  WARN: editable install failed; CLI entry-points may be missing."
+    pip install -q -e "$INSTALL_DIR"
     echo "  OK: Dependencies installed"
     PY_PATH="$VENV_DIR/bin/python"
 fi
@@ -332,7 +340,7 @@ SRV_PATH="$INSTALL_DIR/src/server.py"
 
 # -- 3. Pre-download embedding model --
 echo "-> Step 3: Loading embedding model (first time only)..."
-if [ "$TEST_MODE" = "1" ]; then
+if [ "$SKIP_DEPENDENCY_SETUP" = "1" ]; then
     echo "  SKIP (test mode): embedding model pre-download"
 else
     # Warm the model the server actually uses. This warmed the

@@ -347,15 +347,10 @@ def test_launchagents_substitute_install_dir_and_memory_dir(
         # a regression. Nothing here measures speed.
         env=env, capture_output=True, text=True, timeout=900,
     )
-    # We don't assert returncode==0: pip/model steps may skip with
-    # non-fatal warnings under our partial test mode. We only care that
-    # the LaunchAgent step ran and produced valid plists.
+    assert result.returncode == 0, result.stderr
+    assert "SKIP (test mode): venv creation and pip install" in result.stdout
     la_dir = sandbox_home / "Library" / "LaunchAgents"
-    if not la_dir.exists():
-        pytest.skip(
-            "LaunchAgent branch did not fire under INSTALL_TEST_MODE=skip-heavy "
-            f"(install.sh stderr: {result.stderr[-300:]})"
-        )
+    assert la_dir.is_dir(), result.stdout + result.stderr
 
     plists = list(la_dir.glob("*.plist"))
     assert plists, "no plists were copied to LaunchAgents dir"

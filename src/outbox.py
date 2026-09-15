@@ -155,7 +155,7 @@ def mark_committed(db, intent: WriteIntent | None, knowledge_id: int | None) -> 
     try:
         db.execute(
             "UPDATE write_intents SET status='committed', knowledge_id=?, "
-            "committed_at=?, updated_at=? WHERE id=?",
+            "committed_at=?, updated_at=?, payload_json='{}' WHERE id=?",
             (knowledge_id, now, now, intent.id),
         )
         db.commit()
@@ -173,7 +173,7 @@ def mark_superseded(db, intent: WriteIntent | None, knowledge_id: int | None) ->
     try:
         db.execute(
             "UPDATE write_intents SET status='superseded', knowledge_id=?, "
-            "committed_at=?, updated_at=? WHERE id=?",
+            "committed_at=?, updated_at=?, payload_json='{}' WHERE id=?",
             (knowledge_id, now, now, intent.id),
         )
         db.commit()

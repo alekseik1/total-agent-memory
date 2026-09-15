@@ -206,6 +206,12 @@ class OllamaProvider:
 # ──────────────────────────────────────────────
 
 
+@runtime_checkable
+class StructuredLLMProvider(Protocol):
+    def complete_structured(self, prompt: str, schema: dict[str, object], *, model: str | None = None,
+                            max_tokens: int = 512, temperature: float = 0.0, timeout: float = 60.0) -> str: ...
+
+
 class OpenAIProvider:
     """OpenAI Chat Completions API.
 
@@ -226,14 +232,24 @@ class OpenAIProvider:
         api_key: str | None = None,
         api_base: str | None = None,
         model: str | None = None,
+        *,
+        require_api_key: bool = True,
     ) -> None:
         self.api_key = api_key
+        self.require_api_key = require_api_key
+        if not require_api_key and not api_base:
+            raise ValueError("An explicit API base is required for openai-compatible")
         self.api_base = (api_base or config.get_llm_api_base("openai")).rstrip("/")
         self._default_model = model
 
+    def _authorization_headers(self) -> dict[str, str]:
+        if self.require_api_key and not self.api_key:
+            raise RuntimeError("OpenAIProvider: missing api_key")
+        return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+
     def available(self) -> bool:
         # Fast reject: no credentials at all.
-        if not self.api_key or not self.api_base:
+        if (self.require_api_key and not self.api_key) or not self.api_base:
             return False
         key = _cache_key("openai", self.api_base, self.api_key)
         cached = _cache_get_available(key)
@@ -243,7 +259,7 @@ class OpenAIProvider:
         url = f"{self.api_base}/models"
         req = urllib.request.Request(
             url,
-            headers={"Authorization": f"Bearer {self.api_key}"},
+            headers=self._authorization_headers(),
             method="GET",
         )
         try:
@@ -269,8 +285,7 @@ class OpenAIProvider:
         temperature: float = 0.1,
         timeout: float = 60.0,
     ) -> str:
-        if not self.api_key:
-            raise RuntimeError("OpenAIProvider: missing api_key")
+        headers = self._authorization_headers()
         chosen_model = model or self._default_model or config.get_llm_model_for_provider("openai")
         body = {
             "model": chosen_model,
@@ -278,7 +293,6 @@ class OpenAIProvider:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        headers = {"Authorization": f"Bearer {self.api_key}"}
         resp = _http_post_json(
             f"{self.api_base}/chat/completions",
             body=body,
@@ -289,6 +303,23 @@ class OpenAIProvider:
             return str(resp["choices"][0]["message"]["content"]).strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"OpenAIProvider: malformed response: {exc}") from exc
+
+
+    def complete_structured(self, prompt: str, schema: dict[str, object], *, model: str | None = None,
+                            max_tokens: int = 512, temperature: float = 0.0, timeout: float = 60.0) -> str:
+        headers = self._authorization_headers()
+        body = {'model': model or self._default_model or config.get_llm_model_for_provider('openai'),
+                'messages': [{'role': 'user', 'content': prompt}], 'max_tokens': max_tokens, 'temperature': temperature,
+                'response_format': {'type': 'json_schema', 'json_schema': {'name': 'grounded_response', 'strict': True, 'schema': schema}}}
+        response = _http_post_json(f'{self.api_base}/chat/completions', body,
+                                   headers, timeout)
+        try:
+            message = response['choices'][0]['message']
+            if message.get('refusal') or not isinstance(message.get('content'), str):
+                raise RuntimeError('Provider declined structured completion')
+            return message['content'].strip()
+        except (KeyError, IndexError, TypeError) as error:
+            raise RuntimeError('OpenAIProvider: malformed structured completion') from error
 
 
 # ──────────────────────────────────────────────
@@ -393,6 +424,13 @@ def make_provider(name: str, **kwargs) -> LLMProvider:
             api_base=kwargs.get("api_base") or config.get_llm_api_base("openai"),
             model=kwargs.get("model"),
         )
+    if key == "openai-compatible":
+        return OpenAIProvider(
+            api_key=kwargs.get("api_key") or config.get_llm_api_key(key),
+            api_base=kwargs.get("api_base") or config.get_llm_api_base(key),
+            model=kwargs.get("model") or config.get_llm_model_for_provider(key),
+            require_api_key=False,
+        )
     if key == "anthropic":
         return AnthropicProvider(
             api_key=kwargs.get("api_key") or config.get_llm_api_key("anthropic"),
@@ -400,5 +438,5 @@ def make_provider(name: str, **kwargs) -> LLMProvider:
             model=kwargs.get("model"),
         )
     raise ValueError(
-        f"unknown LLM provider {name!r}; expected ollama|openai|anthropic|auto"
+        f"unknown LLM provider {name!r}; expected ollama|openai|openai-compatible|anthropic|auto"
     )

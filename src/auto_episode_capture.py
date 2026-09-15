@@ -10,23 +10,25 @@ Usage:
 
 import argparse
 import json
-import os
+import logging
 import re
 import sqlite3
 import sys
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import config
+from llm_provider import make_provider
 from memory_systems.episode_store import EpisodeStore
 from memory_systems.self_model import SelfModel
 from memory_systems.signals import SignalExtractor
 from paths import memory_dir
 
 MEMORY_DIR = memory_dir()
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+NARRATIVE_MAX_TOKENS = 500
+NARRATIVE_TEMPERATURE = 0.3
 LOG = lambda msg: sys.stderr.write(f"[auto-episode] {msg}\n")
 
 
@@ -177,7 +179,9 @@ def extract_concepts_from_session(
 def generate_narrative_ollama(
     messages: list[dict], project: str
 ) -> dict | None:
-    """Use Ollama to generate episode narrative."""
+    """Generate an episode using the configured completion provider."""
+    if not config.has_llm():
+        return None
     summary_parts = []
     for m in messages[-30:]:
         role = m.get("role", "?")
@@ -201,45 +205,26 @@ def generate_narrative_ollama(
     )
 
     try:
-        payload = json.dumps({
-            "model": "qwen2.5-coder:32b",
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.3, "num_predict": 500},
-        }).encode()
-
-        req = urllib.request.Request(
-            f"{OLLAMA_URL}/api/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        response_text = make_provider(config.get_llm_provider()).complete(
+            prompt, model=config.get_llm_model_for_provider(),
+            max_tokens=NARRATIVE_MAX_TOKENS, temperature=NARRATIVE_TEMPERATURE,
+            timeout=config.get_llm_timeout_sec(),
         )
-
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-            response_text = data.get("response", "")
-
-            # Try direct JSON parse
+        candidates = [response_text]
+        match = re.search(r"\{[^{}]*\}", response_text, re.DOTALL)
+        if match:
+            candidates.append(match.group())
+        for candidate in candidates:
             try:
-                result = json.loads(response_text)
-                # Validate expected fields
-                if "narrative" in result:
-                    return result
+                result = json.loads(candidate)
             except json.JSONDecodeError:
-                pass
-
-            # Try to extract JSON block from response
-            match = re.search(r"\{[^{}]*\}", response_text, re.DOTALL)
-            if match:
-                try:
-                    result = json.loads(match.group())
-                    if "narrative" in result:
-                        return result
-                except json.JSONDecodeError:
-                    pass
+                continue
+            if isinstance(result, dict) and isinstance(result.get("narrative"), str) and result["narrative"].strip():
+                return result
+        logging.getLogger(__name__).warning("Invalid episode narrative", extra={"project": project})
 
     except Exception as e:
-        LOG(f"Ollama narrative generation failed: {e}")
+        logging.getLogger(__name__).warning("Episode generation failed", extra={"error": str(e), "project": project})
 
     return None
 
@@ -338,10 +323,10 @@ def capture_episode(
         f"satisfaction={signals['satisfaction_score']:.2f}"
     )
 
-    # Generate narrative (try Ollama first, fallback to heuristic)
+    # Generate narrative with the configured provider, then use the local fallback.
     narrative_data = generate_narrative_ollama(messages, project)
     if not narrative_data:
-        LOG("Ollama unavailable, using heuristic narrative")
+        LOG("Configured LLM unavailable, using heuristic narrative")
         narrative_data = generate_narrative_heuristic(messages, signals, project)
 
     # Extract concepts

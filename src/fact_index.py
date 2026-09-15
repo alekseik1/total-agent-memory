@@ -38,6 +38,8 @@ import threading
 from dataclasses import dataclass
 from typing import Iterable
 
+from config import get_embed_threads
+
 
 # ──────────────────────────────────────────────
 # Query parsing
@@ -367,7 +369,7 @@ class FactIndex:
         from fastembed import TextEmbedding  # noqa: PLC0415
         import numpy as np  # noqa: PLC0415
 
-        self._semantic_model = TextEmbedding(model_name)
+        self._semantic_model = TextEmbedding(model_name, threads=get_embed_threads())
         # fastembed returns an iterator of 1D arrays
         embs = [e for e in self._semantic_model.embed(texts)]
         mat = np.asarray(embs, dtype=np.float32)

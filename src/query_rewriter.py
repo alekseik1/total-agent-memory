@@ -238,6 +238,17 @@ def rewrite(
     # Explicit client bypasses cache (otherwise we'd leak a client reference
     # into the hashed key or lose test-time control).
     if client is not None:
+        if callable(getattr(client, "complete", None)):
+            try:
+                response = client.complete(system=SYSTEM_PROMPT, user=query, model=model,
+                                           max_tokens=MAX_TOKENS, temperature=0.0)
+                text = response if isinstance(response, str) else getattr(response, "text", None)
+                if not isinstance(text, str):
+                    raise TypeError("Configured rewriter must return text")
+                return _parse_response(text, query)
+            except Exception as error:  # noqa: BLE001 — preserve the original query when an optional provider fails
+                _log(f"configured query rewrite failed: {error}")
+                return _fallback(query)
         return _call_haiku(query, client, model)
 
     canonical, hyde, decomposed = _rewrite_cached(query, model)

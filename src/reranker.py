@@ -25,36 +25,32 @@ from typing import Optional
 
 import numpy as np
 
+import config
+from llm_provider import make_provider
+from memory_core.evidence_excerpt import excerpt
+
+MODEL_RERANK_EXCERPT_CHARS = 1024
+LLM_RERANK_EXCERPT_CHARS = 1024
+
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 # Use smaller model for speed — 7b is ~3x faster than 32b for reranking
-RERANKER_MODEL = os.environ.get("RERANKER_MODEL", "qwen2.5-coder:7b")
-HYDE_MODEL = os.environ.get("HYDE_MODEL", "qwen2.5-coder:7b")
+RERANKER_MODEL = os.environ.get("RERANKER_MODEL") or config.get_llm_model()
+HYDE_MODEL = os.environ.get("HYDE_MODEL") or config.get_llm_model()
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
 LOG = lambda msg: sys.stderr.write(f"[reranker] {msg}\n")
 
 
 def _ollama_generate(prompt: str, model: str, max_tokens: int = 200, temperature: float = 0.3) -> Optional[str]:
-    """Call Ollama generate API."""
+    """Generate through the configured provider, preserving legacy Ollama model overrides."""
+    if not config.has_llm():
+        return None
     try:
-        payload = json.dumps({
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "num_predict": max_tokens,
-                "temperature": temperature,
-            }
-        }).encode()
-        req = urllib.request.Request(
-            f"{OLLAMA_URL}/api/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        name = config.get_llm_provider()
+        return make_provider(name).complete(
+            prompt, model=model if name == "ollama" else config.get_llm_model_for_provider(name),
+            max_tokens=max_tokens, temperature=temperature, timeout=config.get_llm_timeout_sec(),
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-            return data.get("response", "").strip()
     except Exception as e:
         LOG(f"generate error ({model}): {e}")
         return None
@@ -214,6 +210,8 @@ _RERANK_EXTRA_HINT = (
 def _load_ce_reranker(model_name: str):
     """sentence-transformers CrossEncoder — works for ms-marco-* family."""
     try:
+        from cpu_budget import configure_torch_threads
+        configure_torch_threads()
         from sentence_transformers import CrossEncoder
         ce = CrossEncoder(model_name)
         LOG(f"CrossEncoder loaded: {model_name}")
@@ -255,6 +253,8 @@ def _load_flag_reranker(model_name: str):
         pass
 
     try:
+        from cpu_budget import configure_torch_threads
+        configure_torch_threads()
         from FlagEmbedding import FlagReranker  # type: ignore[import-not-found]
         rr = FlagReranker(model_name, use_fp16=use_fp16)
         LOG(f"FlagReranker loaded: {model_name} (fp16={use_fp16})")
@@ -404,7 +404,7 @@ def _rerank_with_model(model, kind: str, query: str, candidates: list, top_k: in
     """Score candidates with the loaded model; CE-boost-only blend with original."""
     pairs = []
     for item in candidates:
-        content = item["r"].get("content", "")[:300]
+        content = excerpt(item["r"].get("content", ""), query, MODEL_RERANK_EXCERPT_CHARS, len)
         project = item["r"].get("project", "")
         tags = item["r"].get("tags", "")
         doc = f"[{project}] {content}"
@@ -462,7 +462,7 @@ def _rerank_llm(query: str, candidates: list, top_k: int) -> list:
     """Fallback: rerank using Ollama LLM as cross-encoder."""
     entries = []
     for i, item in enumerate(candidates):
-        content = item["r"].get("content", "")[:200]
+        content = excerpt(item["r"].get("content", ""), query, LLM_RERANK_EXCERPT_CHARS, len)
         project = item["r"].get("project", "")
         rtype = item["r"].get("type", "")
         entries.append(f"{i}. [{rtype}|{project}] {content}")

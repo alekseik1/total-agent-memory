@@ -73,3 +73,43 @@ benchmarks/results/v11_latency_fast.json
 # Live install artefacts
 .claude-memory-buffer/
 src.bak-*/
+:memory:*
+
+# v14 local validation artefacts: raw benchmark inputs, run logs and
+# working notes stay on the machine that produced them. Only the reports
+# linked from the release documents are committed.
+docs/*.log
+docs/*_V14*.json
+docs/LIVE_*.json
+docs/LOCOMO_SECOND_PACKAGE_DIAGNOSIS.json
+docs/MEMORY_REPAIR_WHEEL_CHECK.json
+docs/STANDARD_BENCHMARK_LINT.json
+docs/SESSION_*.md
+docs/TASKS.md
+docs/PROGRESS.md
+docs/ATOMIC_FACTS_V14_*.md
+docs/LIVE_MEMORY_*.md
+docs/QUALITY_PERFORMANCE_V14.md
+docs/QUALITY_SPEED_ROADMAP_V14.md
+docs/REASONING_V14_RESULTS.md
+docs/V14_TEAM_SCOPE.md
+docs/UPGRADE_V14.md
+docs/benchmarks/*
+!docs/benchmarks/answer-first-v14/
+docs/benchmarks/answer-first-v14/*
+!docs/benchmarks/answer-first-v14/PROTOCOL.md
+!docs/benchmarks/answer-first-v14/RESULTS.md
+!docs/benchmarks/browser-cpu-v14-20260915/
+docs/benchmarks/browser-cpu-v14-20260915/*
+!docs/benchmarks/browser-cpu-v14-20260915/RESULTS.md
+!docs/benchmarks/grounded-v14/
+docs/benchmarks/grounded-v14/*
+!docs/benchmarks/grounded-v14/CPU_RESULTS.md
+!docs/benchmarks/grounded-v14/PROTOCOL_V4.md
+!docs/benchmarks/grounded-v14/RESULTS_V4.md
+!docs/benchmarks/platform-v14-20260915/
+docs/benchmarks/platform-v14-20260915/*
+!docs/benchmarks/platform-v14-20260915/RESULTS.md
+!docs/benchmarks/release-final-v14-20260915/
+docs/benchmarks/release-final-v14-20260915/*
+!docs/benchmarks/release-final-v14-20260915/RESULTS.md

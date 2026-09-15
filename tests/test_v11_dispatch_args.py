@@ -5,7 +5,6 @@ import json
 import sys
 from pathlib import Path
 
-
 SRC = str(Path(__file__).parent.parent / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
@@ -20,13 +19,9 @@ def test_v11_w3_dispatch_passes_call_args(monkeypatch):
     import v11_handlers
 
     class DummyRecall:
-        def search(self, q, project, ktype, limit=10):
-            return {
-                "q": q,
-                "project": project,
-                "type": ktype,
-                "limit": limit,
-            }
+        def search(self, q, project, ktype, limit=10, detail="brief"):
+            assert (q, project, ktype, limit, detail) == ("needle", "proj", "all", 3, "full")
+            return {"results": []}
 
     class DummyStore:
         db = object()
@@ -79,7 +74,7 @@ def test_v11_w3_dispatch_passes_call_args(monkeypatch):
     iterative, temporal, entity, status = asyncio.run(run())
 
     assert iterative["tool"] == "iterative"
-    assert iterative["search"]["limit"] == 3
+    assert iterative["search"] == []
     assert temporal == {"tool": "temporal", "op": "normalize"}
     assert entity == {
         "tool": "entity",

@@ -140,13 +140,26 @@ def test_graph_delta_endpoint(dashboard_server):
 
 
 def test_main_page_includes_v6_panels(dashboard_server):
+    from version import RELEASE_DATE, VERSION
+
     status, body = _get(f"{dashboard_server}/")
     assert status == 200
+    assert "<title>total-agent-memory</title>" in body
+    assert f"Version {VERSION}" in body
+    assert f"Released {RELEASE_DATE}" in body
+    assert "__TAM_" not in body
     assert "Token savings" in body
     assert "v6 queues" in body
     assert "v6 coverage" in body
     # Marker must be replaced, not left raw
     assert "V6_PANELS_HERE" not in body
+
+
+def test_release_metadata_matches_rendered_page(dashboard_server):
+    from version import RELEASE_DATE, VERSION
+
+    data = _get_json(f"{dashboard_server}/api/release")
+    assert data == {"name": "total-agent-memory", "version": VERSION, "release_date": RELEASE_DATE}
 
 
 def test_live_graph_page_loads(dashboard_server):

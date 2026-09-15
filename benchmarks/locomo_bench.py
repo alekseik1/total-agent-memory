@@ -43,6 +43,7 @@ RESULTS_DIR = ROOT / "benchmarks" / "results"
 
 
 def setup_env(db_path: Path, disable_llm: bool) -> None:
+    os.environ["TAM_MEMORY_DIR"] = str(db_path)
     os.environ["CLAUDE_MEMORY_DIR"] = str(db_path)
     # Separate Chroma/embeddings dir implied via CLAUDE_MEMORY_DIR
     if disable_llm:
@@ -349,10 +350,10 @@ def eval_samples(server_mod, samples: list[dict], top_k: int = 10,
 # multi-hop (n=96). The map used to have 2 and 3 swapped, which silently
 # mislabelled every per-category number this runner printed.
 CATEGORY_NAMES = {
-    1: "single-hop",
+    1: "multi-hop",
     2: "temporal",
-    3: "multi-hop",
-    4: "open-domain",
+    3: "open-domain",
+    4: "single-hop",
     5: "adversarial",
 }
 

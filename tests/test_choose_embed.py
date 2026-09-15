@@ -84,13 +84,16 @@ def test_default_backend_is_fastembed_minilm(fake_fastembed):
 
 def test_bge_m3_backend_uses_sentence_transformers(monkeypatch):
     import choose_embed
+    import cpu_budget
 
     monkeypatch.setenv("V9_EMBED_BACKEND", "bge-m3")
 
     captured: dict = {}
+    monkeypatch.setattr(cpu_budget, 'configure_torch_threads', lambda: captured.update(cpu_configured=True))
 
     class _FakeST:
         def __init__(self, model_name, *a, **kw):
+            assert captured['cpu_configured']
             captured["model_name"] = model_name
 
         def encode(self, texts, **kw):
