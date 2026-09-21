@@ -224,23 +224,35 @@ def test_the_tool_exposes_stale_only():
     assert "stale_only" in schema["properties"]
 
 
-def test_a_rebuilt_row_is_labelled_by_the_backend_that_rebuilt_it(store, monkeypatch):
-    """The rebuild path had the same defect as the save path: it read the model
-    name off configuration after embedding, so a rebuild run while Ollama was
-    unreachable relabelled rows with a model that never saw them."""
+def test_a_diverging_rebuild_is_skipped_not_rewritten_under_a_fallback_label(store, monkeypatch):
+    """`stale_only` compares a row's stored label to the CONFIGURED model;
+    the rebuild writes the label of whoever actually answered. When Ollama
+    is configured but unreachable, ST answers instead - those never agree,
+    so writing the fallback vector anyway would both mislabel the row and
+    leave it stale again next run. The tool must abort and skip instead of
+    reporting a fallback write as a successful rebuild."""
     store._embed_mode = "ollama"
     store._embedder = _Embedder(384)
     monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
     _seed(store, 1, "some-old-model", 384, "st")
     store.db.commit()
 
-    assert _rebuild(store, stale_only=True)["rebuilt"] == 1
+    result = _rebuild(store, stale_only=True)
+    assert result["rebuilt"] == 0
+    assert result["skipped"] == 1
+    assert "error" in result
 
     row = store.db.execute(
-        "SELECT embed_model, embedding_provider FROM embeddings WHERE knowledge_id=1"
+        "SELECT embed_model, embed_dim, embedding_provider FROM embeddings WHERE knowledge_id=1"
     ).fetchone()
-    assert row["embed_model"] == server.EMBEDDING_MODEL
+    assert row["embed_model"] == "some-old-model"
+    assert row["embed_dim"] == 384
     assert row["embedding_provider"] == "st"
+
+    # A second run hits the same mismatch, not a second silent overwrite.
+    result2 = _rebuild(store, stale_only=True)
+    assert result2["rebuilt"] == 0
+    assert result2["skipped"] == 1
 
 
 def test_a_batch_with_a_partial_cache_hit_does_not_mix_backends(store, monkeypatch):

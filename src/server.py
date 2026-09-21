@@ -6883,6 +6883,7 @@ async def _do(name, a):
 
         rebuilt = 0
         skipped = 0
+        backend_error = None
         for i in range(0, len(rows), batch):
             chunk = rows[i:i + batch]
             texts = [
@@ -6896,6 +6897,19 @@ async def _do(name, a):
             if not embs or len(embs) != len(chunk):
                 skipped += len(chunk)
                 continue
+            if model_name != active_model:
+                # The identity that actually answered is not the configured
+                # one, so the configured backend is unavailable right now.
+                # `stale_only` selects rows by comparing to `active_model` -
+                # writing a fallback vector under a row here would make that
+                # row stale again on the next run (never converges) and
+                # narrows an existing good vector while calling it rebuilt.
+                backend_error = (
+                    f"configured embedding backend produces '{active_model}', "
+                    f"but '{model_name}' answered instead - nothing was rewritten"
+                )
+                skipped += len(rows) - i
+                break
             for r, vec in zip(chunk, embs):
                 try:
                     cls = _v11_classify(r["content"], source_format=r["source_format"])
@@ -6912,12 +6926,15 @@ async def _do(name, a):
                     LOG(f"rebuild_embeddings failed for id={r['id']}: {e}")
                     skipped += 1
             store.db.commit()
-        return J({
+        result = {
             "rebuilt": rebuilt,
             "skipped": skipped,
             "embedding_space_filter": spaces,
             "project_filter": proj,
-        })
+        }
+        if backend_error:
+            result["error"] = backend_error
+        return J(result)
 
     # ── v11.0 Phase 8 — evaluation tools dispatch ────────────────────
     elif name == "memory_eval_locomo":
