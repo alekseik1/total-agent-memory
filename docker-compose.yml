@@ -106,6 +106,10 @@ services:
       MCP_TRANSPORT: http
       MCP_HTTP_HOST: 0.0.0.0
       MCP_HTTP_PORT: "3737"
+      # Server processes sharing the port. One process runs one tool call at
+      # a time; raise this for several concurrent clients (sessions become
+      # stateless). See docs/benchmarks/scale-v14/RESULTS.md.
+      MCP_HTTP_WORKERS: ${TAM_MCP_WORKERS:-1}
     ports:
       - "127.0.0.1:3737:3737"
     volumes:

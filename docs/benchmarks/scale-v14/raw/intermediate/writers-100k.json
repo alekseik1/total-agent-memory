@@ -1,0 +1,60 @@
+{
+  "records": 105458,
+  "per_process": 400,
+  "levels": [
+    {
+      "procs": 1,
+      "saved": 400,
+      "deduped": 0,
+      "rows_in_db": 400,
+      "locked": 0,
+      "other_errors": 0,
+      "wall_s": 16.0,
+      "saves_per_s_incl_startup": 25.0,
+      "save": {
+        "n": 400,
+        "p50": 35.7,
+        "p95": 54.7,
+        "p99": 60.6,
+        "max": 188.6,
+        "mean": 36.8
+      }
+    },
+    {
+      "procs": 4,
+      "saved": 1600,
+      "deduped": 0,
+      "rows_in_db": 1600,
+      "locked": 0,
+      "other_errors": 0,
+      "wall_s": 17.4,
+      "saves_per_s_incl_startup": 91.8,
+      "save": {
+        "n": 1600,
+        "p50": 38.0,
+        "p95": 60.1,
+        "p99": 76.3,
+        "max": 235.1,
+        "mean": 39.3
+      }
+    },
+    {
+      "procs": 8,
+      "saved": 3200,
+      "deduped": 0,
+      "rows_in_db": 3200,
+      "locked": 0,
+      "other_errors": 0,
+      "wall_s": 21.7,
+      "saves_per_s_incl_startup": 147.2,
+      "save": {
+        "n": 3200,
+        "p50": 44.5,
+        "p95": 88.9,
+        "p99": 159.8,
+        "max": 795.8,
+        "mean": 48.8
+      }
+    }
+  ]
+}

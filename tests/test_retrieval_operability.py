@@ -72,17 +72,18 @@ def test_fts_bounds_preserve_scope_with_interleaved_and_deleted_records(store, p
     store.db.set_trace_callback(statements.append)
     server.Recall(store).search("database owner", project=project, limit=10, _explain=True)
     store.db.set_trace_callback(None)
-    sql = next(statement for statement in statements if "SELECT k.*, bm25(knowledge_fts)" in statement)
+    sql = next(statement for statement in statements if "AS _bm25" in statement and "knowledge_fts MATCH" in statement)
     actual = [(row["id"], row["_bm25"]) for row in store.db.execute(sql)]
     predicate = " AND k.project=?" if project else ""
     expected = store.db.execute(
         "SELECT k.id, bm25(knowledge_fts) FROM knowledge_fts f "
         "JOIN knowledge k ON k.id=f.rowid WHERE knowledge_fts MATCH ? "
-        "AND k.status='active'" + predicate + " ORDER BY bm25(knowledge_fts) LIMIT 30",
+        "AND k.status='active'" + predicate + " ORDER BY bm25(knowledge_fts)" + (", k.id" if project else "") + " LIMIT 30",
         ('"database" OR "owner"', project) if project else ('"database" OR "owner"',),
     ).fetchall()
     assert actual == [tuple(row) for row in expected]
-    assert ("f.rowid >=" in sql) == bool(project)
+    # A project filter must not make SQLite re-run MATCH per project row.
+    assert ("AS MATERIALIZED" in sql) == bool(project)
 
 
 @pytest.mark.parametrize("savepoint", [False, True])

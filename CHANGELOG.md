@@ -4,6 +4,17 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+## [14.3.1] - 2026-09-21
+
+- Fix `memory_save` dropping updates. Dedup treated a record as a repeat when it scored above a similarity threshold, so "Lionel Messi's country of citizenship is Argentina" followed by "... is Armenia" (similarity 0.96) kept only Argentina, and "billing runs on PostgreSQL 16" → "18" kept 16. A record is now a repeat only when it has the same words in the same order, ignoring case, punctuation and ё/е; anything else is stored. On MemoryAgentBench FactConsolidation (455 facts), 14.3.0 lost 36 of them.
+- A repeat now replaces the stored record instead of refreshing it, so a statement carries the time it was last made. After "A", "B", "A" the current value is A again, and `memory_answer` (which orders by recording date) sees that; the old row stays as `superseded`. Team stores keep confirming the existing record, which preserves its author (`save_knowledge(..., repeat="confirm")`).
+- Project-scoped search no longer slows down with the size of the whole store. Migration 035 adds the project to the full-text index as a token column, so a scoped query scores only that project's matches. The graph-seed lookup behind every recall uses the `name_norm` index instead of scanning all nodes, and `available_solutions` uses the full-text index instead of `LIKE '%word%'`. Scoped recall p50 / p95: 781 / 1,901 ms → 25 / 35 ms at 100k records, 6–64 s → 105 / 147 ms at 1M. Migration 035 rebuilds the index once (about 30 s per million records).
+- The graph enrichment of `memory_recall` no longer reads the whole graph. Spreading activation loaded every edge on each call and now reads only the edges of the current frontier; the memories linked to activated nodes are summed in SQL instead of shipping every link to Python (hub tags link thousands of records). On a real 7k-record store with 181k edges, one recall's enrichment went from 2.4 s to 0.45 s with identical results.
+- The full-text index is no longer rewritten on every recall: its update trigger fired on any change to a record, including the recall counter bumped for each result. It now fires only when content, context, tags or project change, and a missing delete trigger was added.
+- `MCP_HTTP_WORKERS=N` runs N HTTP server processes on one port. One process runs one tool call at a time; at 100k records four workers serve 117 calls/s to 16 clients instead of 37. Sessions are stateless in that mode; POSIX only.
+- The dedup lookup in `memory_save` matches every word of the new record instead of any of its first twelve: save at 100k records 149 → 43 ms p50.
+- Add `benchmarks/scale_bench.py` and `docs/benchmarks/scale-v14/RESULTS.md` (10k / 100k / 1M records, 200 tenants), MemoryAgentBench FactConsolidation results in `docs/benchmarks/memoryagentbench/`, and a stdio contract test for external MCP clients.
+
 ## [14.3.0] - 2026-09-21
 
 - `MEMORY_CONTRADICTION_SCORER=jev` scores the contradiction pairs of `memory_answer` with TypeSafe's Jev (System One API): one `noul` question per pair, one request per pass. Same accuracy as the Claude Haiku 4.5 scorer within noise (LongMemEval knowledge-update 35/78 vs 36/78); the median contradiction pass drops from 3.1 s to 1.9 s, and Jev billed $0.038 for all 78 questions. Needs `TYPESAFE_API_KEY`; `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` are optional. The default scorer is unchanged.

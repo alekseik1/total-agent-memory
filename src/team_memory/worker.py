@@ -111,7 +111,7 @@ class Runtime:
             self.session, args["content"], args["type"], project=args["project"],
             tags=args["tags"], context=args["context"], importance=args["importance"],
             branch=args["branch"], source_format=args["source_format"],
-            skip_dedup=replacing)
+            skip_dedup=replacing, repeat="confirm")
         if record_id is None:
             return {"saved": False, "quality": quality}
         record = self.record(record_id)

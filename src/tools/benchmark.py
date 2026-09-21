@@ -853,15 +853,8 @@ def save_to_memory(db_path: str, report: BenchmarkReport) -> None:
                     'active', 0.9, 'auto', ?, ?)
         """, (session_id, content, tags, now, now))
 
-        # Also insert into FTS
+        # The k_fts_i trigger indexes the row.
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-        try:
-            db.execute("""
-                INSERT INTO knowledge_fts(rowid, content, context, tags)
-                VALUES (?, ?, 'automated retrieval benchmark', ?)
-            """, (new_id, content, tags))
-        except Exception:
-            pass  # Trigger may handle this
 
         LOG(f"Saved benchmark to memory id={new_id}")
 
