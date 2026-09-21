@@ -82,7 +82,7 @@ def api_stats(db: sqlite3.Connection) -> dict:
 
     stale = db.execute("""
         SELECT COUNT(*) FROM knowledge
-        WHERE status='active' AND last_confirmed < datetime('now', '-90 days')
+        WHERE status='active' AND last_confirmed < strftime('%Y-%m-%dT%H:%M:%f000Z', 'now', '-90 days')
     """).fetchone()[0]
 
     never_recalled = db.execute("""

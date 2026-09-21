@@ -34,7 +34,8 @@ def answer_response(store: EvidenceStore, recall: EvidenceRecall, options: Answe
     service = GroundedAnswerService(
         store.db, search, reader, config.get_recall_excluded_tags(),
         contradiction_scorer=LLMContradictionScorer(provider, model) if negative else None,
-        inversion_client=ProviderInversionClient(provider, model) if negative else None)
+        inversion_client=ProviderInversionClient(provider, model) if negative else None,
+        contradiction_policy=config.get_contradiction_policy())
     result = service.answer(
         options['query'], scope, limit=options.get('limit', 10), max_bytes=options.get('max_bytes', 24000),
         followup=options.get('followup', True))

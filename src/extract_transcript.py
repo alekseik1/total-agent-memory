@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from memory_core.timestamps import utc_now
 from paths import memory_dir
 
 MAX_OUTPUT_KB = 200
@@ -386,7 +387,7 @@ def auto_save_knowledge(db_path: str, session_id: str, data: dict) -> list:
         cols = {r[1] for r in db.execute("PRAGMA table_info(knowledge)").fetchall()}
         has_lineage = "agent_id" in cols and "parent_agent_id" in cols
 
-        now = datetime.now(tz=timezone.utc).isoformat()
+        now = utc_now()
 
         for record in records:
             dedup_key = f"auto_{session_id}_{record['sid_suffix']}"

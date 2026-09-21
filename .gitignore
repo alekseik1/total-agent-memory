@@ -45,9 +45,11 @@ backups/
 .env.local
 
 # Benchmark datasets (large, downloaded on demand). The memory-contracts
-# fixture is small, synthetic and read by tests/test_memory_quality_eval.py.
+# fixture is small, synthetic and read by tests/test_memory_quality_eval.py;
+# the knowledge-update scenarios feed benchmarks/knowledge_update_eval.py.
 benchmarks/data/*
 !benchmarks/data/memory-contracts-v1.json
+!benchmarks/data/knowledge_update_scenarios.json
 benchmarks/longmemeval_s*.json
 
 # Personal/local tooling — never push
@@ -109,6 +111,9 @@ docs/benchmarks/grounded-v14/*
 !docs/benchmarks/grounded-v14/CPU_RESULTS.md
 !docs/benchmarks/grounded-v14/PROTOCOL_V4.md
 !docs/benchmarks/grounded-v14/RESULTS_V4.md
+!docs/benchmarks/knowledge-update-v14/
+docs/benchmarks/knowledge-update-v14/*
+!docs/benchmarks/knowledge-update-v14/RESULTS.md
 !docs/benchmarks/platform-v14-20260915/
 docs/benchmarks/platform-v14-20260915/*
 !docs/benchmarks/platform-v14-20260915/RESULTS.md

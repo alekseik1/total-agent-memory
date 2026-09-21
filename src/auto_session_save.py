@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from memory_core.timestamps import utc_now
 from paths import memory_dir
 
 MEMORY_DIR = str(memory_dir())
@@ -37,7 +38,7 @@ def save_session_context(project: str, cwd: str, reason: str,
     if not user_summary and not assistant_summary:
         return  # Nothing to save
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = utc_now()
     session_id = f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     content = f"Session auto-save ({reason}).\n"
@@ -58,7 +59,7 @@ def save_session_context(project: str, cwd: str, reason: str,
             SELECT id FROM knowledge
             WHERE project = ? AND status = 'active'
               AND tags LIKE '%session-autosave%'
-              AND created_at > datetime('now', '-5 minutes')
+              AND created_at > strftime('%Y-%m-%dT%H:%M:%f000Z', 'now', '-5 minutes')
             LIMIT 1
         """, (project,))
 

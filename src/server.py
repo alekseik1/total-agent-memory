@@ -47,6 +47,8 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool, ToolAnnotations
 
+from memory_core.timestamps import format_utc, utc_now
+
 # chromadb (~70 MB RSS) and sentence_transformers (which pulls in torch,
 # ~450 MB) are *fallback* paths — when fastembed is healthy neither is ever
 # used. Importing them eagerly cost every user that memory anyway: a bare
@@ -745,7 +747,7 @@ class Store:
         """
         binary_blob = self._quantize_binary(embedding)
         float32_blob = self._float32_to_blob(embedding)
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         self.db.execute("""
             INSERT OR REPLACE INTO embeddings (
                 knowledge_id, binary_vector, float32_vector,
@@ -1313,7 +1315,7 @@ class Store:
         return dict(r) if r else None
 
     def raw_append(self, sid, entry):
-        entry["_ts"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        entry["_ts"] = utc_now()
         p = MEMORY_DIR / "raw" / f"{sid}.jsonl"
         with open(p, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
@@ -1321,7 +1323,7 @@ class Store:
             os.fsync(f.fileno())
 
     def session_start(self, sid, project="general", branch=""):
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         self.db.execute(
             "INSERT OR IGNORE INTO sessions (id,started_at,project,branch) VALUES (?,?,?,?)",
             (sid, now, project, branch))
@@ -1445,7 +1447,7 @@ class Store:
             raise ValueError('Unsupported source format')
         if source_format == 'conversation' and filter_name:
             raise ValueError('Conversation sources cannot use a destructive content filter')
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
 
         # Inline <private>...</private> tag redaction (P0.1) — BEFORE autofilter/dedup/sanitize
         private_sections = 0
@@ -1978,7 +1980,7 @@ class Store:
 
     def bump_recall(self, ids):
         """Strengthen memories that are recalled (spaced repetition effect)."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         for kid in ids:
             self.db.execute(
                 "UPDATE knowledge SET recall_count=recall_count+1, last_recalled=? WHERE id=?",
@@ -2016,7 +2018,7 @@ class Store:
     def consolidate_group(self, sid, group):
         """Merge a group of similar records: keep longest, supersede rest."""
         longest = max(group, key=lambda r: len(r["content"]))
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         self.db.execute("UPDATE knowledge SET last_confirmed=? WHERE id=?", (now, longest["id"]))
         merged_ids = []
         for r in group:
@@ -2039,8 +2041,8 @@ class Store:
     def apply_retention(self):
         """Move old unconfirmed records: active→archived→purged."""
         now = datetime.now(timezone.utc)
-        archive_cutoff = (now - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat().replace("+00:00", "Z")
-        purge_cutoff = (now - timedelta(days=PURGE_AFTER_DAYS)).isoformat().replace("+00:00", "Z")
+        archive_cutoff = format_utc(now - timedelta(days=ARCHIVE_AFTER_DAYS))
+        purge_cutoff = format_utc(now - timedelta(days=PURGE_AFTER_DAYS))
 
         archived = self.db.execute("""
             UPDATE knowledge SET status='archived'
@@ -2091,7 +2093,7 @@ class Store:
             AND (? IS NULL OR (a.project=? AND b.project=?))""", (project, project, project))
         return {
             "version": "2.1",
-            "exported_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "exported_at": utc_now(),
             "knowledge": rows,
             "sessions": sessions,
             "relations": relations,
@@ -2152,7 +2154,7 @@ class Store:
 
     def add_relation(self, from_id, to_id, rel_type):
         """Create a relation between two knowledge records."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         # Verify both records exist
         if not self.q1("SELECT id FROM knowledge WHERE id=?", (from_id,)):
             return {"error": f"Record {from_id} not found"}
@@ -2202,7 +2204,7 @@ class Store:
     def save_observation(self, sid, tool_name, summary, observation_type="change",
                          files_affected=None, project="general", branch=""):
         """Save a lightweight observation (no dedup, no ChromaDB)."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         summary, _ = self._sanitize_content(summary)
         cur = self.db.execute("""
             INSERT INTO observations (session_id, tool_name, observation_type, summary,
@@ -2215,7 +2217,7 @@ class Store:
 
     def cleanup_old_observations(self):
         """Remove observations older than OBSERVATION_RETENTION_DAYS."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=OBSERVATION_RETENTION_DAYS)).isoformat().replace("+00:00", "Z")
+        cutoff = format_utc(datetime.now(timezone.utc) - timedelta(days=OBSERVATION_RETENTION_DAYS))
         deleted = self.db.execute(
             "DELETE FROM observations WHERE created_at < ?", (cutoff,)).rowcount
         self.db.commit()
@@ -2228,7 +2230,7 @@ class Store:
     def log_error(self, sid, description, category, severity="medium",
                   fix="", context="", project="general", tags=None):
         """Log a structured error and check for patterns."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         status = "resolved" if fix else "open"
         cur = self.db.execute("""
             INSERT INTO errors (session_id, category, severity, description, context,
@@ -2243,7 +2245,7 @@ class Store:
 
     def detect_error_pattern(self, category, project="general"):
         """Detect repeating error patterns (3+ same category in 30 days)."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat().replace("+00:00", "Z")
+        cutoff = format_utc(datetime.now(timezone.utc) - timedelta(days=30))
         row = self.db.execute("""
             SELECT COUNT(*) as cnt, GROUP_CONCAT(id) as ids
             FROM errors
@@ -2296,7 +2298,7 @@ class Store:
 
     def manage_insight(self, sid, action, **kw):
         """ExpeL-style insight management: add/upvote/downvote/edit/list/promote."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
 
         if action == "add":
             content = kw["content"]
@@ -2387,7 +2389,7 @@ class Store:
 
     def promote_insight_to_rule(self, sid, insight_id):
         """Promote a high-value insight to a behavioral rule."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         insight = self.q1("SELECT * FROM insights WHERE id=? AND status='active'", (insight_id,))
         if not insight:
             return {"error": "Insight not found or not active"}
@@ -2420,7 +2422,7 @@ class Store:
 
     def manage_rule(self, sid, action, **kw):
         """Manage behavioral rules (SOUL)."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
 
         if action == "list":
             conds, params = ["status='active'"], []
@@ -2546,7 +2548,7 @@ class Store:
                 # else: rule is scoped to a different phase — skip
             rows = filtered
 
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         for r in rows:
             self.db.execute(
                 "UPDATE rules SET fire_count=fire_count+1, last_fired=?, updated_at=? WHERE id=?",
@@ -2590,7 +2592,7 @@ class Store:
         if phase is not None:
             tags.append(f"phase:{phase}")
 
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         self.db.execute(
             "UPDATE rules SET tags=?, updated_at=? WHERE id=?",
             (json.dumps(tags), now, rule_id),
@@ -2600,7 +2602,7 @@ class Store:
 
     def analyze_patterns(self, view="full_report", project=None, days=30):
         """Analyze error patterns and self-improvement metrics."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+        cutoff = format_utc(datetime.now(timezone.utc) - timedelta(days=days))
         pf = "AND project=?" if project else ""
         pp = (project,) if project else ()
         result = {}
@@ -2644,8 +2646,8 @@ class Store:
         if view in ("improvement_trend", "full_report"):
             weeks = []
             for w in range(4):
-                start = (datetime.now(timezone.utc) - timedelta(days=(w+1)*7)).isoformat().replace("+00:00", "Z")
-                end = (datetime.now(timezone.utc) - timedelta(days=w*7)).isoformat().replace("+00:00", "Z")
+                start = format_utc(datetime.now(timezone.utc) - timedelta(days=(w+1)*7))
+                end = format_utc(datetime.now(timezone.utc) - timedelta(days=w*7))
                 cnt = self.db.execute(f"""
                     SELECT COUNT(*) FROM errors WHERE created_at BETWEEN ? AND ? {pf}
                 """, (start, end, *pp)).fetchone()[0]
@@ -2865,8 +2867,8 @@ class Recall:
         tier_scores: dict[str, dict[int, float]] = {} if _explain else {}
 
         # Tier 1: FTS5 keyword search with BM25 scoring
-        from memory_core.query_terms import lexical_terms
-        fts_q = " OR ".join(Store._fts_escape(term) for term in lexical_terms(query)) or Store._fts_escape(query)
+        from memory_core.query_terms import fts_match_query
+        fts_q = fts_match_query(query)
         try:
             conds = ["knowledge_fts MATCH ?", "k.status='active'"]
             params = [fts_q]
@@ -3751,7 +3753,7 @@ class Recall:
         # Health metrics
         stale = s.db.execute("""
             SELECT COUNT(*) FROM knowledge
-            WHERE status='active' AND last_confirmed < datetime('now', '-90 days')
+            WHERE status='active' AND last_confirmed < strftime('%Y-%m-%dT%H:%M:%f000Z', 'now', '-90 days')
         """).fetchone()[0]
         never_recalled = s.db.execute("""
             SELECT COUNT(*) FROM knowledge WHERE status='active' AND (recall_count=0 OR recall_count IS NULL)
@@ -4094,8 +4096,10 @@ async def _tool_catalogue():
         Tool(
             name="memory_answer",
             description="Generate and verify a cited answer using the configured reasoning LLM. "
-                        "First runs negative retrieval: a contradiction-seeking second search; a contradiction score >= 0.60 "
-                        "returns 'Not enough information' without picking a side, 0.30-0.60 answers with a caveat (see `negative`). "
+                        "Evidence carries recording dates; when records about the same subject disagree, the latest one gives the "
+                        "current value and the answer names the value it replaced. First runs negative retrieval: a contradiction-seeking "
+                        "second search; a score >= 0.60 hands both sides to the reader and answers with a caveat "
+                        "(MEMORY_CONTRADICTION_POLICY=abstain refuses instead), 0.30-0.60 answers with a caveat (see `negative`). "
                         "Up to one missing-relation retrieval and eight LLM calls including inversion retry and bounded quote repair. Explicit project required. "
                         "Citation offsets refer to returned evidence content. Ordinary recall remains local.",
             inputSchema={"type": "object", "properties": {
@@ -5839,8 +5843,8 @@ async def _do(name, a):
     elif name == "memory_forget":
         dry_run = a.get("dry_run", True)
         if dry_run:
-            archive_cutoff = (datetime.now(timezone.utc) - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat().replace("+00:00", "Z")
-            purge_cutoff = (datetime.now(timezone.utc) - timedelta(days=PURGE_AFTER_DAYS)).isoformat().replace("+00:00", "Z")
+            archive_cutoff = format_utc(datetime.now(timezone.utc) - timedelta(days=ARCHIVE_AFTER_DAYS))
+            purge_cutoff = format_utc(datetime.now(timezone.utc) - timedelta(days=PURGE_AFTER_DAYS))
             would_archive = store.db.execute("""
                 SELECT COUNT(*) FROM knowledge
                 WHERE status='active' AND last_confirmed < ? AND recall_count = 0 AND confidence < 0.8

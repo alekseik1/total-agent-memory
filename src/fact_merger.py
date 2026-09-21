@@ -18,8 +18,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
 from typing import Any, Callable
+
+from memory_core.timestamps import utc_now
 
 try:
     from validator import ContentValidator
@@ -30,7 +31,7 @@ LOG = lambda msg: sys.stderr.write(f"[fact-merger] {msg}\n")
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return utc_now()
 
 
 SimilarityFn = Callable[[int, int], float]

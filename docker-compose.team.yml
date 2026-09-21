@@ -1,7 +1,7 @@
 services:
   team-memory:
     build: .
-    image: ${TAM_TEAM_IMAGE:-total-agent-memory:14.1.0}
+    image: ${TAM_TEAM_IMAGE:-total-agent-memory:14.2.0}
     init: true
     restart: unless-stopped
     extra_hosts:

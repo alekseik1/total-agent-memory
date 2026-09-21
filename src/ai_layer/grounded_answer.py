@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
+from typing import Protocol
 
 from ai_layer.grounded_reader import (
     REFUSAL,
@@ -10,12 +12,12 @@ from ai_layer.grounded_reader import (
     GroundedReader,
     Verification,
 )
+from config import CONTRADICTION_POLICIES
 from memory_core.evidence_context import EvidenceContext
 from memory_core.evidence_pack import pack_evidence_records
 from memory_core.evidence_window import EvidenceWindow
 from memory_core.grounding import InvalidGrounding
 from memory_core.negative_retrieval import (
-    ContradictionBatchFn,
     LLMLike,
     NegativeEvidenceResult,
     negative_retrieve,
@@ -26,6 +28,10 @@ from memory_core.telemetry import counters, op_timer
 MAX_SOURCES = 20
 MAX_ANSWER_CONTEXT_BYTES = 24000
 Search = Callable[[str, int], list[MemoryHit]]
+
+
+class QuestionContradictionScorer(Protocol):
+    def __call__(self, pairs: list[tuple[str, str]], *, question: str | None = None) -> list[float]: ...
 
 
 @dataclass(frozen=True)
@@ -43,10 +49,14 @@ class GroundedAnswer:
 class GroundedAnswerService:
     def __init__(self, db: sqlite3.Connection, search: Search, reader: GroundedReader,
                  excluded_tags: tuple[str, ...] = (), *,
-                 contradiction_scorer: ContradictionBatchFn | None = None,
-                 inversion_client: LLMLike | None = None):
+                 contradiction_scorer: QuestionContradictionScorer | None = None,
+                 inversion_client: LLMLike | None = None,
+                 contradiction_policy: str = 'resolve'):
+        if contradiction_policy not in CONTRADICTION_POLICIES:
+            raise ValueError(f'Unknown contradiction policy: {contradiction_policy!r}')
         self.db, self.search, self.reader = db, search, reader
         self.contradiction_scorer, self.inversion_client = contradiction_scorer, inversion_client
+        self.contradiction_policy = contradiction_policy
         self.window = EvidenceWindow(db, excluded_tags)
         self.context = EvidenceContext(db, excluded_tags)
 
@@ -93,7 +103,7 @@ class GroundedAnswerService:
         with op_timer('grounded_negative_ms'):
             counters.bump('grounded_negative_calls')
             result = negative_retrieve(query, evidence, search_fn=search,
-                                       contradiction_batch_fn=self.contradiction_scorer,
+                                       contradiction_batch_fn=partial(self.contradiction_scorer, question=query),
                                        project=scope.project, llm_client=self.inversion_client)
         counters.bump(f'grounded_negative_{result.decision}')
         return result, found['extra'], found['originals']
@@ -113,16 +123,21 @@ class GroundedAnswerService:
             if checked is not None:
                 negative, negative_extra, negative_originals = checked
                 searches += 1 if negative.inverted_query else 0
-                if negative.decision == 'hard_contradict':
-                    # Strong conflict wins: abstain instead of picking a side.
+                if negative.decision == 'hard_contradict' and self.contradiction_policy == 'abstain':
                     self._validate_current(originals, scope)
                     counters.bump('grounded_negative_vetoes')
                     draft = GroundedDraft('insufficient', REFUSAL, (), None, negative.rationale)
                     return GroundedAnswer(REFUSAL, draft, None, searches, None, evidence, negative, None)
-                if negative.decision == 'soft_contradict':
+                if negative.decision in ('soft_contradict', 'hard_contradict'):
+                    # Both sides reach the reader with their recording dates; it states the
+                    # current value and the one it replaced instead of silently picking a side.
                     evidence, originals = self._merge(f'{query}\n{negative.inverted_query}', scope, evidence, originals,
                                                       negative_extra, negative_originals, limit, max_bytes)
-                    caveat = f'Evidence is mixed: {negative.rationale}'
+                    if negative.decision == 'hard_contradict':
+                        counters.bump('grounded_negative_resolved')
+                        caveat = f'Memory holds conflicting records; resolved by recording date: {negative.rationale}'
+                    else:
+                        caveat = f'Evidence is mixed: {negative.rationale}'
             draft = self.reader.read(query, evidence)
             focused = None
             if followup and draft.missing is not None:
