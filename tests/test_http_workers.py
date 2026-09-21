@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -31,8 +32,27 @@ def free_port() -> int:
 
 
 def children_of(pid: int) -> set[int]:
-    out = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True, check=False).stdout
-    return {int(line) for line in out.split()}
+    """Child pids of `pid`: pgrep where installed, /proc otherwise (slim Linux images lack pgrep)."""
+    if shutil.which("pgrep"):
+        out = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True, check=False).stdout
+        return {int(line) for line in out.split()}
+    children = set()
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat.read_text().rsplit(")", 1)[1].split()
+        except OSError:
+            continue  # the process exited while we were listing
+        if int(fields[1]) == pid:
+            children.add(int(stat.parent.name))
+    return children
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 @pytest.fixture
@@ -88,8 +108,7 @@ def test_sigterm_stops_every_worker(workers):
     proc.send_signal(signal.SIGTERM)
     proc.wait(timeout=STOP_TIMEOUT_S)
     time.sleep(1)
-    alive = {pid for pid in kids if subprocess.run(["kill", "-0", str(pid)], capture_output=True, check=False).returncode == 0}
-    assert alive == set()
+    assert {pid for pid in kids if alive(pid)} == set()
 
 
 def test_bad_worker_count_is_rejected(tmp_path):
