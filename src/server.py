@@ -131,6 +131,7 @@ except ImportError:
 
 from base_schema import (  # noqa: E402
     apply_core_column_migrations,
+    apply_reflection_report_column_migrations,
     apply_self_improvement_tables,
     base_schema_sql,
 )
@@ -1265,6 +1266,14 @@ class Store:
             )
             self.db.commit()
             LOG(f"Applied migration {version}: {description}")
+
+        # reflection_reports is created by migration 001, inside the loop
+        # above, so this can only run after the loop -- see the docstring on
+        # apply_reflection_report_column_migrations for why it cannot live in
+        # apply_core_column_migrations (called from _migrate(), before this
+        # method runs).
+        apply_reflection_report_column_migrations(self.db, LOG)
+        self.db.commit()
 
     def _replay_migration_skipping_existing(self, script: str, version: str) -> bool:
         """Re-run `script` one statement at a time, tolerating existing columns.

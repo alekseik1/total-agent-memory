@@ -1,4 +1,4 @@
--- 030_backfill_session_rows.sql
+-- 036_backfill_session_rows.sql
 -- Closes session rows that were only ever recorded in `session_summaries`.
 --
 -- `SessionContinuity.session_end` wrote the summary and nothing else, and

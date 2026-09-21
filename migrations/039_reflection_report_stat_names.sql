@@ -1,0 +1,31 @@
+-- 039_reflection_report_stat_names.sql
+-- Renames three `reflection_reports` columns to what they actually hold, and
+-- drops a fourth that never held anything.
+--
+-- `_save_report` (src/reflection/agent.py) wrote synthesis['edges_strengthened']
+-- into `new_nodes`, synthesis['clusters_found'] into `patterns_found`, and
+-- synthesis['skills_proposed'] into `skills_refined` — none of those pairs
+-- share a meaning. On a real database this reads `new_nodes=116176`, which is
+-- strengthened graph edges, not new nodes. Renaming to match what is actually
+-- stored; the existing rows carry over unchanged, `RENAME COLUMN` only
+-- relabels them.
+--
+-- `rules_proposed` was hardcoded to 0 in every INSERT `_save_report` ever
+-- issued — nothing in this codebase computes or writes a real value for it.
+-- A column that always lies is worse than no column; dropped rather than
+-- renamed.
+--
+-- Historical marker only: this migration originally numbered 033, before the
+-- v14.2.0 merge claimed 029-034 for its own migrations and this file was
+-- renumbered to 039. A database that already applied it as 033 would run it
+-- again under this new version key, and `RENAME COLUMN` / `DROP COLUMN` are
+-- not safe to repeat: SQLite raises "no such column" the second time, and
+-- migrations with a version >= TRANSACTIONAL_SCHEMA_VERSION run through
+-- `memory_core.schema_migration.MigrationRunner`, which has no tolerance for
+-- that error — a bare re-run would raise `MigrationFailed` uncaught and
+-- crash `Store.__init__`. The real work moved to
+-- `base_schema.apply_reflection_report_column_migrations` (PRAGMA-guarded,
+-- same pattern as `apply_core_column_migrations`), called from
+-- `Store._apply_sql_migrations` after this loop has ensured
+-- `reflection_reports` exists. This file stays on disk, comment-only, so
+-- version 039 remains a recorded row (mirrors 028_agent_lineage.sql).

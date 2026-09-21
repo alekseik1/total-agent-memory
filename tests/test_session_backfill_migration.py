@@ -1,4 +1,4 @@
-"""Migration 030 repairs session rows the old session_end never closed.
+"""Migration 036 (formerly 030) repairs session rows the old session_end never closed.
 
 Only sessions that actually produced a summary are closed: one without a
 summary was never ended, and stamping an end time on it would be an invention.
@@ -12,7 +12,7 @@ import pytest
 from base_schema import apply_full_schema
 
 MIGRATION = (
-    Path(__file__).resolve().parent.parent / "migrations" / "030_backfill_session_rows.sql"
+    Path(__file__).resolve().parent.parent / "migrations" / "036_backfill_session_rows.sql"
 )
 
 

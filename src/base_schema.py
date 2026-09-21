@@ -42,6 +42,7 @@ def apply_full_schema(db: sqlite3.Connection) -> None:
     apply_self_improvement_tables(db)
     for sql_path in sorted(MIGRATIONS_DIR.glob("*.sql")):
         db.executescript(sql_path.read_text())
+    apply_reflection_report_column_migrations(db)
 
 
 def apply_core_column_migrations(db: sqlite3.Connection, log=lambda _msg: None) -> None:
@@ -101,6 +102,50 @@ def apply_core_column_migrations(db: sqlite3.Connection, log=lambda _msg: None) 
     if "branch" not in sess_cols:
         db.execute("ALTER TABLE sessions ADD COLUMN branch TEXT DEFAULT ''")
         log("Migration: added branch to sessions table")
+
+
+def apply_reflection_report_column_migrations(db: sqlite3.Connection, log=lambda _msg: None) -> None:
+    """PRAGMA-guarded `reflection_reports` column work, idempotent like
+    ``apply_core_column_migrations`` above.
+
+    `reflection_reports` is created by `migrations/001_v5_schema.sql`, not the
+    base DDL, so this cannot run from `apply_core_column_migrations` — that
+    function runs from `Store._migrate()`, which executes before
+    `Store._apply_sql_migrations()` has had a chance to run migration 001. It
+    must instead run after `_apply_sql_migrations`'s loop, once the table is
+    guaranteed to exist (the guard below also makes it a no-op against a
+    database where migration 001 has not run at all, e.g. mid-loop on a
+    from-scratch install via `apply_full_schema`).
+
+    This logic used to be bare `ALTER TABLE` statements in
+    `migrations/035_reflection_phase_errors.sql` and
+    `migrations/039_reflection_report_stat_names.sql` (numbered 029 and 033
+    before the v14.2.0 merge renumbered them). A database that already
+    applied them under the old numbers runs them again under the new ones,
+    and `ADD COLUMN` / `RENAME COLUMN` / `DROP COLUMN` are not safe to
+    repeat in SQLite — see the comment atop each of those files.
+    """
+    tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "reflection_reports" not in tables:
+        return
+
+    cols = {r[1] for r in db.execute("PRAGMA table_info(reflection_reports)").fetchall()}
+    if "phase_errors" not in cols:
+        db.execute("ALTER TABLE reflection_reports ADD COLUMN phase_errors JSON")
+        log("Migration: added phase_errors to reflection_reports table")
+
+    if "new_nodes" in cols:
+        db.execute("ALTER TABLE reflection_reports RENAME COLUMN new_nodes TO edges_strengthened")
+        log("Migration: renamed reflection_reports.new_nodes to edges_strengthened")
+    if "patterns_found" in cols:
+        db.execute("ALTER TABLE reflection_reports RENAME COLUMN patterns_found TO clusters_found")
+        log("Migration: renamed reflection_reports.patterns_found to clusters_found")
+    if "skills_refined" in cols:
+        db.execute("ALTER TABLE reflection_reports RENAME COLUMN skills_refined TO skills_proposed")
+        log("Migration: renamed reflection_reports.skills_refined to skills_proposed")
+    if "rules_proposed" in cols:
+        db.execute("ALTER TABLE reflection_reports DROP COLUMN rules_proposed")
+        log("Migration: dropped reflection_reports.rules_proposed")
 
 
 def apply_self_improvement_tables(db: sqlite3.Connection) -> None:
