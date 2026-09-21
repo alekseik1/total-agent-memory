@@ -370,10 +370,11 @@ class CognitiveEngine:
                     score_map = dict(memory_scores)
                     placeholders = ",".join("?" * len(kid_list))
                     rows = self.db.execute(
-                        f"""SELECT id, type, content, project, tags, confidence
+                        f"""SELECT id, type, content, project, tags, confidence, session_id, source, created_at
                             FROM knowledge
-                            WHERE id IN ({placeholders}) AND status = 'active'""",
-                        kid_list,
+                            WHERE id IN ({placeholders}) AND status = 'active'
+                              AND (? IS NULL OR project = ?)""",
+                        [*kid_list, project, project],
                     ).fetchall()
 
                     knowledge_items = []
@@ -397,14 +398,15 @@ class CognitiveEngine:
             try:
                 fts_query = " OR ".join(concepts[:5])
                 rows = self.db.execute(
-                    """SELECT k.id, k.type, k.content, k.project, k.tags, k.confidence
+                    """SELECT k.id, k.type, k.content, k.project, k.tags, k.confidence,
+                              k.session_id, k.source, k.created_at
                        FROM knowledge k
                        JOIN knowledge_fts fts ON k.id = fts.rowid
                        WHERE knowledge_fts MATCH ?
-                         AND k.status = 'active'
+                         AND k.status = 'active' AND (? IS NULL OR k.project = ?)
                        ORDER BY rank
                        LIMIT 15""",
-                    (fts_query,),
+                    (fts_query, project, project),
                 ).fetchall()
                 items = [dict(r) for r in rows]
                 bundle["knowledge"] = _truncate_to_tokens(
@@ -451,14 +453,10 @@ class CognitiveEngine:
         except Exception as e:
             LOG(f"build_context meta error: {e}")
 
-        # Calculate total tokens
-        total = 0
-        for key in ("knowledge", "episodes", "skills", "rules", "blind_spots"):
-            for item in bundle.get(key, []):
-                total += _estimate_tokens(str(item))
-        if bundle.get("competency"):
-            total += _estimate_tokens(str(bundle["competency"]))
-        bundle["total_tokens"] = total
+        from memory_core.context import bound_context
+
+        bundle = bound_context(bundle, max_tokens)
+        total = bundle["total_tokens"]
 
         LOG(f"Built context: {len(bundle['knowledge'])} knowledge, "
             f"{len(bundle['episodes'])} episodes, "
@@ -664,9 +662,12 @@ class CognitiveEngine:
                         )
                         WHERE gn.type IN ('rule', 'prohibition', 'convention')
                           AND gn.status = 'active'
+                          AND (? IS NULL OR EXISTS (
+                              SELECT 1 FROM knowledge_nodes kn JOIN knowledge k ON k.id=kn.knowledge_id
+                              WHERE kn.node_id=gn.id AND k.project=? AND k.status='active'))
                         ORDER BY gn.importance DESC
                         LIMIT 5""",
-                    activated_node_ids + activated_node_ids,
+                    [*activated_node_ids, *activated_node_ids, project, project],
                 ).fetchall()
                 for row in rows:
                     r = dict(row)
@@ -782,9 +783,11 @@ class CognitiveEngine:
                 FROM skills
                 WHERE status IN ('active', 'mastered')
                   AND ({like_clauses})
+                  AND (? IS NULL OR projects IS NULL OR projects = '[]'
+                       OR EXISTS (SELECT 1 FROM json_each(skills.projects) WHERE value=?))
                 ORDER BY success_rate DESC, times_used DESC
                 LIMIT 5""",
-            params,
+            [*params, project, project],
         ).fetchall()
 
         return [dict(r) for r in rows]

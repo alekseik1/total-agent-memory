@@ -136,16 +136,18 @@ def _reset_provider_cache() -> None:
 # ──────────────────────────────────────────────
 
 
-def _fetch_session_history(db, session_id: str, limit: int) -> list[str]:
+def _fetch_session_history(
+    db, session_id: str, limit: int, project: str | None = None,
+) -> list[str]:
     """Recent saves in the same session, oldest-first, content only."""
-    if not session_id or limit <= 0:
+    if not session_id or limit <= 0 or project is None:
         return []
     try:
         rows = db.execute(
             """SELECT content FROM knowledge
-               WHERE session_id = ? AND status = 'active'
+               WHERE session_id = ? AND project = ? AND status = 'active'
                ORDER BY id DESC LIMIT ?""",
-            (session_id, limit),
+            (session_id, project, limit),
         ).fetchall()
     except Exception as exc:
         LOG(f"history fetch failed: {exc}")
@@ -214,6 +216,7 @@ def resolve(
     db,
     session_id: str | None,
     coref: bool | None = None,
+    project: str | None = None,
 ) -> CorefResult:
     """Run coreference resolution on `content`.
 
@@ -251,7 +254,7 @@ def resolve(
             f"provider '{getattr(provider, 'name', '?')}' unavailable",
         )
 
-    history = _fetch_session_history(db, session_id or "", _history_limit())
+    history = _fetch_session_history(db, session_id or "", _history_limit(), project)
     if not history:
         # Without context the LLM cannot resolve anything reliably.
         return CorefResult("skip", content, "no session history available")

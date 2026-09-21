@@ -1,12 +1,12 @@
--- 031_backfill_orphan_session_rows.sql
+-- 037_backfill_orphan_session_rows.sql
 -- Gives a session row to every summary that names a session `sessions` never
 -- heard of.
 --
--- 030 could only close rows that already existed, and on a real database that
+-- 036 could only close rows that already existed, and on a real database that
 -- was 25 of 256 summaries. The other 231 name sessions the MCP process never
 -- opened: the Claude Code session id a hook reports (a bare uuid), an id a
 -- caller made up (`mcp_20260830_ag2683_expired_draft_loop`), an API session
--- (`session_01TVefg...`). They were real sessions — they just ended under an
+-- (`session_01TVefg...`). They were real sessions - they just ended under an
 -- identity this server does not issue, and `session_end` had no reason to
 -- create a row. It does now; this repairs the history.
 --

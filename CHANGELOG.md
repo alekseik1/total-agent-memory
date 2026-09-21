@@ -4,14 +4,13 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
-
 ## [Unreleased]
 
-### Fixed — the enrichment worker corrupted transactions it did not own
+### Fixed - the enrichment worker corrupted transactions it did not own
 - `_WorkerThread` drained the queue through `store.db`, the same
   `sqlite3.Connection` every MCP handler writes through. Python's sqlite3
   keeps the implicit-BEGIN state on the Connection rather than on the thread,
-  so a tick landing inside a handler's transaction broke it — logged as
+  so a tick landing inside a handler's transaction broke it - logged as
   `[enrich-worker] tick error: cannot start a transaction within a
   transaction`, and, in the opposite direction, as a failed reflection phase
   (`graph_importance` lost the race most often, being the widest writer at
@@ -25,10 +24,10 @@ and versions use [Semantic Versioning](https://semver.org/).
   a row. Against the previous code it fails 3 runs out of 3, twice with the
   production error string and once with `bad parameter or other API misuse`.
 
-### Added — truncated `self_rules_context` now carries the rules it cut
+### Added - truncated `self_rules_context` now carries the rules it cut
 - When `MEMORY_RULES_LIMIT` (or a per-call `limit`) truncates the result,
-  `get_rules_for_context` adds `rules_index` — `{id, priority, category,
-  head}` for every omitted rule, in the same ordering — plus a `hint`
+  `get_rules_for_context` adds `rules_index` - `{id, priority, category,
+  head}` for every omitted rule, in the same ordering - plus a `hint`
   pointing at the new fetch action. Both keys are absent when nothing was
   cut, so the untruncated response shape is unchanged. Previously the
   remainder was reachable only by running a `sqlite3` query by hand, which
@@ -36,9 +35,9 @@ and versions use [Semantic Versioning](https://semver.org/).
 - `self_rules` gains `action="get"` with `ids` (max 50 per call): returns the
   full rows for those ids, bumps their `fire_count`/`last_fired`, skips ids
   that are not active rules, and reports `returned_ids`. Index entries
-  themselves never fire — only rules whose full text reached the agent.
+  themselves never fire - only rules whose full text reached the agent.
 
-### Fixed — `self_rules_context` silently dropped active rules
+### Fixed - `self_rules_context` silently dropped active rules
 - `get_rules_for_context` had a hardcoded `LIMIT 20`, so projects with more
   than 20 active rules silently lost the rest. Removed the SQL limit; added
   an optional `limit` parameter and a `MEMORY_RULES_LIMIT` env var (default:
@@ -51,7 +50,7 @@ and versions use [Semantic Versioning](https://semver.org/).
   below the cap could never load. Order is now: fetch (unlimited) → phase
   filter → `limit` → `fire_count` increment (touches only returned rules).
 
-### Fixed — follow-up review findings on the above
+### Fixed - follow-up review findings on the above
 - `MEMORY_RULES_LIMIT=<non-integer>` used to crash the server at import
   (`int()` on an unparsable value). Parsing is now isolated in
   `_read_rules_limit()`, which logs a warning and falls back to no cap
@@ -60,7 +59,7 @@ and versions use [Semantic Versioning](https://semver.org/).
   ...}` before querying, mirroring the existing bad-`phase` guard.
 - The per-row `fire_count`/`last_fired` UPDATE loop is now a single batched
   `UPDATE ... WHERE id IN (...)` over the returned rule ids (only fires when
-  rows were actually returned) — only returned rules get their telemetry
+  rows were actually returned) - only returned rules get their telemetry
   bumped, and those columns feed `self_patterns`' `rule_effectiveness`
   report and stale-rule query, so a narrow `MEMORY_RULES_LIMIT` also narrows
   that telemetry.
@@ -72,7 +71,7 @@ and versions use [Semantic Versioning](https://semver.org/).
   (`_RULE_SCORE_SQL`), shared by `get_rules_for_context` and
   `manage_rule(action="list")` so both order consistently.
 - `manage_rule(action="list")` (used by `self_rules(action='list')`) had the
-  same silent-drop defect via a hardcoded `LIMIT 30` — 55 active rules would
+  same silent-drop defect via a hardcoded `LIMIT 30` - 55 active rules would
   show 30 with no signal. Removed the SQL limit; `list` now takes the same
   optional `limit` (rejecting negative values with the same `{"error": ...}`
   shape) and falls back to `RULES_CONTEXT_LIMIT`/`MEMORY_RULES_LIMIT`. The
@@ -80,33 +79,47 @@ and versions use [Semantic Versioning](https://semver.org/).
   the existing `total` (count actually returned). The `self_rules` tool
   schema gained a matching `limit` input.
 
-### Fixed — unified SQLite schema source, fact-merge visibility
+### Fixed - unified SQLite schema source, fact-merge visibility
 - The core schema moved out of `Store._schema()`'s inline DDL into
   `src/sql/base_schema.sql`, read by both production and the test suite via
-  `src/base_schema.py` — a hand-rolled test fixture schema is how
+  `src/base_schema.py` - a hand-rolled test fixture schema is how
   `fact_merger` previously shipped writing to a `knowledge.updated_at` column
   that didn't exist in production, with a fully green suite.
 - `base_schema.apply_core_column_migrations` is now the single list of
   PRAGMA-guarded `ALTER TABLE` statements for older databases; both
   `Store._migrate()` and the test fixtures call it, so a column can no
   longer exist in one and not the other.
-- Migration `028_agent_lineage.sql` no longer fails on every startup — it
+- Migration `028_agent_lineage.sql` no longer fails on every startup - it
   used to re-`ALTER TABLE` columns `apply_core_column_migrations` had
   already added, raising `duplicate column name` and never recording itself
   as applied.
-- Migration `029_reflection_phase_errors.sql` adds
-  `reflection_reports.phase_errors`, so a reflection phase that fails (or is
+- `reflection_reports.phase_errors` is added by
+  `base_schema.apply_reflection_report_column_migrations` (PRAGMA-guarded,
+  not a bare `ALTER TABLE`), so a reflection phase that fails (or is
   deferred/skipped) is now visible in the saved report instead of only
-  reaching stderr.
+  reaching stderr. The migration that originally carried this DDL,
+  `035_reflection_phase_errors.sql` (numbered `029` before the v14.2.0 merge
+  claimed `029`-`034` for its own migrations and this one was renumbered to
+  `035`), is now a comment-only historical marker - see its header comment.
+- The fork's other four migrations were renumbered alongside it for the same
+  reason: `030`-`033` became `036`-`039`. `036_backfill_session_rows.sql`,
+  `037_backfill_orphan_session_rows.sql` and `038_resolve_learned_errors.sql`
+  are unchanged data repairs under their new numbers.
+  `039_reflection_report_stat_names.sql` renames
+  `reflection_reports.new_nodes` / `patterns_found` / `skills_refined` to
+  `edges_strengthened` / `clusters_found` / `skills_proposed` and drops
+  `rules_proposed`, which every insert hardcoded to 0; like `035`, its DDL
+  now lives in `apply_reflection_report_column_migrations` and the file
+  itself is comment-only.
 - `fact_merger`'s merged records now carry `session_id='fact-merge'` and
   `source='merged'` instead of a raw insert that violated `knowledge`'s
   `NOT NULL` `session_id`; the origin session row is seeded once in the base
   schema rather than written per merge.
 
-### Fixed — `ContentValidator`'s absolute-path check never matched real paths
+### Fixed - `ContentValidator`'s absolute-path check never matched real paths
 - The old path regex consumed exactly one character after the leading slash,
   so it only ever matched single-char path segments (e.g. `/x/`) and never
-  real absolute paths — the guard was silently inert. The new pattern
+  real absolute paths - the guard was silently inert. The new pattern
   matches any-depth absolute/tilde paths, gates single-segment relative
   paths on a recognized code/doc extension (so `/compact`, `python/3.12`,
   `v1.2/2.0` and similar prose aren't mistaken for paths), and normalizes
@@ -119,18 +132,18 @@ and versions use [Semantic Versioning](https://semver.org/).
   both now opt in explicitly at the call site; `summary`/`keywords`/
   `questions` views remain unvalidated and unaffected.
 
-### Added — `MEMORY_FACT_MERGE_ENABLED` gate for the fact_merge reflection phase
+### Added - `MEMORY_FACT_MERGE_ENABLED` gate for the fact_merge reflection phase
 - `fact_merge` (semantic clustering + LLM synthesis of related facts) is now
   gated by `config.is_fact_merge_enabled()` / `MEMORY_FACT_MERGE_ENABLED`,
   default `false`. Cosine similarity alone can't distinguish "the same claim
-  twice" from "the same subject at two different points in time" — unattended
+  twice" from "the same subject at two different points in time" - unattended
   merging isn't safe yet, so it's opt-in until that's addressed.
 - `_run_fact_merger` returns `{"clusters_found": 0, "merged": 0, "rejected":
   0, "disabled": True}` when the gate is off, without importing/constructing
   `FactMerger`. `"disabled"` is deliberately not one of the marker keys
   `phase_errors()` treats as a failure (`error`/`deferred`/`skipped_reason`/
   non-numeric `skipped`), so a disabled phase doesn't show up as a fake error
-  in every saved reflection report — documented directly in `phase_errors()`'s
+  in every saved reflection report - documented directly in `phase_errors()`'s
   docstring.
 - Wired `MEMORY_FACT_MERGE_ENABLED=false` into every path that runs the
   reflection phase without inheriting a shell environment:
@@ -139,7 +152,7 @@ and versions use [Semantic Versioning](https://semver.org/).
   `docker-compose.yml`. Documented in `.env.example` and the README env table
   next to `MEMORY_ENRICHMENT_ENABLED`.
 
-### Fixed — `install.sh` test coverage could silently upgrade the dev venv's `mcp` package
+### Fixed - `install.sh` test coverage could silently upgrade the dev venv's `mcp` package
 - `test_launchagents_substitute_install_dir_and_memory_dir` ran real
   `install.sh` with `INSTALL_TEST_MODE=skip-heavy`, a value the script never
   actually checked (only the literal `"1"` skipped anything), so it silently
@@ -149,7 +162,7 @@ and versions use [Semantic Versioning](https://semver.org/).
   Ollama probe, `claude mcp add-json` CLI call, and
   `dashboard-service.sh print-management` all running for real. Replaced it
   with `INSTALL_FORCE_LAUNCHAGENTS=1`, a narrow opt-in checked alongside
-  `INSTALL_TEST_MODE=1` at the LaunchAgents step only — the test now sets
+  `INSTALL_TEST_MODE=1` at the LaunchAgents step only - the test now sets
   both env vars, so every other heavy step stays skipped and only the
   LaunchAgent install branch re-enables.
 - `INSTALL_SKIP_PIP=1`'s ensurepip pre-flight was gated on `INSTALL_TEST_MODE`
@@ -158,16 +171,16 @@ and versions use [Semantic Versioning](https://semver.org/).
   venv/pip work. Now gated on the same switch (`SKIP_PIP`) as the work it
   protects.
 - `INSTALL_SKIP_PIP=1` also unconditionally pointed `PY_PATH` at the system
-  `python3`, even when an existing `.venv` was present — and `PY_PATH` isn't
+  `python3`, even when an existing `.venv` was present - and `PY_PATH` isn't
   test-only, it gets written into the IDE's MCP config. Now prefers the
   existing venv's interpreter when one exists.
 - The same test also asserted the generated plist never contains the literal
   string `claude-memory-server`, which fails for anyone whose clone legitimately
-  carries that directory name — the `sed` substitution was working correctly.
+  carries that directory name - the `sed` substitution was working correctly.
   Rewrote the assertion to check the actual intent: no `__INSTALL_DIR__` /
   `__MEMORY_DIR__` / `__HOME__` placeholder tokens survive, and the
   substituted values equal the `INSTALL_DIR` / `MEMORY_DIR` / `HOME` the
-  installer was actually given — guarded against silently checking nothing
+  installer was actually given - guarded against silently checking nothing
   by asserting at least one placeholder was actually present in each plist's
   source template.
 - Pinned `mcp[cli]>=1.0.0,<2` in `requirements.txt` and `pyproject.toml`:
@@ -175,10 +188,163 @@ and versions use [Semantic Versioning](https://semver.org/).
   decorator API, which `mcp` 2.0 removed; the unbounded `>=1.0.0` constraint
   let a routine `pip install --upgrade` silently break the server.
   `setup.sh`'s Manual Setup path had its own unbounded `mcp[cli]>=1.0.0`
-  pin, reproducing the same breakage — it now installs from
+  pin, reproducing the same breakage - it now installs from
   `requirements.txt` instead of hand-rolling its dependency list, so there is
   a single source of truth for the pin.
 
+## [14.2.0] - 2026-09-21
+
+- `memory_answer` answers with the latest value of a fact that changed over time ("Mary loves red", later "Mary no longer likes red; she has fallen for green" → *green, previously red*). The reader and verifier now see each record's recording date, and a value stays current until a later record changes it. LongMemEval knowledge-update 12/78 → 35/78 with Claude Haiku 4.5; see `docs/benchmarks/knowledge-update-v14/RESULTS.md`.
+- A hard contradiction no longer refuses before reading: both sides go to the reader with their dates. `MEMORY_CONTRADICTION_POLICY=abstain` restores the 14.1.0 refusal. The contradiction scorer sees the question, so a conflict about someone else no longer blocks the answer.
+- Russian word forms: Cyrillic terms are stemmed in the lexical recall tier and in claim grounding ("Маша" finds "Маше"). New dependency `snowballstemmer`.
+- One stored timestamp format, `2026-09-21T08:21:37.622445Z` (UTC). Migration 034 rewrites older `+00:00`, fraction-less and zone-less values; zone-less values were local time and are converted with that zone's DST rules. Relative-time SQL filters compare against the same format.
+- Answers are written in the language of the question.
+- Add `benchmarks/knowledge_update_eval.py` and `scripts/smoke_knowledge_update.py`.
+
+## [14.1.0] - 2026-09-21
+
+- `memory_answer` now runs negative retrieval: an inverted, contradiction-seeking second search whose (positive, negative) pairs are scored in one batched call. A score ≥ 0.60 abstains with *Not enough information* without picking a side; 0.30–0.60 answers with a caveat. The verdict is returned under `negative`; `MEMORY_NEGATIVE_RETRIEVAL=false` disables it.
+- Fix `memory_answer` failing with "Reader returned invalid grounded evidence" on Anthropic and Ollama providers: both now implement structured completion (forced tool call / JSON-schema `format`) instead of returning markdown-fenced JSON.
+- Point the README Docker example at the current image.
+
+## [14.0.0] - 2026-09-15
+
+- Require Python 3.11 or newer. 13.x already imported `tomllib` and `datetime.UTC`, so it never ran on 3.10 despite declaring support; package metadata, installers and CI now state the real minimum.
+- Reject contradictory grounded answers that declare both support and a missing premise after the bounded repair attempt.
+- Set OpenMP/BLAS budgets before PyTorch import in rerankers, embeddings, NLI verification and calibration.
+- Keep personal, team and shared workers warm by default; search cached workers first under smaller limits while preserving result ordering.
+- Add Chromium, Firefox and WebKit tests for the team interface and local dashboard, with a required browser CI gate.
+- Fix Windows UTF-8 storage, file locking, pip self-upgrade, background memory paths and per-user dashboard startup.
+- Add an authenticated team server with isolated personal, team and shared stores, bounded worker processes, attributed history and revision conflicts.
+- Add a server web interface and a standard-library-only remote MCP bridge; provide a separate Docker Compose server profile.
+- Route internal text and image tasks through configured Ollama, OpenAI-compatible or Anthropic providers; require an explicit vision model.
+- Bound embedding and PyTorch threads; stabilize NLI batch results with float32.
+- Correct installer skip-heavy validation and show consistent product/version/release metadata.
+
+- Redact private content before durable write intents; clear completed replay payloads.
+- Handle nested and unfinished private sections without leaking their contents.
+- Enforce project, branch, type and space scope after retrieval expansion; invalidate caches on database changes.
+- Query each embedding space with its matching model and dimensions; expose incompatible-model diagnostics.
+- Use typed iterative retrieval results and the installed runtime LLM provider.
+- Bound context evidence, attach source references and scope cognitive retrieval.
+- Separate recall usage from confirmation time; handle backdated temporal assertions without overlapping intervals.
+- Claim representation jobs atomically; fix enrichment thread shutdown.
+- Correct LoCoMo category routing and require explicit oracle mode for category prompts.
+- Filter question stopwords from lexical retrieval; preserve negation and code identifiers.
+- Add scoped full-evidence context windows and guidance for qualified, grounded inference.
+- Use the configured provider for decomposition and enforce the no-LLM fast-path gate.
+- Apply final scope checks to timeline neighbors.
+- Withdraw the invalid retrieval-versus-answer-accuracy comparison; record controlled development measurements in docs/LOCOMO_V14_RESULTS.md.
+
+## [13.0.4] — 2026-09-07 — the Docker image can finally speak stdio
+
+### Added
+- **`docker run -i … stdio`.** The image only ever started the supervisor,
+  which serves MCP over Streamable HTTP on `:3737` and the dashboard on
+  `:37737`. Every client that runs a local server the ordinary way — piping
+  JSON-RPC over stdin/stdout, which is what Docker MCP Toolkit does — got a
+  container that never answered. The engine always supported stdio
+  (`MCP_TRANSPORT` defaults to it); nothing in the image reached that path.
+  The entrypoint now has a `stdio` case that execs the server directly.
+  Logs already went to stderr, so stdout carries JSON-RPC and nothing else —
+  verified frame by frame.
+
+### Fixed
+- **`serverInfo` was wrong in both fields.** The name was still
+  `claude-total-memory`, the package name retired in v7, and no version was
+  ever passed to `Server(...)`, so clients rendered `version: ""`. It now
+  reports `total-agent-memory` and the real version.
+
+## [13.0.3] — 2026-09-07 — discoverability: MCP Registry, security policy, honest metadata
+
+Nothing in the runtime changed. This release exists so the package carries
+the metadata the wider ecosystem reads.
+
+### Added
+- `server.json` and an `mcp-name` marker in the README, so the package can be
+  published to the official [MCP Registry](https://registry.modelcontextprotocol.io).
+  The registry verifies PyPI ownership by matching that marker against the
+  package description, which is why it needs a release rather than a commit.
+- `SECURITY.md` — supported versions, private reporting through GitHub
+  Security Advisories, and a threat model that says plainly what is in scope
+  for a local-first server and what is not.
+- `CONTRIBUTING.md` — development setup, the `memory_core` / `ai_layer` import
+  rule that `tests/test_v11_layer_separation.py` enforces, and the two rules
+  learned the hard way: tests must skip on absent gitignored corpora, and
+  benchmark runners must pass `record_usage=False`.
+
+### Fixed
+- The PyPI description advertised **46 tools**; the server exposes **74**. The
+  repository description on GitHub still quoted **LongMemEval R@5 97.45%**,
+  a number 13.0.0 retired when the runner stopped measuring its own
+  self-contained retrieval stack. Both now match the README: 74 tools,
+  95.1% R@5.
+
+## [13.0.2] — 2026-09-07 — the install carried 3 GB of CUDA it cannot reach
+
+### Fixed — the torch stack moved to a `rerank` extra
+A base install resolved `sentence-transformers`, `transformers`,
+`FlagEmbedding` and `peft`. Each of them resolves torch, and torch on Linux
+resolves the entire `nvidia-cu*` set. Measured with `uv pip compile` for
+`x86_64-unknown-linux-gnu` / py3.12, summing the wheels PyPI serves:
+
+| | packages | wheel bytes |
+|---|---:|---:|
+| before | 147 | **~3,108 MB** |
+| after | 97 | **~113 MB** |
+
+The largest single items were torch (529 MB), `nvidia-cudnn-cu13` (528 MB),
+`nvidia-cublas` (404 MB) and triton (237 MB) — none of which a CPU host runs.
+`FlagEmbedding` additionally dragged in `datasets`, `pyarrow` and `ir-datasets`.
+
+This was not merely wasteful. The [Glama](https://glama.ai) build sandbox ran
+out of disk unpacking `nvidia-cudnn-cu13` and the server failed to build there
+at all.
+
+And the default configuration cannot reach any of it. `MEMORY_MODE=fast` — the
+default since v11 — sets `MEMORY_RERANK_ENABLED=false`, and it also sets
+`MEMORY_ALLOW_OLLAMA_IN_HOT_PATH=false`, which is the exact flag gating the
+fall-through to `SentenceTransformer` in `Recall._compute`. So the base install
+shipped 3 GB for two code paths its own defaults forbid, and a third
+(`ai_layer/verifier.py`) that only `benchmarks/v11_pipeline.py` calls.
+
+Install it when you turn the reranker on with `MEMORY_MODE=deep` or
+`MEMORY_RERANK_ENABLED=true`:
+
+```bash
+pip install "total-agent-memory[rerank]"      # pip / uvx / pipx
+pip install -r requirements-rerank.txt        # clone / Docker
+```
+
+Both loaders in `src/reranker.py` now distinguish "not installed" from "failed
+to load" and name the extra in the log line instead of reporting a bare
+`ImportError`. Retrieval continues in RRF order without them.
+
+### Fixed — every installer warmed a model the server does not use
+`install.sh`, `install.ps1`, `install-codex.ps1` and `setup.sh` pre-downloaded
+`all-MiniLM-L6-v2` through `sentence_transformers`. That is the *fallback*
+model, not the fastembed default the server embeds with, so the warm-up
+populated a cache nothing reads and the first real save still downloaded. The
+`install.sh` copy also ran through the system `python3` rather than the venv it
+had just built. All four now warm `FASTEMBED_MODEL` through the venv.
+
+`EMBEDDING_MODEL=all-MiniLM-L6-v2` was likewise written into every IDE config,
+the Dockerfile, `docker-compose.yml` and `docker/run-mcp.sh`; it named a model
+the install can no longer load and has been dropped. `TRANSFORMERS_CACHE` and
+`TORCHINDUCTOR_CACHE_DIR` left the image with the stack that used them.
+
+`setup.sh` — unreferenced by the README since the rebrand — installed a
+hand-written dependency list that floored `mcp[cli]` at `>=1.0.0`, the exact
+floor that broke every install before 13.0.0, and never installed fastembed at
+all. It now installs `requirements.txt` like every other path.
+
+### Added
+`tests/test_dependency_declaration.py` gains the mirror of its original guard.
+It has always checked that nothing required is *missing* from the wheel
+metadata; it now also checks that the torch stack is not *present* in it, that
+the `rerank` extra carries everything `src/reranker.py` imports, that
+`requirements-rerank.txt` and the extra agree, and that no installer warms a
+model it cannot load.
 
 ## [13.0.1] — 2026-08-27 — the write path was quadratic
 

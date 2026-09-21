@@ -35,6 +35,7 @@ import tempfile
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import TypedDict
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -428,17 +429,43 @@ def ndcg_at_k(retrieved_ids: list[str], gold_ids: set, k: int = 5) -> float:
 # Main benchmark
 # =============================================================================
 
+class ConversationTurn(TypedDict):
+    role: str
+    content: str
+
+
+def build_corpus(
+    session_ids: list[str], sessions: list[list[ConversationTurn]],
+    dates: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    if len(session_ids) != len(sessions):
+        raise ValueError("Session IDs and histories must have equal lengths")
+    if dates is not None and len(dates) != len(sessions):
+        raise ValueError("Session dates and histories must have equal lengths")
+    corpus: list[str] = []
+    corpus_ids: list[str] = []
+    for index, (sid, session) in enumerate(zip(session_ids, sessions, strict=True)):
+        text = "\n".join(
+            f"{turn['role']}: {turn['content']}"
+            for turn in session if turn["content"].strip()
+        )
+        if text:
+            if dates is not None:
+                text = f"[{dates[index]}]\n{text}"
+            corpus.append(text)
+            corpus_ids.append(sid)
+    return corpus, corpus_ids
+
+
 def run_benchmark(data_path: str, modes: list[str], limit: int = 0, k: int = 5):
     print(f"[bench] Loading {data_path}...")
     with open(data_path) as f:
         data = json.load(f)
 
-    # Filter out abstention questions
-    data = [e for e in data if not e.get("question_id", "").endswith("_abs")]
     if limit > 0:
         data = data[:limit]
 
-    print(f"[bench] {len(data)} questions (abstention excluded)")
+    print(f"[bench] {len(data)} questions (abstention excluded from retrieval metrics)")
     print(f"[bench] Modes: {modes}")
     print(f"[bench] K={k}")
     print()
@@ -446,6 +473,7 @@ def run_benchmark(data_path: str, modes: list[str], limit: int = 0, k: int = 5):
     if "store" in modes:
         # Each question gets its own project inside one throwaway database.
         db_dir = os.environ.get("LME_STORE_DIR") or tempfile.mkdtemp(prefix="lme-store-")
+        os.environ["TAM_MEMORY_DIR"] = db_dir
         os.environ["CLAUDE_MEMORY_DIR"] = db_dir
         os.environ["MEMORY_LLM_ENABLED"] = "false"
         os.environ.setdefault("MEMORY_QUIET", "1")
@@ -460,6 +488,7 @@ def run_benchmark(data_path: str, modes: list[str], limit: int = 0, k: int = 5):
     # Results per mode per type
     results = {mode: defaultdict(list) for mode in modes}
     times = {mode: [] for mode in modes}
+    records = {mode: [] for mode in modes}
 
     for qi, entry in enumerate(data):
         qid = entry["question_id"]
@@ -469,14 +498,7 @@ def run_benchmark(data_path: str, modes: list[str], limit: int = 0, k: int = 5):
         session_ids = entry["haystack_session_ids"]
         sessions = entry["haystack_sessions"]
 
-        # Build corpus: concatenate user turns per session
-        corpus = []
-        corpus_ids = []
-        for sid, session in zip(session_ids, sessions):
-            user_text = "\n".join(t["content"] for t in session if t["role"] == "user")
-            if user_text.strip():
-                corpus.append(user_text)
-                corpus_ids.append(sid)
+        corpus, corpus_ids = build_corpus(session_ids, sessions, entry.get("haystack_dates"))
 
         if not corpus:
             continue
@@ -502,7 +524,7 @@ def run_benchmark(data_path: str, modes: list[str], limit: int = 0, k: int = 5):
 
         # Run each mode
         for mode in modes:
-            t0 = time.time()
+            t0 = time.perf_counter()
 
             if mode == "raw":
                 top_indices = retrieve_raw(question, corpus_embs, query_emb, k)
@@ -518,17 +540,25 @@ def run_benchmark(data_path: str, modes: list[str], limit: int = 0, k: int = 5):
             else:
                 continue
 
-            elapsed = time.time() - t0
+            elapsed = time.perf_counter() - t0
             times[mode].append(elapsed)
 
             retrieved = [corpus_ids[i] for i in top_indices if i < len(corpus_ids)]
 
-            r_any = recall_any_at_k(retrieved, gold_ids, k)
-            r_all = recall_all_at_k(retrieved, gold_ids, k)
-            ndcg = ndcg_at_k(retrieved, gold_ids, k)
+            answerable = bool(gold_ids) and not qid.endswith("_abs")
+            r_any = recall_any_at_k(retrieved, gold_ids, k) if answerable else None
+            r_all = recall_all_at_k(retrieved, gold_ids, k) if answerable else None
+            ndcg = ndcg_at_k(retrieved, gold_ids, k) if answerable else None
+            records[mode].append({
+                "question_id": qid, "question_type": qtype,
+                "retrieved_session_ids": retrieved, "gold_session_ids": gold_ids,
+                "latency_ms": elapsed * 1000,
+                "r_any": r_any, "r_all": r_all, "ndcg": ndcg,
+            })
 
-            results[mode][qtype].append({"r_any": r_any, "r_all": r_all, "ndcg": ndcg})
-            results[mode]["_all"].append({"r_any": r_any, "r_all": r_all, "ndcg": ndcg})
+            if answerable:
+                results[mode][qtype].append({"r_any": r_any, "r_all": r_all, "ndcg": ndcg})
+                results[mode]["_all"].append({"r_any": r_any, "r_all": r_all, "ndcg": ndcg})
 
         # Progress
         if (qi + 1) % 25 == 0 or qi == len(data) - 1:
@@ -573,24 +603,24 @@ def run_benchmark(data_path: str, modes: list[str], limit: int = 0, k: int = 5):
     row = f"{'TOTAL (R@' + str(k) + ' recall_any)':<30}"
     for mode in modes:
         scores = results[mode]["_all"]
-        r5 = sum(s["r_any"] for s in scores) / len(scores) * 100
-        row += f" | {r5:>9.1f}%"
+        r5 = sum(s["r_any"] for s in scores) / len(scores) * 100 if scores else None
+        row += f" | {r5:>9.1f}%" if r5 is not None else f" | {'N/A':>9}"
     print(row)
 
     # NDCG
     row = f"{'TOTAL (NDCG@' + str(k) + ')':<30}"
     for mode in modes:
         scores = results[mode]["_all"]
-        ndcg = sum(s["ndcg"] for s in scores) / len(scores) * 100
-        row += f" | {ndcg:>9.1f}%"
+        ndcg = sum(s["ndcg"] for s in scores) / len(scores) * 100 if scores else None
+        row += f" | {ndcg:>9.1f}%" if ndcg is not None else f" | {'N/A':>9}"
     print(row)
 
     # recall_all
     row = f"{'TOTAL (R@' + str(k) + ' recall_all)':<30}"
     for mode in modes:
         scores = results[mode]["_all"]
-        r_all = sum(s["r_all"] for s in scores) / len(scores) * 100
-        row += f" | {r_all:>9.1f}%"
+        r_all = sum(s["r_all"] for s in scores) / len(scores) * 100 if scores else None
+        row += f" | {r_all:>9.1f}%" if r_all is not None else f" | {'N/A':>9}"
     print(row)
 
     # Timing
@@ -604,14 +634,21 @@ def run_benchmark(data_path: str, modes: list[str], limit: int = 0, k: int = 5):
     output = {
         "k": k,
         "total_questions": len(data),
+        "history": "all roles and available dates, session granularity",
+        "abstention_excluded_from_retrieval_metrics": True,
         "modes": {},
     }
     for mode in modes:
+        scored = results[mode]["_all"]
         output["modes"][mode] = {
-            "total_r_any": sum(s["r_any"] for s in results[mode]["_all"]) / len(results[mode]["_all"]),
-            "total_ndcg": sum(s["ndcg"] for s in results[mode]["_all"]) / len(results[mode]["_all"]),
-            "total_r_all": sum(s["r_all"] for s in results[mode]["_all"]) / len(results[mode]["_all"]),
+            "scored_questions": len(results[mode]["_all"]),
+            "total_r_any": sum(s["r_any"] for s in scored) / len(scored) if scored else None,
+            "total_ndcg": sum(s["ndcg"] for s in scored) / len(scored) if scored else None,
+            "total_r_all": sum(s["r_all"] for s in scored) / len(scored) if scored else None,
             "avg_latency_ms": sum(times[mode]) / len(times[mode]) * 1000 if times[mode] else 0,
+            "p50_latency_ms": float(np.percentile(times[mode], 50) * 1000) if times[mode] else 0,
+            "p95_latency_ms": float(np.percentile(times[mode], 95) * 1000) if times[mode] else 0,
+            "records": records[mode],
             "per_type": {},
         }
         for qtype in qtypes:

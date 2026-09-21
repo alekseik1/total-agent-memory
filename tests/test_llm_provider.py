@@ -77,6 +77,56 @@ def test_ollama_provider_roundtrip(monkeypatch):
     assert "Authorization" not in sink["headers"]
 
 
+@pytest.mark.parametrize("api_key", [None, "local-token"])
+def test_compatible_provider_preserves_optional_auth(monkeypatch, api_key):
+    import config
+    import llm_provider
+
+    sink = {}
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("MEMORY_LLM_API_BASE", "http://127.0.0.1:8080/v1")
+    monkeypatch.setenv("MEMORY_LLM_MODEL", "local-model")
+    monkeypatch.delenv("MEMORY_LLM_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "unrelated-cloud-key")
+    if api_key:
+        monkeypatch.setenv("MEMORY_LLM_API_KEY", api_key)
+    monkeypatch.setattr(llm_provider.urllib.request, "urlopen", _capture_urlopen(
+        {"choices": [{"message": {"content": "ok"}}]}, sink,
+    ))
+    provider = llm_provider.make_provider(config.get_llm_provider())
+    assert provider.complete("question") == "ok"
+    assert sink["url"] == "http://127.0.0.1:8080/v1/chat/completions"
+    assert sink["body"]["model"] == "local-model"
+    assert sink["headers"].get("Authorization") == (f"Bearer {api_key}" if api_key else None)
+    assert provider.complete_structured("question", {"type": "object"}) == "ok"
+    assert sink["body"]["response_format"]["type"] == "json_schema"
+
+
+def test_compatible_provider_requires_explicit_endpoint_and_model(monkeypatch):
+    import llm_provider
+
+    monkeypatch.delenv("MEMORY_LLM_API_BASE", raising=False)
+    monkeypatch.delenv("MEMORY_LLM_MODEL", raising=False)
+    with pytest.raises(ValueError, match="MEMORY_LLM_MODEL"):
+        llm_provider.make_provider("openai-compatible")
+    monkeypatch.setenv("MEMORY_LLM_MODEL", "local-model")
+    with pytest.raises(ValueError, match="explicit API base"):
+        llm_provider.make_provider("openai-compatible")
+
+
+def test_compatible_availability_without_cloud_credentials(monkeypatch):
+    import llm_provider
+
+    sink = {}
+    monkeypatch.setattr(llm_provider.urllib.request, "urlopen", _capture_urlopen({}, sink))
+    llm_provider._available_cache.clear()
+    provider = llm_provider.make_provider(
+        "openai-compatible", api_base="http://127.0.0.1:8080/v1", model="local-model",
+    )
+    assert provider.available()
+    assert sink["url"].endswith("/models")
+
+
 def test_ollama_provider_model_override(monkeypatch):
     import llm_provider
 
@@ -305,3 +355,46 @@ def test_provider_unavailable_when_no_api_key(monkeypatch):
     p = llm_provider.make_provider("openai")
     assert isinstance(p, llm_provider.OpenAIProvider)
     assert p.available() is False
+
+
+def test_anthropic_structured_forces_schema_tool(monkeypatch):
+    import llm_provider
+
+    sink: dict = {}
+    payload = {"content": [{"type": "text", "text": "ignored"},
+                           {"type": "tool_use", "name": "respond", "input": {"supported": True, "reason": "ok"}}]}
+    monkeypatch.setattr(llm_provider.urllib.request, "urlopen", _capture_urlopen(payload, sink))
+    provider = llm_provider.AnthropicProvider(api_key="sk", api_base="https://a/v1", model="m")
+    schema = {"type": "object", "properties": {"supported": {"type": "boolean"}}}
+
+    assert json.loads(provider.complete_structured("q", schema, max_tokens=99)) == {"supported": True, "reason": "ok"}
+    assert isinstance(provider, llm_provider.StructuredLLMProvider)
+    assert sink["body"]["tools"][0]["input_schema"] == schema
+    assert sink["body"]["tool_choice"] == {"type": "tool", "name": "respond", "disable_parallel_tool_use": True}
+    assert sink["body"]["max_tokens"] == 99 and sink["body"]["temperature"] == 0.0
+
+
+def test_anthropic_structured_without_tool_input_raises(monkeypatch):
+    import llm_provider
+
+    monkeypatch.setattr(llm_provider.urllib.request, "urlopen",
+                        _capture_urlopen({"content": [{"type": "text", "text": "```json\n{}\n```"}]}, {}))
+    provider = llm_provider.AnthropicProvider(api_key="sk", api_base="https://a/v1", model="m")
+    with pytest.raises(RuntimeError, match="no tool input"):
+        provider.complete_structured("q", {"type": "object"})
+    with pytest.raises(RuntimeError, match="missing api_key"):
+        llm_provider.AnthropicProvider(api_key=None, api_base="https://a/v1").complete_structured("q", {})
+
+
+def test_ollama_structured_passes_schema_as_format(monkeypatch):
+    import llm_provider
+
+    sink: dict = {}
+    monkeypatch.setattr(llm_provider.urllib.request, "urlopen", _capture_urlopen({"response": ' {"a": 1} '}, sink))
+    provider = llm_provider.OllamaProvider(api_base="http://x:1", model="qwen")
+    schema = {"type": "object", "properties": {"a": {"type": "integer"}}}
+    assert provider.complete_structured("q", schema, max_tokens=12) == '{"a": 1}'
+    assert sink["body"]["format"] == schema and sink["body"]["options"]["num_predict"] == 12
+    monkeypatch.setattr(llm_provider.urllib.request, "urlopen", _capture_urlopen({"response": "  "}, {}))
+    with pytest.raises(RuntimeError, match="empty structured"):
+        provider.complete_structured("q", schema)

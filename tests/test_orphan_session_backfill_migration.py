@@ -1,8 +1,8 @@
-"""Migration 031 gives a session row to summaries that never had one.
+"""Migration 037 (formerly 031) gives a session row to summaries that never had one.
 
-030 could only repair rows that existed. These are the sessions that ended
-under an identity the MCP server does not issue — a hook's Claude Code uuid,
-an id a caller invented — and so had no row at all.
+036 could only repair rows that existed. These are the sessions that ended
+under an identity the MCP server does not issue - a hook's Claude Code uuid,
+an id a caller invented - and so had no row at all.
 """
 
 import sqlite3
@@ -15,7 +15,7 @@ from base_schema import apply_full_schema
 MIGRATION = (
     Path(__file__).resolve().parent.parent
     / "migrations"
-    / "031_backfill_orphan_session_rows.sql"
+    / "037_backfill_orphan_session_rows.sql"
 )
 
 

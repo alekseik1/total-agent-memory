@@ -30,6 +30,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import get_embed_threads
 from paths import memory_dir
 
 MEMORY_DIR = memory_dir()
@@ -66,6 +67,8 @@ def embed_ollama(texts: list[str], model: str,
 
 
 def embed_st(texts: list[str], model_name: str) -> list[list[float]]:
+    from cpu_budget import configure_torch_threads
+    configure_torch_threads()
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer(model_name)
     return model.encode(texts, show_progress_bar=False).tolist()
@@ -80,7 +83,7 @@ def embed_fastembed(texts: list[str], model_name: str) -> list[list[float]]:
     global _fastembed_instance
     if _fastembed_instance is None:
         from fastembed import TextEmbedding
-        _fastembed_instance = TextEmbedding(model_name)
+        _fastembed_instance = TextEmbedding(model_name, threads=get_embed_threads())
     embeddings = list(_fastembed_instance.embed(texts))
     return [emb.tolist() if hasattr(emb, 'tolist') else list(emb) for emb in embeddings]
 

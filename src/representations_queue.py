@@ -46,38 +46,31 @@ class RepresentationsQueue:
         self.validator = ContentValidator()
 
     def enqueue(self, knowledge_id: int) -> bool:
-        existing = self.db.execute(
-            "SELECT id FROM representations_queue "
-            "WHERE knowledge_id=? AND status='pending' LIMIT 1",
-            (knowledge_id,),
-        ).fetchone()
-        if existing:
-            return False
-        self.db.execute(
-            "INSERT INTO representations_queue (knowledge_id, status, created_at) "
+        cursor = self.db.execute(
+            "INSERT OR IGNORE INTO representations_queue (knowledge_id, status, created_at) "
             "VALUES (?, 'pending', ?)",
             (knowledge_id, _now()),
         )
         self.db.commit()
-        return True
+        return cursor.rowcount == 1
 
     def claim_next(self) -> dict | None:
-        row = self.db.execute(
-            "SELECT id, knowledge_id, attempts FROM representations_queue "
-            "WHERE status='pending' ORDER BY id ASC LIMIT 1"
-        ).fetchone()
-        if row is None:
-            return None
-        self.db.execute(
-            "UPDATE representations_queue SET status='processing', claimed_at=? WHERE id=?",
-            (_now(), row["id"]),
-        )
-        self.db.commit()
-        return {
-            "id": row["id"],
-            "knowledge_id": row["knowledge_id"],
-            "attempts": row["attempts"],
-        }
+        try:
+            row = self.db.execute(
+                "UPDATE representations_queue SET status='processing', claimed_at=? "
+                "WHERE id=(SELECT pending.id FROM representations_queue pending "
+                "WHERE pending.status='pending' AND NOT EXISTS ("
+                "SELECT 1 FROM representations_queue running WHERE "
+                "running.knowledge_id=pending.knowledge_id AND running.status='processing') "
+                "ORDER BY pending.id LIMIT 1) AND status='pending' "
+                "RETURNING id, knowledge_id, attempts",
+                (_now(),),
+            ).fetchone()
+            self.db.commit()
+        except sqlite3.Error:
+            self.db.rollback()
+            raise
+        return dict(row) if row is not None else None
 
     def mark_done(self, item_id: int) -> None:
         row = self.db.execute(
@@ -136,7 +129,7 @@ class RepresentationsQueue:
 
             kid = item["knowledge_id"]
             content_row = self.db.execute(
-                "SELECT content FROM knowledge WHERE id=?", (kid,)
+                "SELECT content FROM knowledge WHERE id=? AND status='active'", (kid,)
             ).fetchone()
             if content_row is None:
                 self.mark_done(item["id"])

@@ -97,6 +97,8 @@ class SentenceTransformersProvider:
         if self._model is not None:
             return self._model
         try:
+            from cpu_budget import configure_torch_threads
+            configure_torch_threads()
             from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
         except ImportError:
             self._model = False

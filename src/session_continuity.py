@@ -118,8 +118,8 @@ class SessionContinuity:
             ),
         )
         # A session the server never opened still gets a row. Ends arrive under
-        # identities the MCP process does not own — a hook naming the Claude
-        # Code session, a subagent, a caller that made an id up — and without
+        # identities the MCP process does not own - a hook naming the Claude
+        # Code session, a subagent, a caller that made an id up - and without
         # this `sessions` and `session_summaries` stay two disconnected lists:
         # 231 of 256 summaries had no row to belong to. `started_at` is the
         # caller's if given, else the end time, never a guess at when it began.
@@ -132,7 +132,7 @@ class SessionContinuity:
         # default `Store.session_start` uses), so `memory_timeline` reported
         # sessions that had ended hours ago as still running, all in one
         # project bucket. Project and branch are only overwritten while they
-        # still hold that placeholder — a row that already knows better is not
+        # still hold that placeholder - a row that already knows better is not
         # downgraded by a caller who omitted the argument.
         self.db.execute(
             """UPDATE sessions

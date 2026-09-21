@@ -55,6 +55,8 @@ def test_fastembed_provider_extracts_existing_logic(monkeypatch):
     the current server.py does: list(model.embed(texts)) → tolist()."""
     import embed_provider
 
+    monkeypatch.setenv("MEMORY_EMBED_THREADS", "2")
+
     class _FakeVec:
         def __init__(self, vals: list[float]) -> None:
             self._vals = vals
@@ -63,8 +65,9 @@ def test_fastembed_provider_extracts_existing_logic(monkeypatch):
             return list(self._vals)
 
     class _FakeModel:
-        def __init__(self, model_name: str) -> None:
+        def __init__(self, model_name: str, *, threads: int) -> None:
             self.model_name = model_name
+            assert threads == 2
 
         def embed(self, texts):
             # Emulate generator of numpy-like arrays

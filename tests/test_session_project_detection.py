@@ -2,7 +2,7 @@
 
 `_bootstrap_session` used to call `store.session_start(SID, branch=BRANCH)`
 without a project, so `Store.session_start`'s 'general' default landed on every
-row — one bucket for every repository, and `memory_timeline` could not tell
+row - one bucket for every repository, and `memory_timeline` could not tell
 them apart. The cwd that already gives `_detect_git_branch` its answer is the
 same cwd that names the project.
 """
@@ -19,7 +19,7 @@ from base_schema import apply_full_schema
 
 @pytest.fixture
 def repo(tmp_path):
-    """A real git repository — `_detect_project` shells out to git."""
+    """A real git repository - `_detect_project` shells out to git."""
     root = tmp_path / "MyRepo"
     root.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
@@ -44,7 +44,7 @@ def test_project_of_a_worktree_is_the_main_repository(repo, tmp_path, monkeypatc
     """A worktree directory is named after its branch, not the project.
 
     Resolving via the *common* git dir is what keeps every worktree of one
-    repository in a single bucket — the same rule hooks/lib/common.sh applies.
+    repository in a single bucket - the same rule hooks/lib/common.sh applies.
     """
     monkeypatch.delenv("MEMORY_PROJECT", raising=False)
     subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)

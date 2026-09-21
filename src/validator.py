@@ -32,7 +32,7 @@ _URL_RE = re.compile(r"https?://[^\s<>`'\"()]+")
 _URL_TRAILING_PUNCT = ".,;:!?"
 
 # Markdown emphasis/backticks are stripped before path extraction so the same
-# path is found whether or not an LLM wrapped it in `code` or **bold** —
+# path is found whether or not an LLM wrapped it in `code` or **bold** -
 # extraction must be symmetric between original and transformed text.
 _MARKDOWN_STRIP_RE = re.compile(r"[`*]")
 
@@ -40,7 +40,7 @@ _MARKDOWN_STRIP_RE = re.compile(r"[`*]")
 # paths that carry a recognized code/doc extension (alembic/versions/x.py).
 # A slash may only start a path at the beginning of the text/line or after
 # whitespace/quote/bracket/`=`/`:`/`,`, so prose like "EU/Russia" or
-# "SQLAlchemy/Postgres" — and "db=/path" style assignments — are handled
+# "SQLAlchemy/Postgres" - and "db=/path" style assignments - are handled
 # correctly (matched or ignored, as appropriate) rather than silently
 # producing no match at all.
 _PATH_BOUNDARY = r"""(?:(?<=^)|(?<=[\s'"(\[{=:,]))"""

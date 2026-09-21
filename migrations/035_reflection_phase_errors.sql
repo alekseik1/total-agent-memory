@@ -1,0 +1,28 @@
+-- 035_reflection_phase_errors.sql
+-- Make failing reflection phases visible.
+--
+-- run_full() runs six phases and each one catches its own exceptions, returning
+-- {"error": "..."} instead of raising. _save_report then persisted only digest
+-- and synthesis counters, so every one of those errors was dropped on the floor
+-- and survived only in stderr. That is how `fact_merge` stayed broken for
+-- months with "table knowledge has no column named updated_at": nothing the
+-- report kept ever mentioned it.
+--
+-- One JSON blob of {phase: message} per report, so a failing phase is queryable
+-- instead of archaeological.
+--
+-- Historical marker only: this migration originally numbered 029, before the
+-- v14.2.0 merge claimed 029-034 for its own migrations and this file was
+-- renumbered to 035. A database that already applied it as 029 would run it
+-- again under this new version key, and `ALTER TABLE ADD COLUMN` is not safe
+-- to repeat: SQLite has no `ADD COLUMN IF NOT EXISTS`, and migrations with a
+-- version >= TRANSACTIONAL_SCHEMA_VERSION run through
+-- `memory_core.schema_migration.MigrationRunner`, which has no tolerance for
+-- "duplicate column name" the way the legacy path's
+-- `Store._replay_migration_skipping_existing` does - a bare re-run would
+-- raise `MigrationFailed` uncaught and crash `Store.__init__`. The real work
+-- moved to `base_schema.apply_reflection_report_column_migrations`
+-- (PRAGMA-guarded, same pattern as `apply_core_column_migrations`), called
+-- from `Store._apply_sql_migrations` after this loop has ensured
+-- `reflection_reports` exists. This file stays on disk, comment-only, so
+-- version 035 remains a recorded row (mirrors 028_agent_lineage.sql).

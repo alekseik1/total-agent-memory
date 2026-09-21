@@ -664,3 +664,53 @@ def test_module_does_not_import_ai_layer():
                 if node.module.split(".")[0] == "ai_layer":
                     offending.append(node.module)
     assert offending == [], f"ai_layer imports forbidden in memory_core: {offending}"
+
+
+# ──────────────────────────────────────────────
+# Batched scoring
+# ──────────────────────────────────────────────
+
+
+def test_batch_scorer_gets_all_capped_pairs_in_one_call():
+    seen: list[list[tuple[str, str]]] = []
+
+    def batch(pairs):
+        seen.append(pairs)
+        return [0.7 if b == "Alice hates teal now" else 0.0 for _, b in pairs]
+
+    pos = [{"text": "Alice loves teal"}] + [{"text": f"p{i}"} for i in range(9)]
+    neg = [{"text": "Alice hates teal now"}, {"text": "Alice loves teal"}] + [{"text": f"n{i}"} for i in range(9)]
+    res = negative_retrieve(
+        "What colour does Alice like?",
+        pos,
+        search_fn=FakeSearch(returns=[neg]),
+        contradiction_batch_fn=batch,
+        llm_client=FakeLLMClient(responses=["Alice dislikes teal"]),
+    )
+    assert len(seen) == 1
+    assert len(seen[0]) == 24  # 5 x 5 minus the self-pair
+    assert ("Alice loves teal", "Alice loves teal") not in seen[0]
+    assert res.decision == "hard_contradict"
+    assert res.contradiction_score == pytest.approx(0.7)
+
+
+@pytest.mark.parametrize("batch", [lambda pairs: [0.9], lambda pairs: (_ for _ in ()).throw(RuntimeError("down"))])
+def test_batch_scorer_failure_degrades_to_no_contradiction(batch):
+    res = negative_retrieve(
+        "Q?",
+        [{"text": "pos"}],
+        search_fn=FakeSearch(returns=[[{"text": "neg-a"}, {"text": "neg-b"}]]),
+        contradiction_batch_fn=batch,
+        llm_client=FakeLLMClient(responses=["q"]),
+    )
+    assert res.decision == "no_contradiction"
+    assert "contradiction scoring failed" in res.rationale
+    assert len(res.negative_evidence) == 2
+
+
+def test_exactly_one_scorer_is_required():
+    with pytest.raises(ValueError, match="exactly one"):
+        negative_retrieve("Q?", [{"text": "p"}], search_fn=FakeSearch(returns=[[]]))
+    with pytest.raises(ValueError, match="exactly one"):
+        negative_retrieve("Q?", [{"text": "p"}], search_fn=FakeSearch(returns=[[]]),
+                          contradiction_fn=lambda a, b: 0.0, contradiction_batch_fn=lambda pairs: [])

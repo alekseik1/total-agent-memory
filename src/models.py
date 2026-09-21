@@ -80,9 +80,9 @@ def _json_dumps(obj: Any) -> str | None:
 
 
 def _iso_now() -> str:
-    """Current UTC time as ISO 8601 string."""
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    """Current UTC time in the canonical stored format."""
+    from memory_core.timestamps import utc_now
+    return utc_now()
 
 
 # ---------------------------------------------------------------------------

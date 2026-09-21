@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from memory_core.retrieval import SearchScope
 
 # ── index mode ────────────────────────────────────────────────
 
@@ -227,6 +228,7 @@ def timeline_response(
     store: Any,
     neighbors: int = 2,
     limit: int = 5,
+    scope: SearchScope | None = None,
 ) -> dict[str, Any]:
     """Expand top-K search hits with ±neighbours and return chronological list.
 
@@ -263,6 +265,14 @@ def timeline_response(
             timeline_items.append(n)
 
     timeline_items.sort(key=lambda e: e.get("created_at", "") or "")
+
+    if scope is not None:
+        visible = []
+        for item in timeline_items:
+            row = store.db.execute('SELECT * FROM knowledge WHERE id=?', (item['id'],)).fetchone()
+            if row is not None and scope.allows(dict(row), store.db):
+                visible.append(item)
+        timeline_items = visible
 
     out = {
         "query": search_result.get("query"),

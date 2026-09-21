@@ -47,7 +47,7 @@ config from.
 
 ## Prerequisites
 
-- **Python 3.10+** (3.11 or 3.13 recommended)
+- **Python 3.11+** (3.13 recommended)
 - **Git** for cloning the repo
 - **~2 GB disk** (code + venv + MiniLM model + DB)
 - **Claude Code** (or Codex CLI / Cursor / Gemini CLI / OpenCode — any MCP client)

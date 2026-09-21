@@ -1,4 +1,4 @@
--- Base schema — the core tables every other migration builds on.
+-- Base schema - the core tables every other migration builds on.
 --
 -- This file is the single source of truth: `Store._schema()` executes it at
 -- startup and the pytest `db` fixture loads the same text, so a test can never

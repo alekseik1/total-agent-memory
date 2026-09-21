@@ -18,12 +18,15 @@
 # Env:
 #   INSTALL_TEST_MODE=1   skip pip install, model pre-download, dashboard
 #                         service, LaunchAgents (for test harness)
+#   INSTALL_TEST_MODE=skip-heavy   skip only pip install and model
+#                         pre-download; Ollama probe, dashboard service and
+#                         LaunchAgents still run for real (for smoke tests)
 #   INSTALL_SKIP_PIP=1    skip ONLY dependency installation (venv/pip/editable
-#                         install), independent of INSTALL_TEST_MODE — for
+#                         install), independent of INSTALL_TEST_MODE - for
 #                         users who manage their own Python environment and
 #                         don't want install.sh touching it
 #   INSTALL_FORCE_LAUNCHAGENTS=1   re-enable just the LaunchAgent install step
-#                         even when INSTALL_TEST_MODE=1 — for tests that need
+#                         even when INSTALL_TEST_MODE=1 - for tests that need
 #                         real LaunchAgent installation without mutating the
 #                         developer's Python environment (pip, model
 #                         download, Ollama probe, dashboard stay skipped)
@@ -79,14 +82,16 @@ case "$IDE" in
         ;;
 esac
 
+INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
+RELEASE_VERSION=$(sed -n 's/^VERSION = "\([0-9.]*\)"/\1/p' "$INSTALL_DIR/src/version.py")
+[ -n "$RELEASE_VERSION" ] || { echo "ERROR: release version is missing" >&2; exit 1; }
 echo ""
 echo "======================================================="
-echo "  total-agent-memory v7.0 — Installer (IDE: $IDE)"
+echo "  total-agent-memory v$RELEASE_VERSION — Installer (IDE: $IDE)"
 echo "======================================================="
 echo ""
 
 # -- Config --
-INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Resolution: TAM_MEMORY_DIR > legacy CLAUDE_MEMORY_DIR > ~/.tam > migrate ~/.claude-memory > fresh ~/.tam
 if [ -n "$TAM_MEMORY_DIR" ]; then
     MEMORY_DIR="$TAM_MEMORY_DIR"
@@ -109,12 +114,16 @@ DASHBOARD_SERVICE="$INSTALL_DIR/scripts/dashboard-service.sh"
 
 # Test mode: skip heavy steps (pip, model DL, launchctl, dashboard install)
 TEST_MODE="${INSTALL_TEST_MODE:-0}"
+case "$TEST_MODE" in
+    1|skip-heavy|0) ;;
+    *) echo "ERROR: INSTALL_TEST_MODE must be 0, 1 or skip-heavy" >&2; exit 1 ;;
+esac
 # Finer-grained switch: skip ONLY dependency installation, independent of
 # TEST_MODE, so tests can exercise LaunchAgents without touching pip.
 SKIP_PIP="${INSTALL_SKIP_PIP:-0}"
-if [ "$TEST_MODE" = "1" ]; then
-    SKIP_PIP=1
-fi
+case "$TEST_MODE" in
+    1|skip-heavy) SKIP_PIP=1 ;;
+esac
 # Test-mode override: re-enable just the LaunchAgent install step (Step 5)
 # even under INSTALL_TEST_MODE=1, so a test can verify plist substitution
 # without pip, model download, Ollama probe, or the `claude` CLI running.
@@ -292,7 +301,7 @@ echo "  OK: $MEMORY_DIR"
 echo "-> Step 2: Setting up Python environment..."
 
 if ! command -v python3 &>/dev/null; then
-    echo "  ERROR: python3 not found. Please install Python 3.10+"
+    echo "  ERROR: python3 not found. Please install Python 3.11+"
     exit 1
 fi
 
@@ -300,8 +309,8 @@ PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.versi
 PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
 PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
 
-if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }; then
-    echo "  ERROR: Python 3.10+ required, found $PY_VERSION"
+if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 11 ]; }; then
+    echo "  ERROR: Python 3.11+ required, found $PY_VERSION"
     exit 1
 fi
 
@@ -336,20 +345,20 @@ else
         echo "  Existing venv found, updating dependencies..."
         # shellcheck disable=SC1091
         source "$VENV_DIR/bin/activate"
-        pip install -q --upgrade -r "$INSTALL_DIR/requirements.txt" -r "$INSTALL_DIR/requirements-dev.txt" 2>&1 | tail -1
+        pip install -q --upgrade -r "$INSTALL_DIR/requirements.txt"
     else
         python3 -m venv "$VENV_DIR"
         # shellcheck disable=SC1091
         source "$VENV_DIR/bin/activate"
         pip install -q --upgrade pip
         echo "  Installing dependencies (this may take 2-3 minutes on first run)..."
-        pip install -q -r "$INSTALL_DIR/requirements.txt" -r "$INSTALL_DIR/requirements-dev.txt" 2>&1 | tail -1
+        pip install -q -r "$INSTALL_DIR/requirements.txt"
     fi
     # v9 — editable install registers `[project.scripts]` entry-points
     # (total-agent-memory, tam, tam-lookup, lookup-memory + legacy:
     # claude-total-memory, ctm-lookup) on PATH inside the venv.
     echo "  Installing total-agent-memory package (registers tam / tam-lookup / lookup-memory + legacy claude-total-memory / ctm-lookup)..."
-    pip install -q -e "$INSTALL_DIR" 2>&1 | tail -1 || echo "  WARN: editable install failed; CLI entry-points may be missing."
+    pip install -q -e "$INSTALL_DIR"
     echo "  OK: Dependencies installed"
     PY_PATH="$VENV_DIR/bin/python"
 fi
@@ -358,13 +367,19 @@ SRV_PATH="$INSTALL_DIR/src/server.py"
 
 # -- 3. Pre-download embedding model --
 echo "-> Step 3: Loading embedding model (first time only)..."
-if [ "$TEST_MODE" = "1" ]; then
+if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "skip-heavy" ]; then
     echo "  SKIP (test mode): embedding model pre-download"
 else
-    python3 -c "
-from sentence_transformers import SentenceTransformer
-m = SentenceTransformer('all-MiniLM-L6-v2')
-print(f'  OK: Model ready ({m.get_sentence_embedding_dimension()}d embeddings)')
+    # Warm the model the server actually uses. This warmed the
+    # sentence-transformers fallback (all-MiniLM-L6-v2, English) through the
+    # *system* python3 — the wrong model, in the wrong interpreter, and since
+    # 13.0.2 sentence-transformers is not in the base install at all.
+    "$PY_PATH" -c "
+import os
+from fastembed import TextEmbedding
+name = os.environ.get('FASTEMBED_MODEL', 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
+TextEmbedding(name)
+print(f'  OK: Model ready ({name})')
 " 2>/dev/null || echo "  WARNING: Will download on first use"
 fi
 
@@ -392,7 +407,6 @@ server_entry = {
     'args': [os.environ['SRV_PATH']],
     'env': {
         'TAM_MEMORY_DIR': os.environ['MEMORY_DIR'],
-        'EMBEDDING_MODEL': 'all-MiniLM-L6-v2',
     },
 }
 
@@ -491,7 +505,6 @@ print(json.dumps({
     'args': [os.environ['SRV_PATH']],
     'env': {
         'TAM_MEMORY_DIR': os.environ['MEMORY_DIR'],
-        'EMBEDDING_MODEL': 'all-MiniLM-L6-v2',
     },
 }))
 " PY_PATH="$PY_PATH" SRV_PATH="$SRV_PATH" MEMORY_DIR="$MEMORY_DIR" 2>/dev/null) || payload=""
@@ -769,7 +782,6 @@ tool_timeout_sec = 120.0
 TAM_MEMORY_DIR = "{memory_dir}"
 CLAUDE_MEMORY_DIR = "{memory_dir}"
 MEMORY_MODE = "fast"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 MEMORY_TRIPLE_TIMEOUT_SEC = "120"
 MEMORY_ENRICH_TIMEOUT_SEC = "90"
 MEMORY_REPR_TIMEOUT_SEC = "120"

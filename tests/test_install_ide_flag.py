@@ -38,7 +38,7 @@ def _run_install(home: Path, *args: str, extra_env: dict | None = None):
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["INSTALL_TEST_MODE"] = "1"
-    # Pin memory dir inside sandbox; keep inherited PATH so python3 (3.10+) is found.
+    # Pin memory dir inside sandbox; keep inherited PATH so python3 (3.11+) is found.
     env["CLAUDE_MEMORY_DIR"] = str(home / ".claude-memory")
     env["TAM_MEMORY_DIR"] = env["CLAUDE_MEMORY_DIR"]
     env["XDG_CONFIG_HOME"] = str(home / ".config")
@@ -109,7 +109,11 @@ def test_ide_cursor_writes_cursor_mcp_json(sandbox_home: Path):
     entry = data["mcpServers"]["memory"]
     assert "command" in entry
     assert entry["args"][0].endswith("server.py")
-    assert entry["env"]["EMBEDDING_MODEL"] == "all-MiniLM-L6-v2"
+    assert entry["env"]["TAM_MEMORY_DIR"]
+    # EMBEDDING_MODEL named the sentence-transformers fallback model, which the
+    # base install stopped shipping in 13.0.2. Writing it into an IDE config
+    # pins a model the server cannot load; the fastembed default applies.
+    assert "EMBEDDING_MODEL" not in entry["env"]
 
 
 def test_ide_cursor_equals_form(sandbox_home: Path):

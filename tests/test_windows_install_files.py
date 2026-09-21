@@ -29,17 +29,14 @@ def install_text() -> str:
 # ------------------------------------------------------------------
 
 def test_install_ps1_version_bumped(install_text: str):
-    """Banner must advertise v8.0, not the old v6.0."""
-    assert "v8.0" in install_text, "install.ps1 banner must reference v8.0"
-    assert "v6.0" not in install_text, (
-        "stale 'v6.0' found in install.ps1 - bump the banner"
-    )
+    assert '"src", "version.py"' in install_text
+    assert 'v$ReleaseVersion - Installer' in install_text
 
 
 def test_install_ps1_mentions_total_agent_memory(install_text: str):
     """Project rebranded from 'Claude Total Memory' to 'total-agent-memory'."""
     # Banner line should use the new slug
-    assert re.search(r"total-agent-memory\s+v8\.0", install_text)
+    assert 'total-agent-memory v$ReleaseVersion' in install_text
 
 
 # ------------------------------------------------------------------

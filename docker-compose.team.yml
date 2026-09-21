@@ -1,0 +1,45 @@
+services:
+  team-memory:
+    build: .
+    image: ${TAM_TEAM_IMAGE:-total-agent-memory:14.2.0}
+    init: true
+    restart: unless-stopped
+    extra_hosts:
+      - ${TAM_TEAM_HOST_GATEWAY:-host.docker.internal:host-gateway}
+    command: ["python", "/app/src/team_memory/cli.py", "serve"]
+    environment:
+      PYTHONPATH: /app/src
+      TAM_TEAM_DIR: /team-data
+      MCP_HTTP_HOST: ${TAM_TEAM_BIND:-0.0.0.0}
+      MCP_HTTP_PORT: ${TAM_TEAM_CONTAINER_PORT:-3737}
+      TAM_TEAM_MAX_WORKERS: ${TAM_TEAM_MAX_WORKERS:-3}
+      TAM_TEAM_OPERATION_TIMEOUT: ${TAM_TEAM_OPERATION_TIMEOUT:-120}
+      MEMORY_EMBED_THREADS: ${MEMORY_EMBED_THREADS:-1}
+      MEMORY_TORCH_THREADS: ${MEMORY_TORCH_THREADS:-1}
+      FASTEMBED_CACHE_PATH: /model-cache
+      MEMORY_LLM_PROVIDER: ${MEMORY_LLM_PROVIDER:-ollama}
+      MEMORY_LLM_API_BASE: ${MEMORY_LLM_API_BASE:-}
+      MEMORY_LLM_MODEL: ${MEMORY_LLM_MODEL:-}
+      MEMORY_VISION_MODEL: ${MEMORY_VISION_MODEL:-}
+      MEMORY_LLM_API_KEY: ${MEMORY_LLM_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      MEMORY_LLM_ENABLED: ${MEMORY_LLM_ENABLED:-auto}
+    ports:
+      - "${TAM_TEAM_PUBLISH_HOST:-127.0.0.1}:${TAM_TEAM_PORT:-3738}:${TAM_TEAM_CONTAINER_PORT:-3737}"
+    volumes:
+      - team-memory-data:/team-data
+      - team-model-cache:/model-cache
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$$MCP_HTTP_PORT/healthz >/dev/null"]
+      interval: ${TAM_TEAM_HEALTH_INTERVAL:-30s}
+      timeout: ${TAM_TEAM_HEALTH_TIMEOUT:-5s}
+      retries: ${TAM_TEAM_HEALTH_RETRIES:-3}
+    stop_grace_period: ${TAM_TEAM_STOP_GRACE:-30s}
+
+volumes:
+  team-memory-data:
+    name: ${TAM_TEAM_DATA_VOLUME:-tam-team-memory-data}
+  team-model-cache:
+    name: ${TAM_TEAM_MODEL_VOLUME:-tam-team-model-cache}

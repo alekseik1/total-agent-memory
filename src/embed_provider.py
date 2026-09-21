@@ -168,7 +168,7 @@ class FastEmbedProvider:
             self._model = False
             return None
         try:
-            self._model = TextEmbedding(self._model_name)
+            self._model = TextEmbedding(self._model_name, threads=config.get_embed_threads())
         except Exception as exc:  # noqa: BLE001
             # Loudly: the caller falls back to sentence-transformers, which
             # pulls torch and costs ~400 MB RSS. That used to happen with only
@@ -184,9 +184,10 @@ class FastEmbedProvider:
                 f"  model cache: {cache}"
             )
             LOG(
-                "  falling back to sentence-transformers (pulls torch, ~400 MB "
-                "extra RSS). If the cache was purged, set TAM_MODEL_CACHE to a "
-                "durable path and restart."
+                "  falling back to sentence-transformers, which is NOT in the "
+                'base install any more (pip install "total-agent-memory[rerank]"). '
+                "If the cache was purged, set TAM_MODEL_CACHE to a durable path "
+                "and restart — that is the fix, not installing torch."
             )
             self._model = False
             return None

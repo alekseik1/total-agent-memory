@@ -126,7 +126,7 @@ def test_read_rules_limit_empty_string_returns_none():
 
 
 def test_read_rules_limit_zero_returns_zero():
-    """'0' means empty result, not 'no cap' — must not collapse to None."""
+    """'0' means empty result, not 'no cap' - must not collapse to None."""
     import server
     assert server._read_rules_limit({"MEMORY_RULES_LIMIT": "0"}) == 0
 
@@ -167,13 +167,13 @@ def test_explicit_limit_overrides_env_derived_default(store, monkeypatch):
 
 
 def test_ranking_tiebreak_ignores_rating_status(store):
-    """Rating must not decide a same-priority tie — only recency does.
+    """Rating must not decide a same-priority tie - only recency does.
 
     On the live store 61/75 active rules score exactly 1.0 and unrated rules
     default to 0.5, so success_rate barely distinguishes anything; it just
     means a rule that never got rated always sorts last regardless of how
     often it fired. A newer rule with a perfect success_rate ranks below an
-    even newer unrated rule at the same priority — restoring a
+    even newer unrated rule at the same priority - restoring a
     success_rate-based tie-break would put the rated rule first instead and
     fail this assertion."""
     rated_id = _add_rule(store, "rated rule", priority=5, created_at="2026-04-19T00:00:00Z")
@@ -212,7 +212,7 @@ def test_phase_filter_applied_before_truncation(store):
 
     r = store.get_rules_for_context(project="myproj", phase="build", limit=20)
     ids = [x["id"] for x in r["rules"]]
-    # Identity check, not a count — 20 is also the old hardcoded cap, so a
+    # Identity check, not a count - 20 is also the old hardcoded cap, so a
     # count-only assertion could pass for the wrong reason.
     assert build_rule_id in ids
     assert not (set(plan_ids) & set(ids))
@@ -326,7 +326,7 @@ def test_manage_rule_list_negative_limit_returns_error(store):
 
 def test_manage_rule_list_tiebreak_ignores_rating_status(store):
     """Same tie-break contract as get_rules_for_context: manage_rule(action=
-    "list") must not let success_rate decide a same-priority tie either —
+    "list") must not let success_rate decide a same-priority tie either -
     restoring the score there would independently flip this ordering back."""
     rated_id = _add_rule(store, "rated rule", priority=5, created_at="2026-04-19T00:00:00Z")
     store.db.execute(
@@ -367,7 +367,7 @@ def test_rules_index_lists_exactly_the_omitted_rules_in_order(store):
 
 
 def test_untruncated_response_has_no_rules_index_or_hint(store):
-    """When nothing is cut the response shape is exactly what it was before —
+    """When nothing is cut the response shape is exactly what it was before -
     existing callers and tests depend on the key set."""
     _add_ranked_rules(store, 5)
 
@@ -394,7 +394,7 @@ def test_index_only_rules_do_not_bump_fire_count(store):
 
 
 def test_rules_index_head_is_first_80_chars_of_content(store):
-    """`head` is a plain truncation — newlines kept, nothing reformatted."""
+    """`head` is a plain truncation - newlines kept, nothing reformatted."""
     long_content = "a" * 40 + "\n" + "b" * 60
     kept = _add_rule(store, "kept rule", priority=10)
     cut = _add_rule(store, long_content, priority=1)
@@ -426,7 +426,7 @@ def test_manage_rule_get_returns_full_content_and_bumps_fire_count(store):
 
 
 def test_manage_rule_get_skips_unknown_and_retired_ids(store):
-    """Non-active / non-existent ids are skipped, not fatal — `returned_ids`
+    """Non-active / non-existent ids are skipped, not fatal - `returned_ids`
     tells the caller what actually came back."""
     ids = _add_ranked_rules(store, 3)
     store.manage_rule("sess-limit-test", "retire", id=ids[1])

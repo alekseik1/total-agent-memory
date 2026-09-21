@@ -22,12 +22,19 @@
 
 x-memory-env: &memory-env
   TAM_MEMORY_DIR: /data
-  EMBEDDING_MODEL: all-MiniLM-L6-v2
-  OLLAMA_URL: http://ollama:11434
-  MEMORY_LLM_MODEL: ${MEMORY_LLM_MODEL:-qwen2.5-coder:7b}
-  MEMORY_LLM_ENABLED: auto
-  USE_OLLAMA_EMBED: auto
-  OLLAMA_EMBED_MODEL: nomic-embed-text
+  OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+  MEMORY_LLM_PROVIDER: ${MEMORY_LLM_PROVIDER:-ollama}
+  MEMORY_LLM_API_BASE: ${MEMORY_LLM_API_BASE:-}
+  MEMORY_LLM_API_KEY: ${MEMORY_LLM_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  MEMORY_LLM_MODEL: ${MEMORY_LLM_MODEL:-}
+  MEMORY_VISION_MODEL: ${MEMORY_VISION_MODEL:-}
+  MEMORY_LLM_ENABLED: ${MEMORY_LLM_ENABLED:-auto}
+  MEMORY_EMBED_THREADS: ${MEMORY_EMBED_THREADS:-1}
+  MEMORY_TORCH_THREADS: ${MEMORY_TORCH_THREADS:-1}
+  USE_OLLAMA_EMBED: ${USE_OLLAMA_EMBED:-auto}
+  OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
 
 services:
   # ─────────────────────────────────────────────
@@ -152,7 +159,7 @@ services:
       <<: *memory-env
       REFLECT_DEBOUNCE_SEC: "5"
       REFLECT_INTERVAL_SEC: "3600"
-      # Scheduled full (digest+synthesize) run — same 4x/day cadence as the
+      # Scheduled full (digest+synthesize) run - same 4x/day cadence as the
       # macOS/systemd calendar jobs (02/08/14/20), interval-based here since
       # Docker has no calendar scheduler. Independent of the auto/drain path.
       REFLECT_FULL_INTERVAL_SEC: "21600"

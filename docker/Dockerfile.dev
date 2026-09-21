@@ -1,0 +1,7 @@
+ARG PYTHON_IMAGE=python:3.12-slim
+FROM ${PYTHON_IMAGE}
+WORKDIR /workspace
+COPY requirements.txt requirements-dev.txt ./
+RUN python -m pip install --no-cache-dir -r requirements-dev.txt
+ENV MCP_TRANSPORT=stdio TAM_MEMORY_DIR=/tmp/tam-tests
+CMD ["python", "-m", "pytest", "tests", "-q"]

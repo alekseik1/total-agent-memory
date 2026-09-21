@@ -48,7 +48,7 @@ foreach ($cmd in @("python3", "python")) {
         $ver = & $cmd -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
         if ($ver) {
             $major, $minor = $ver.Split(".")
-            if ([int]$major -ge 3 -and [int]$minor -ge 10) {
+            if ([int]$major -gt 3 -or ([int]$major -eq 3 -and [int]$minor -ge 11)) {
                 $pythonCmd = $cmd
                 Write-Host "  Python $ver found ($cmd)" -ForegroundColor Green
                 break
@@ -58,7 +58,7 @@ foreach ($cmd in @("python3", "python")) {
 }
 
 if (-not $pythonCmd) {
-    Write-Host "  ERROR: Python 3.10+ not found. Install from https://python.org" -ForegroundColor Red
+    Write-Host "  ERROR: Python 3.11+ not found. Install from https://python.org" -ForegroundColor Red
     exit 1
 }
 
@@ -85,9 +85,11 @@ Write-Host "  OK: Dependencies installed" -ForegroundColor Green
 Write-Host "-> Step 3: Loading embedding model (first time only)..." -ForegroundColor Yellow
 try {
     & $VenvPython -c @"
-from sentence_transformers import SentenceTransformer
-m = SentenceTransformer('all-MiniLM-L6-v2')
-print(f'  OK: Model ready ({m.get_sentence_embedding_dimension()}d embeddings)')
+import os
+from fastembed import TextEmbedding
+name = os.environ.get('FASTEMBED_MODEL', 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
+TextEmbedding(name)
+print(f'  OK: Model ready ({name})')
 "@ 2>$null
 } catch {
     Write-Host "  WARNING: Will download on first use" -ForegroundColor DarkYellow
@@ -134,7 +136,6 @@ tool_timeout_sec = 120.0
 
 [mcp_servers.memory.env]
 CLAUDE_MEMORY_DIR = "{memory_dir}"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 # --- End Claude Total Memory ---
 '''
 

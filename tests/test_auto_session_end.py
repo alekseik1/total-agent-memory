@@ -1,7 +1,7 @@
 """The hook's end-of-session capture writes a summary and a session row.
 
 The hook had been calling this script for 664 logged session ends while the
-file did not exist — `hook_run_script` fails silently and the hook logs success
+file did not exist - `hook_run_script` fails silently and the hook logs success
 either way, so nothing was ever written.
 """
 
@@ -102,7 +102,7 @@ def test_a_missing_database_is_reported_not_crashed(tmp_path):
 
 def test_the_deterministic_summary_survives_a_failed_compression(memory_dir, monkeypatch):
     """`session_end` only asks the LLM when `summary` is None, so the fallback
-    cannot be passed alongside it — it is written afterwards instead. Without
+    cannot be passed alongside it - it is written afterwards instead. Without
     that, a compression that yields nothing stores an empty summary."""
     r = _run(
         memory_dir,

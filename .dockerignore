@@ -21,3 +21,4 @@ update.sh
 .env*
 *.db
 *.db-*
+backups/

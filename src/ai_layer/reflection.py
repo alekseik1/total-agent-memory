@@ -25,7 +25,7 @@ async def run_full(
     Mirrors `ReflectionAgent(db, embedder, embed_identity).run_full()` so
     callers that only need a one-shot full pass can do a single import.
     `embed_identity` should be passed whenever the caller built the `embedder`
-    from a live `server.Store()` — otherwise merged rows fall back to
+    from a live `server.Store()` - otherwise merged rows fall back to
     `config`, which can disagree with what actually produced the vector.
     """
     return await ReflectionAgent(

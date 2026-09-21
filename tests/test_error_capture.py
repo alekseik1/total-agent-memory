@@ -7,8 +7,8 @@ import pytest
 
 from error_capture import ErrorCapture
 
-MIGRATION_032 = (
-    Path(__file__).resolve().parent.parent / "migrations" / "032_resolve_learned_errors.sql"
+MIGRATION_038 = (
+    Path(__file__).resolve().parent.parent / "migrations" / "038_resolve_learned_errors.sql"
 )
 
 
@@ -106,7 +106,7 @@ def test_learn_error_with_a_fix_is_resolved_and_stamped(ec, ec_db):
 
 
 def test_learn_error_rejects_empty_fix_instead_of_leaving_the_row_open(ec, ec_db):
-    """fix is a required, validated field — an empty fix never reaches the
+    """fix is a required, validated field - an empty fix never reaches the
     INSERT, so there is no path where learn_error writes an open row."""
     with pytest.raises(ValueError):
         ec.learn_error(**_sample(fix=""))
@@ -213,7 +213,7 @@ def test_rules_for_pattern(ec):
 
 def test_resolve_marks_error_resolved(ec, ec_db):
     # learn_error requires a fix, so it never leaves a row open (see the
-    # migration-032 tests below) — insert an open row directly to exercise
+    # migration-038 tests below) - insert an open row directly to exercise
     # resolve() on its own, e.g. an error logged by another writer.
     cur = ec_db.execute(
         """INSERT INTO errors (session_id, category, severity, description,
@@ -238,7 +238,7 @@ def test_custom_threshold(ec_db):
 
 
 # ──────────────────────────────────────────────
-# Migration 032: resolve learned errors
+# Migration 038: resolve learned errors
 # ──────────────────────────────────────────────
 
 def _insert_learned_error_row(
@@ -261,40 +261,40 @@ def _insert_learned_error_row(
     )
 
 
-def _apply_032(db):
-    db.executescript(MIGRATION_032.read_text())
+def _apply_038(db):
+    db.executescript(MIGRATION_038.read_text())
     db.commit()
 
 
-def test_migration_032_closes_a_learned_error_that_has_a_fix(ec_db):
+def test_migration_038_closes_a_learned_error_that_has_a_fix(ec_db):
     _insert_learned_error_row(ec_db)
     ec_db.commit()
 
-    _apply_032(ec_db)
+    _apply_038(ec_db)
 
     row = ec_db.execute("SELECT status, resolved_at, created_at FROM errors").fetchone()
     assert row["status"] == "resolved"
     assert row["resolved_at"] == row["created_at"]
 
 
-def test_migration_032_leaves_a_fixless_open_error_alone(ec_db):
+def test_migration_038_leaves_a_fixless_open_error_alone(ec_db):
     _insert_learned_error_row(ec_db, fix="")
     ec_db.commit()
 
-    _apply_032(ec_db)
+    _apply_038(ec_db)
 
     row = ec_db.execute("SELECT status, resolved_at FROM errors").fetchone()
     assert row["status"] == "open"
     assert row["resolved_at"] is None
 
 
-def test_migration_032_is_idempotent(ec_db):
+def test_migration_038_is_idempotent(ec_db):
     _insert_learned_error_row(ec_db)
     ec_db.commit()
 
-    _apply_032(ec_db)
+    _apply_038(ec_db)
     first = dict(ec_db.execute("SELECT * FROM errors").fetchone())
-    _apply_032(ec_db)
+    _apply_038(ec_db)
     second = dict(ec_db.execute("SELECT * FROM errors").fetchone())
 
     assert first == second

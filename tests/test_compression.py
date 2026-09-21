@@ -141,7 +141,7 @@ def test_queue_rejects_compressed_that_loses_path(cmp_db):
 
     q = RepresentationsQueue(cmp_db)
     path = "/Users/alice/project/src/server.py"
-    original = f"Edit {path} to fix the bug — do not lose this path. " * 30
+    original = f"Edit {path} to fix the bug - do not lose this path. " * 30
     kid = _add(cmp_db, original)
     q.enqueue(kid)
 

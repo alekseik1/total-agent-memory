@@ -3,8 +3,8 @@
 `Store.embed` falls through FastEmbed → Ollama → SentenceTransformers and
 returns only vectors, so callers read the model name off configuration. With
 Ollama configured but unreachable that wrote rows saying `nomic-embed-text`
-(768-dim) holding 384-dim SentenceTransformer vectors — 30 of them on this
-machine — and cached those vectors under the same wrong name, so the cache's
+(768-dim) holding 384-dim SentenceTransformer vectors - 30 of them on this
+machine - and cached those vectors under the same wrong name, so the cache's
 `expected_model` guard matched and served them back as if they belonged.
 """
 
@@ -30,7 +30,7 @@ class _Embedder:
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    """A Store with no real backends — each test wires the ones it needs."""
+    """A Store with no real backends - each test wires the ones it needs."""
     s = server.Store.__new__(server.Store)
     s.db = sqlite3.connect(":memory:")
     s.db.row_factory = sqlite3.Row

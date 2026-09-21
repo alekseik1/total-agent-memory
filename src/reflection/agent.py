@@ -55,10 +55,10 @@ def phase_errors(report: dict) -> dict[str, str]:
     Every phase swallows its own exceptions and returns them as an `error` key
     (or a `deferred`/`skipped` marker when a dependency is missing), so nothing
     raises out of run_full. Pulling them together is what makes a broken phase
-    visible — without it the only trace is a stderr line nobody reads.
+    visible - without it the only trace is a stderr line nobody reads.
 
     `skipped` is a plain item COUNT in most phases (queue rows dropped because
-    their knowledge record was deleted) — only `fact_merge` uses it as a
+    their knowledge record was deleted) - only `fact_merge` uses it as a
     failure reason string. A numeric `skipped` is healthy-run noise, not an
     error, so it is reported only when it is not a number. `skipped_reason`
     (used by `_run_representations` when it declines to run at all, e.g. no
@@ -68,7 +68,7 @@ def phase_errors(report: dict) -> dict[str, str]:
     `disabled` (used by `_run_fact_merger` when `MEMORY_FACT_MERGE_ENABLED` is
     off) is deliberately NOT one of the markers checked above. A configuration
     choice is not a failure, so a disabled phase must not show up in
-    `phase_errors()` — unlike `skipped_reason`/`error`/`deferred`, which all
+    `phase_errors()` - unlike `skipped_reason`/`error`/`deferred`, which all
     describe circumstances the operator didn't choose.
     """
     found: dict[str, str] = {}
@@ -111,7 +111,7 @@ class ReflectionAgent:
                 `embedder` actually produces. The production caller
                 (`tools/run_reflection.py`) builds its own `server.Store()` to
                 make the embedder and discards it afterwards, so this agent
-                never sees a live Store to ask — without this, merged rows get
+                never sees a live Store to ask - without this, merged rows get
                 stamped from `config`, which can disagree with the Store that
                 really wrote the vector (e.g. `FASTEMBED_MODEL` set without
                 the matching `MEMORY_EMBED_MODEL`).
@@ -319,7 +319,7 @@ class ReflectionAgent:
                 for row in rows:
                     try:
                         # A materialized Python list of floats per record
-                        # doubles memory at scale — _banded_pairs_in_group
+                        # doubles memory at scale - _banded_pairs_in_group
                         # copies it into a float32 ndarray anyway. Load it as
                         # one already.
                         vectors[row["knowledge_id"]] = np.frombuffer(
@@ -413,7 +413,7 @@ class ReflectionAgent:
         """Return a lazily-built server.Store, or None if it cannot be built.
 
         Cached: Store init loads the embedding model, so the merge hook and the
-        embedder must not each pay for their own — including a failed attempt.
+        embedder must not each pay for their own - including a failed attempt.
         `self._store` is `False` once a build has been tried and failed (a
         real sentinel distinct from the "not tried yet" `None`), so a second
         caller in the same run doesn't retry the same expensive failure.
@@ -488,8 +488,8 @@ class ReflectionAgent:
         FactMerger INSERTs straight into `knowledge`, which bypasses everything
         `memory_save` normally does afterwards. Without this hook a merged fact
         gets an FTS row from the table trigger and nothing else: no vector in
-        `embeddings`, so it is invisible to semantic recall, and — because
-        clustering scores an absent vector as 0.0 — it can never be merged
+        `embeddings`, so it is invisible to semantic recall, and - because
+        clustering scores an absent vector as 0.0 - it can never be merged
         again. Returns None when there is no embedder, in which case merging
         still proceeds (FTS-only, same as before).
         """
@@ -506,7 +506,7 @@ class ReflectionAgent:
         # Written on self.db, not store.db: they are separate connections, and
         # under an injected in-memory db they are separate databases entirely.
         #
-        # The name matters — tooling groups by embed_model to detect model drift
+        # The name matters - tooling groups by embed_model to detect model drift
         # and decide what to re-embed, so a placeholder here would quietly
         # exclude merged records from that. Prefer the live Store's answer, and
         # fall back to config when the embedder was injected without one.
@@ -801,17 +801,18 @@ class ReflectionAgent:
             _now(),
         ]
 
-        # Only appended when migration 029 has run: a database that predates the
-        # column must still get its report saved, not lose the whole row. When
-        # the column is missing AND there were real phase errors, log them —
-        # otherwise a pre-029 database drops them with no trace at all, the
-        # exact failure mode 029 exists to end.
+        # Only appended when base_schema.apply_reflection_report_column_migrations
+        # has added the column: a database that predates it must still get its
+        # report saved, not lose the whole row. When the column is missing AND
+        # there were real phase errors, log them - otherwise a pre-migration
+        # database drops them with no trace at all, the exact failure mode the
+        # column exists to end.
         errors = phase_errors(report)
         if self._has_phase_errors_column():
             columns.append("phase_errors")
             values.append(json.dumps(errors))
         elif errors:
-            LOG(f"phase_errors dropped (migration 029 not applied): {errors}")
+            LOG(f"phase_errors dropped (reflection_reports.phase_errors column not present): {errors}")
 
         try:
             self.db.execute(

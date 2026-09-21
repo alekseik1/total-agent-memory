@@ -77,18 +77,15 @@ def test_idempotent_after_redaction():
     assert n1 == 1 and n2 == 0
 
 
-def test_nested_flat_behaviour():
-    # Non-greedy regex takes first </private>, outer wrapper becomes noise.
-    # Verify it doesn't crash and outer content partially survives with flat semantics.
+def test_nested_private_sections_do_not_leak_outer_tail():
     text = "a <private>outer <private>inner</private> tail</private> b"
     cleaned, n = redact_private_sections(text)
-    # First match: <private>outer <private>inner</private>  — non-greedy inner close
-    # Remaining: " tail</private> b"
-    assert n == 1
-    assert "inner" not in cleaned
-    # Second call should not crash and may strip orphan closing tag via no-op
-    cleaned2, n2 = redact_private_sections(cleaned)
-    assert n2 == 0  # no well-formed pair remains
+    assert (cleaned, n) == ("a  b", 1)
+    assert redact_private_sections(cleaned) == (cleaned, 0)
+
+
+def test_unclosed_private_section_redacts_to_end():
+    assert redact_private_sections("public <private>secret") == ("public ", 1)
 
 
 def test_tag_at_string_boundaries():

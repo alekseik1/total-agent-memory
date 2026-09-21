@@ -127,6 +127,21 @@ class ContradictionFn(Protocol):
         ...
 
 
+class ContradictionBatchFn(Protocol):
+    """Batched form of :class:`ContradictionFn`.
+
+    Receives every ``(fact_a, fact_b)`` pair of one pass (already capped
+    at 25) and returns one probability per pair, in order. Lets an LLM
+    backend score the whole cross-product in a single round-trip.
+    """
+
+    def __call__(
+        self,
+        pairs: list[tuple[str, str]],
+    ) -> list[float]:  # pragma: no cover - protocol
+        ...
+
+
 # ──────────────────────────────────────────────
 # Tunables — kept module-level so tests can flip them
 # ──────────────────────────────────────────────
@@ -348,7 +363,8 @@ def negative_retrieve(
     positive_evidence: list[dict],
     *,
     search_fn: SearchFn,
-    contradiction_fn: ContradictionFn,
+    contradiction_fn: ContradictionFn | None = None,
+    contradiction_batch_fn: ContradictionBatchFn | None = None,
     project: str | None = None,
     k: int = 5,
     llm_model: str = DEFAULT_MODEL,
@@ -371,6 +387,9 @@ def negative_retrieve(
     contradiction_fn:
         Pairwise scorer returning the probability that the second fact
         contradicts the first.
+    contradiction_batch_fn:
+        Alternative to ``contradiction_fn``: scores all capped pairs in
+        one call. Exactly one of the two must be supplied.
     project:
         Optional scope passed through to ``search_fn``.
     k:
@@ -389,6 +408,11 @@ def negative_retrieve(
         Always populated. ``decision`` is one of
         ``no_contradiction`` / ``soft_contradict`` / ``hard_contradict``.
     """
+    if (contradiction_fn is None) == (contradiction_batch_fn is None):
+        raise ValueError(
+            "negative_retrieve needs exactly one of contradiction_fn / "
+            "contradiction_batch_fn"
+        )
     q = (question or "").strip()
     cleaned_positives = [
         hit
@@ -459,30 +483,51 @@ def negative_retrieve(
     pos_pool = cleaned_positives[:_MAX_PAIRS_PER_SIDE]
     neg_pool = negatives_clean[:_MAX_PAIRS_PER_SIDE]
 
-    max_score = 0.0
-    best_pair: tuple[str, str] = ("", "")
-    for pos in pos_pool:
-        pos_text = _clean_text(pos)
-        if not pos_text:
-            continue
-        for neg in neg_pool:
-            neg_text = _clean_text(neg)
-            if not neg_text:
-                continue
+    # The inverted query often surfaces the positives themselves; a fact
+    # cannot contradict itself, so identical pairs are never scored.
+    pairs = [
+        (pos_text, neg_text)
+        for pos_text in (_clean_text(p) for p in pos_pool)
+        for neg_text in (_clean_text(n) for n in neg_pool)
+        if pos_text and neg_text and pos_text != neg_text
+    ]
+    if contradiction_batch_fn is not None:
+        try:
+            raw_scores = list(contradiction_batch_fn(pairs)) if pairs else []
+            if len(raw_scores) != len(pairs):
+                raise ValueError("batch scorer returned a score count that does not match the pairs")
+        except Exception as exc:
+            return NegativeEvidenceResult(
+                inverted_query=inverted,
+                negative_evidence=negatives_clean,
+                contradiction_score=0.0,
+                decision="no_contradiction",
+                rationale=(
+                    f"contradiction scoring failed ({type(exc).__name__}); "
+                    f"treating as no contradiction"
+                ),
+            )
+    else:
+        raw_scores = []
+        for pos_text, neg_text in pairs:
             try:
-                raw_score = contradiction_fn(pos_text, neg_text)
+                raw_scores.append(contradiction_fn(pos_text, neg_text))
             except Exception:
                 # One bad scoring call should not poison the rest;
                 # treat it as zero contribution.
-                continue
-            try:
-                score = float(raw_score)
-            except (TypeError, ValueError):
-                continue
-            score = max(0.0, min(1.0, score))
-            if score > max_score:
-                max_score = score
-                best_pair = (pos_text, neg_text)
+                raw_scores.append(None)
+
+    max_score = 0.0
+    best_pair: tuple[str, str] = ("", "")
+    for pair, raw_score in zip(pairs, raw_scores):
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            continue
+        score = max(0.0, min(1.0, score))
+        if score > max_score:
+            max_score = score
+            best_pair = pair
 
     decision = _decide(max_score)
     rationale = _format_rationale(
@@ -499,6 +544,7 @@ def negative_retrieve(
 
 
 __all__ = [
+    "ContradictionBatchFn",
     "ContradictionFn",
     "DEFAULT_MODEL",
     "LLMLike",

@@ -1,4 +1,4 @@
-"""Migration 030 repairs session rows the old session_end never closed.
+"""Migration 036 (formerly 030) repairs session rows the old session_end never closed.
 
 Only sessions that actually produced a summary are closed: one without a
 summary was never ended, and stamping an end time on it would be an invention.
@@ -12,7 +12,7 @@ import pytest
 from base_schema import apply_full_schema
 
 MIGRATION = (
-    Path(__file__).resolve().parent.parent / "migrations" / "030_backfill_session_rows.sql"
+    Path(__file__).resolve().parent.parent / "migrations" / "036_backfill_session_rows.sql"
 )
 
 
@@ -62,7 +62,7 @@ def test_a_session_with_a_summary_is_closed_and_named(db):
 
 
 def test_a_session_without_a_summary_stays_open(db):
-    """It was never ended — the migration must not invent an end time."""
+    """It was never ended - the migration must not invent an end time."""
     _session(db, "s2")
     db.commit()
 
@@ -101,7 +101,7 @@ def test_the_newest_summary_wins_when_a_session_has_several(db):
 
 
 def test_a_summary_that_only_says_general_does_not_overwrite_the_row(db):
-    """'general' in the summary is the same placeholder — not an improvement."""
+    """'general' in the summary is the same placeholder - not an improvement."""
     _session(db, "s5")
     _summary(db, "s5", project="general", branch="")
     db.commit()

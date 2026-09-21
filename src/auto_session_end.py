@@ -9,7 +9,7 @@ returns silently when its target is missing and the hook logs success
 regardless, so automatic end-of-session capture has been a no-op and every
 stored summary came from someone calling the MCP tool by hand.
 
-The session id is the one the hook knows — the Claude Code session (the
+The session id is the one the hook knows - the Claude Code session (the
 transcript's basename). That is not the id the MCP server issues for itself,
 so `SessionContinuity.session_end` creates the session row for it.
 
@@ -31,7 +31,7 @@ from session_continuity import SessionContinuity
 DB_PATH = os.path.join(str(memory_dir()), "memory.db")
 
 # The hook fires on /clear and /compact as well as on exit, and those can land
-# seconds apart. Two rows for one session are not wrong — each is a real end —
+# seconds apart. Two rows for one session are not wrong - each is a real end -
 # but a burst of near-identical ones is noise.
 _DEDUP_WINDOW_SEC = 300
 
@@ -87,7 +87,7 @@ def main() -> int:
         print(f"Memory DB not found at {DB_PATH}", file=sys.stderr)
         return 1
 
-    # Nothing extracted means nothing worth resuming from — a summary saying
+    # Nothing extracted means nothing worth resuming from - a summary saying
     # only "session ended" costs a row and tells the next session nothing.
     if not (a.user_context or "").strip() and not (a.assistant_context or "").strip():
         return 0
@@ -100,7 +100,7 @@ def main() -> int:
             return 0
         fallback = build_summary(a.reason, a.user_context, a.assistant_context)
         # With an LLM reachable, let it write the summary from the session's
-        # own artifacts — the handful of messages the hook could extract is a
+        # own artifacts - the handful of messages the hook could extract is a
         # thin thing to resume from. `session_end` only asks the LLM when
         # `summary` is None (an explicit one always wins), so the deterministic
         # text cannot be passed as a safety net: it would suppress the
@@ -122,7 +122,7 @@ def main() -> int:
             db.commit()
         print(f"session summary {result['id']} for {a.project} ({a.session_id})")
         return 0
-    except Exception as e:  # noqa: BLE001 — a hook must not fail the session end
+    except Exception as e:  # noqa: BLE001 - a hook must not fail the session end
         print(f"auto_session_end failed: {e}", file=sys.stderr)
         return 1
     finally:

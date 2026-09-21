@@ -16,6 +16,9 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from memory_core.timestamps import utc_now
+
 MEMORY_DIR = os.environ.get("CLAUDE_MEMORY_DIR", os.path.expanduser("~/.claude-memory"))
 DB_PATH = os.path.join(MEMORY_DIR, "memory.db")
 
@@ -226,7 +229,7 @@ def save_to_memory(records: list[dict]) -> int:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     saved = 0
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = utc_now()
     session_id = f"analyze_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     for rec in records:

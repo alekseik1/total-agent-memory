@@ -36,7 +36,7 @@ echo "→ running install.sh in sandbox (skip pip/model)"
 HOME="$SANDBOX" \
 INSTALL_TEST_MODE=skip-heavy \
 TAM_MEMORY_DIR="$SANDBOX/.tam" \
-bash "$REPO_ROOT/install.sh" --ide claude-code 2>&1 | tail -5 || true
+bash "$REPO_ROOT/install.sh" --ide claude-code 2>&1 | tail -5
 
 LA_DIR="$SANDBOX/Library/LaunchAgents"
 [ -d "$LA_DIR" ] || { echo "FAIL: $LA_DIR not created"; exit 4; }
@@ -49,9 +49,22 @@ for plist in "$LA_DIR"/*.plist; do
     echo "FAIL: $name has leftover placeholders"
     exit 2
   fi
-  if grep -q "claude-memory-server" "$plist"; then
-    echo "FAIL: $name has hardcoded old checkout name"
-    exit 3
+  # A placeholder actually present in the template must have been replaced
+  # with the value this run handed the installer, not just be absent (which
+  # a substitution that wrote the wrong value would also satisfy).
+  template="$REPO_ROOT/launchagents/$name"
+  if [ -f "$template" ]; then
+    for ph in __INSTALL_DIR__ __MEMORY_DIR__ __HOME__; do
+      case "$ph" in
+        __INSTALL_DIR__) val="$REPO_ROOT" ;;
+        __MEMORY_DIR__) val="$SANDBOX/.tam" ;;
+        __HOME__) val="$SANDBOX" ;;
+      esac
+      if grep -qF "$ph" "$template" && ! grep -qF "$val" "$plist"; then
+        echo "FAIL: $name did not substitute $ph with $val"
+        exit 3
+      fi
+    done
   fi
   # ProgramArguments[0] must exist (the python interpreter path).
   py_path=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null || true)

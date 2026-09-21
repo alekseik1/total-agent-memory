@@ -64,6 +64,34 @@ def test_rerunning_is_a_no_op(runner):
     assert _applied(runner) == first
 
 
+def test_rerunning_leaves_reflection_reports_schema_unchanged(runner):
+    """035/039 (formerly 029/033) rename and drop reflection_reports columns.
+
+    `_apply_sql_migrations` skips a version already recorded in `migrations`,
+    so without forcing it, a second call never actually replays 035/039 -
+    only `apply_reflection_report_column_migrations` (called unconditionally
+    at the end of every `_apply_sql_migrations` run) would exercise anything.
+    Deleting their tracker rows first forces MigrationRunner to genuinely
+    replay both files, which must raise nothing (MigrationRunner has no
+    duplicate-column/no-such-column tolerance for migrations >=
+    TRANSACTIONAL_SCHEMA_VERSION) and leave the resulting column set
+    identical.
+    """
+    runner._apply_sql_migrations()
+    cols_first = {r[1] for r in runner.db.execute("PRAGMA table_info(reflection_reports)").fetchall()}
+
+    runner.db.execute("DELETE FROM migrations WHERE version IN ('035', '039')")
+    runner.db.commit()
+    runner._apply_sql_migrations()
+    cols_second = {r[1] for r in runner.db.execute("PRAGMA table_info(reflection_reports)").fetchall()}
+
+    assert {"035", "039"} <= _applied(runner), "035/039 were not actually replayed"
+
+    assert cols_second == cols_first
+    assert {"edges_strengthened", "clusters_found", "skills_proposed", "phase_errors"} <= cols_second
+    assert not ({"new_nodes", "patterns_found", "skills_refined", "rules_proposed"} & cols_second)
+
+
 def test_preexisting_column_does_not_wedge_the_migration(runner):
     """The 028 lineage case: agent_id already there, tracker empty."""
     runner._apply_sql_migrations()

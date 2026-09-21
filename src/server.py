@@ -17,6 +17,7 @@ Features: BM25 scoring, 3-level progressive disclosure, decay scoring, fuzzy sea
 
 import asyncio
 import json
+import logging
 import math
 import os
 import re
@@ -24,9 +25,11 @@ import sqlite3
 import struct
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Literal
 
 # v11.0 — Apply MEMORY_MODE → derived env defaults BEFORE any downstream
 # module reads `USE_ADVANCED_RAG`, `MEMORY_QUALITY_GATE_ENABLED`, etc. at
@@ -38,11 +41,13 @@ try:
 except Exception as _v11_exc:  # pragma: no cover — never block startup
     sys.stderr.write(f"[memory-mcp] v11 mode resolver skipped: {_v11_exc}\n")
 
+import importlib.util
+
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent, ToolAnnotations
+from mcp.types import TextContent, Tool, ToolAnnotations
 
-import importlib.util
+from memory_core.timestamps import format_utc, utc_now
 
 # chromadb (~70 MB RSS) and sentence_transformers (which pulls in torch,
 # ~450 MB) are *fallback* paths — when fastembed is healthy neither is ever
@@ -50,6 +55,11 @@ import importlib.util
 # `import server` measured 548 MB RSS with all three loaded. find_spec answers
 # "is it installed" without importing; the real import happens at first use.
 # Reported by d.snezhinskiy, who saw a 1.5 GB MCP server on a client machine.
+#
+# Since 13.0.2 sentence_transformers is not even installed by default — it
+# moved to the `rerank` extra — so HAS_ST is normally False and the fallback
+# chain ends at fastembed / Ollama. That is intentional: MEMORY_MODE=fast
+# already forbade the ST branch via MEMORY_ALLOW_OLLAMA_IN_HOT_PATH=false.
 HAS_CHROMA = importlib.util.find_spec("chromadb") is not None
 HAS_ST = importlib.util.find_spec("sentence_transformers") is not None
 
@@ -66,7 +76,13 @@ except ImportError:
     HAS_HTTPX = False
 
 try:
-    from reranker import hyde_expand, rerank_results, analyze_query, multi_hop_expand, mmr_diversify
+    from reranker import (
+        analyze_query,
+        hyde_expand,
+        mmr_diversify,
+        multi_hop_expand,
+        rerank_results,
+    )
     HAS_RERANKER = True
 except ImportError:
     HAS_RERANKER = False
@@ -80,6 +96,8 @@ except ImportError:
 try:
     from temporal_index import (
         ensure_schema as _temporal_index_ensure_schema,
+    )
+    from temporal_index import (
         filter_by_query_date as _temporal_index_filter,
     )
     HAS_TEMPORAL_INDEX = True
@@ -87,13 +105,16 @@ except ImportError:
     HAS_TEMPORAL_INDEX = False
 
 try:
-    from graph_expander import expand as _graph_expand, fetch_records as _graph_fetch
+    from graph_expander import expand as _graph_expand
+    from graph_expander import fetch_records as _graph_fetch
     HAS_GRAPH_EXPAND = True
 except ImportError:
     HAS_GRAPH_EXPAND = False
 
 try:
-    from query_rewriter import is_enabled as _qr_is_enabled, rewrite as _qr_rewrite, has_decomposable_intent as _qr_decomposable
+    from query_rewriter import has_decomposable_intent as _qr_decomposable
+    from query_rewriter import is_enabled as _qr_is_enabled
+    from query_rewriter import rewrite as _qr_rewrite
     HAS_QUERY_REWRITER = True
 except ImportError:
     HAS_QUERY_REWRITER = False
@@ -110,10 +131,12 @@ except ImportError:
 
 from base_schema import (  # noqa: E402
     apply_core_column_migrations,
+    apply_reflection_report_column_migrations,
     apply_self_improvement_tables,
     base_schema_sql,
 )
 from paths import memory_dir as _resolve_memory_dir  # noqa: E402
+
 MEMORY_DIR = _resolve_memory_dir()
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 FASTEMBED_MODEL = os.environ.get("FASTEMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
@@ -133,7 +156,7 @@ DB_JOURNAL_SIZE_LIMIT_BYTES = 48 * 1024 * 1024
 # 8-10 concurrent MCP sessions plus the dashboard service contend for the
 # single writer lock; 5000ms was too tight and surfaced as "database is
 # locked" from memory_save. 15000ms absorbs realistic contention without
-# reading as a hang to the caller — do not raise further.
+# reading as a hang to the caller - do not raise further.
 DB_BUSY_TIMEOUT_MS = 15000
 # Short timeout for the opportunistic startup checkpoint attempt only: fail
 # fast if another reader holds a snapshot rather than stalling startup.
@@ -147,7 +170,7 @@ def _read_rules_limit(env=None):
         value = int(raw)
     except ValueError:
         sys.stderr.write(
-            f"[memory-mcp] Invalid MEMORY_RULES_LIMIT={raw!r} — ignoring, no cap applied\n"
+            f"[memory-mcp] Invalid MEMORY_RULES_LIMIT={raw!r} - ignoring, no cap applied\n"
         )
         return None
     return value if value >= 0 else None
@@ -157,13 +180,13 @@ RULES_CONTEXT_LIMIT = _read_rules_limit()  # None = no cap
 
 # Rule ranking does NOT tie-break on success_rate/rated-ness. Measured on the
 # live store: 75 active rules, 24653 fires, 1519 ratings, of which only 6 are
-# failures — 61 rules score exactly 1.0, and unrated rules default to a 0.5
+# failures - 61 rules score exactly 1.0, and unrated rules default to a 0.5
 # stand-in, so the "score" mostly just encodes whether a rule happened to get
 # rated, not any real quality signal. Priority 9 is oversubscribed (40 rules
 # for the 14 slots a limit=22 slice leaves after priority 10), so this
 # tie-break decides real delivery: sorting on it let two unrated, heavily
 # fired rules (200+ fires each) lose to rated peers with indistinguishable
-# scores. `created_at DESC` is used instead — deterministic, no pseudo-signal.
+# scores. `created_at DESC` is used instead - deterministic, no pseudo-signal.
 
 # v10 — importance multipliers applied to the final recall score so a
 # `critical` decision outranks ten `medium` observations at the same RRF
@@ -261,7 +284,7 @@ PRIVACY_TAG_RE = re.compile(r'<private>.*?</private>', re.DOTALL)
 # ═══════════════════════════════════════════════════════════
 
 class Store:
-    def __init__(self):
+    def __init__(self, connection_factory: Callable[..., sqlite3.Connection] = sqlite3.Connection):
         for d in ["raw", "chroma", "transcripts", "queue", "backups", "extract-queue"]:
             (MEMORY_DIR / d).mkdir(parents=True, exist_ok=True)
 
@@ -276,8 +299,10 @@ class Store:
         # within a transaction" / "no transaction active". WAL and
         # busy_timeout solve contention *between* connections, not this. The
         # enrichment worker therefore opens its own connection to db_path.
-        self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self.db = sqlite3.connect(str(self.db_path), check_same_thread=False, factory=connection_factory)
         self.db.row_factory = sqlite3.Row
+        from memory_core.embeddings import EmbeddingProvider
+        self.evidence_embedder = EmbeddingProvider()
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
         # Avoid SQLITE_BUSY when reflection runner / dashboard hold reader locks.
@@ -306,6 +331,11 @@ class Store:
         self._migrate()
         self._apply_sql_migrations()
         self._check_fts()
+
+        from memory_core.vector_search import DEFAULT_VECTOR_CACHE_BYTES, VectorSearch
+        self._vector_search = VectorSearch(
+            self.db, max_cache_bytes=int(os.environ.get("MEMORY_VECTOR_CACHE_BYTES", DEFAULT_VECTOR_CACHE_BYTES)),
+        )
 
         self.chroma = None
         # v11 §J — per-space Chroma collections so different embedding-space
@@ -384,13 +414,16 @@ class Store:
     def embedder(self):
         if self._embedder is None and HAS_ST:
             try:
+                from cpu_budget import configure_torch_threads
+                configure_torch_threads()
                 from sentence_transformers import (  # noqa: PLC0415 — deferred
                     SentenceTransformer,
                 )
 
                 self._embedder = SentenceTransformer(EMBEDDING_MODEL)
-            except Exception:
-                pass
+            except Exception as error:
+                logging.getLogger(__name__).warning('SentenceTransformer initialization failed',
+                                                    extra={'error_type': type(error).__name__})
         return self._embedder
 
     @property
@@ -398,7 +431,7 @@ class Store:
         """Lazy-init FastEmbed model."""
         if self._fastembed_model is None and HAS_FASTEMBED:
             try:
-                self._fastembed_model = TextEmbedding(FASTEMBED_MODEL)
+                self._fastembed_model = TextEmbedding(FASTEMBED_MODEL, threads=_v11_config.get_embed_threads())
                 LOG(f"FastEmbed: loaded {FASTEMBED_MODEL}")
             except Exception as e:
                 LOG(f"FastEmbed: init failed ({e})")
@@ -532,7 +565,7 @@ class Store:
 
         try:
             row = self.db.execute(
-                "SELECT embed_dim FROM embeddings LIMIT 1"
+                "SELECT embed_dim FROM embeddings WHERE COALESCE(embedding_space, 'text')='text' LIMIT 1"
             ).fetchone()
         except sqlite3.Error:
             return  # table not ready — nothing to guard
@@ -655,7 +688,7 @@ class Store:
         that ran are not the same thing. Labelling rows with the configured
         name wrote 30 rows reading `nomic-embed-text` (768-dim) that hold
         384-dim SentenceTransformer vectors, made on days the Ollama tunnel
-        was down — and `embed_set` cached them under that name too, so the
+        was down - and `embed_set` cached them under that name too, so the
         cache's `expected_model` guard matched and later served vectors from
         the wrong space as if they were the right ones. Callers that record or
         cache an identity must take it from here, never from configuration.
@@ -812,7 +845,7 @@ class Store:
         """
         binary_blob = self._quantize_binary(embedding)
         float32_blob = self._float32_to_blob(embedding)
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         self.db.execute("""
             INSERT OR REPLACE INTO embeddings (
                 knowledge_id, binary_vector, float32_vector,
@@ -886,6 +919,7 @@ class Store:
                     branch=payload.get("branch", "") or "",
                     skip_dedup=False,
                     filter_name=payload.get("filter_name"),
+                    source_format=payload.get("source_format", "auto"),
                     importance=payload.get("importance", "medium"),
                     skip_quality=True,           # don't re-score on replay
                     coref=False,                 # don't re-rewrite on replay
@@ -904,34 +938,130 @@ class Store:
         except Exception as exc:
             LOG(f"outbox reconcile skipped: {exc}")
 
-    def _binary_search(self, query_embedding, n_candidates=50, project=None, n_results=10,
-                       embedding_spaces=None, db=None):
-        """Two-level binary quantization search: Hamming pre-filter → cosine re-rank.
+    def _search_spaces(self, query, *, project=None, spaces=None, limit=10, kind="all", branch=None):
+        from memory_core.embeddings import EmbeddingProvider
+        from memory_core.telemetry import op_timer
+        from memory_core.vector_math import (
+            BINARY_CANDIDATE_MULTIPLIER,
+            MAX_BINARY_CANDIDATES,
+            MIN_BINARY_CANDIDATES,
+        )
 
-        v11 Phase 6b — `embedding_spaces` (list[str] | None) restricts the
-        candidate pool to rows tagged with one of the listed spaces.
-        Pre-v11 rows were backfilled to `embedding_space='text'` by
-        migration 021, so the filter is safe on legacy data.
+        groups = self._vector_search.groups(project)
+        rankings = {}
+        query_vectors = {}
+        self._semantic_diagnostics = []
+        for space, model, dimension in groups:
+            if spaces and space not in spaces:
+                continue
+            try:
+                with op_timer("search_space_ms"):
+                    if space == "text":
+                        actual_model = self._active_embed_model_name()
+                    else:
+                        provider = getattr(self, "_v11_embed_provider", None)
+                        if provider is None:
+                            provider = EmbeddingProvider()
+                            self._v11_embed_provider = provider
+                        actual_model = provider.active_model(space)
+                    if actual_model != model:
+                        raise ValueError(f"Embedding model changed for {space}; re-embed required")
+                    uses_store = space == "text" or (
+                        self._embed_mode == "fastembed" and actual_model == self._active_embed_model_name()
+                    )
+                    vector_key = ("store" if uses_store else space, actual_model)
+                    if vector_key not in query_vectors:
+                        if uses_store:
+                            vectors = self.embed([query])
+                            query_vectors[vector_key] = vectors[0] if vectors else []
+                        else:
+                            query_vectors[vector_key] = provider.embed_query(query, space=space)
+                    vector = query_vectors[vector_key]
+                    if len(vector) != dimension:
+                        raise ValueError(f"Embedding model changed for {space}; re-embed required")
+                    rankings[space] = self._binary_search(
+                        vector, n_candidates=max(limit, MIN_BINARY_CANDIDATES, min(MAX_BINARY_CANDIDATES, limit * BINARY_CANDIDATE_MULTIPLIER)), project=project,
+                        n_results=limit, embedding_spaces=[space], embedding_model=model,
+                        exact_small_pool=True, kind=kind, branch=branch,
+                    )
+            except Exception as error:  # noqa: BLE001 — report failed spaces while other tiers remain usable
+                self._semantic_diagnostics.append({"space": space, "error": str(error)})
+                LOG(f"semantic space {space} unavailable: {error}")
+        if len(rankings) == 1:
+            return next(iter(rankings.values()))
+        scores = {}
+        for hits in rankings.values():
+            for rank, (kid, _) in enumerate(hits, 1):
+                scores[kid] = scores.get(kid, 0.0) + 1.0 / (60 + rank)
+        return sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
+
+    def _binary_search(self, query_embedding, n_candidates=50, project=None, n_results=10,
+                       embedding_spaces=None, embedding_model=None, exact_small_pool=False,
+                       kind="all", branch=None, db=None):
+        """Two-level binary quantization search over cached vector pools.
+
+        v11 Phase 6b - `embedding_spaces` restricts the candidate pool to
+        rows tagged with one of the listed spaces. Pre-v11 rows were
+        backfilled to `embedding_space='text'` by migration 021, so the
+        filter is safe on legacy data.
 
         `db` lets a caller on another thread (e.g. the enrichment worker)
-        pass its own Connection instead of reading through `self.db` —
-        reading the main thread's Connection from a worker thread is a
-        dirty read: an uncommitted INSERT on `self.db` is visible here
-        until rollback, then vanishes.
+        read through its own Connection instead of `self.db` - reading the
+        main thread's Connection from a worker thread is a dirty read: an
+        uncommitted INSERT on `self.db` is visible here until rollback,
+        then vanishes. `self._vector_search` caches vector pools keyed to
+        a single Connection, so a caller-supplied `db` bypasses that cache
+        via `_binary_search_via_connection` instead.
+        """
+        from memory_core.vector_math import EXACT_VECTOR_SCAN_LIMIT
+        from memory_core.vector_search import VectorScope
+
+        if db is not None:
+            if embedding_model or kind != "all" or branch:
+                raise NotImplementedError(
+                    "_binary_search(db=...) does not support embedding_model/kind/branch - "
+                    "no caller needs them on this path today; add support to "
+                    "_binary_search_via_connection before passing one here."
+                )
+            return self._binary_search_via_connection(
+                db, query_embedding, n_candidates=n_candidates, project=project,
+                n_results=n_results, embedding_spaces=embedding_spaces,
+            )
+
+        scope = VectorScope(
+            dimension=len(query_embedding), project=project,
+            spaces=tuple(sorted(embedding_spaces or ())), model=embedding_model,
+            kind=kind, branch=branch,
+        )
+        return self._vector_search.search(
+            query_embedding, scope, candidates=n_candidates, limit=n_results,
+            exact_limit=int(os.environ.get("MEMORY_VECTOR_EXACT_LIMIT", EXACT_VECTOR_SCAN_LIMIT)) if exact_small_pool else 0,
+        )
+
+    def _binary_search_via_connection(self, conn, query_embedding, *, n_candidates=50,
+                                       project=None, n_results=10, embedding_spaces=None):
+        """Uncached Hamming pre-filter + cosine re-rank through an explicit Connection.
+
+        Only used by `_binary_search` when a caller supplies `db` - see that
+        docstring; that caller refuses `embedding_model`/`kind`/`branch` before
+        reaching here, so this method does not accept them. Duplicates the
+        pre-v14 `_binary_search` body rather than threading a Connection
+        override through `self._vector_search`'s pool cache, which is keyed
+        to a single Connection and not safe to share across threads. The
+        `embed_dim` and `embedding_space` filters mirror `VectorScope.sql()`
+        so this path can't silently return results for the wrong vector
+        width or embedding space.
         """
         import numpy as np
 
-        conn = db if db is not None else self.db
-
-        # 1. Load binary vectors for active records.
-        conds = ["k.status='active'"]
-        params: list = []
+        conds = ["k.status='active'", "e.embed_dim=?"]
+        params: list = [len(query_embedding)]
         if project:
             conds.append("k.project=?")
             params.append(project)
         if embedding_spaces:
             ph = ",".join("?" * len(embedding_spaces))
-            conds.append(f"e.embedding_space IN ({ph})")
+            conds.append(f"COALESCE(e.embedding_space,'text') IN ({ph})")
             params.extend(embedding_spaces)
         sql = (
             "SELECT e.knowledge_id, e.binary_vector "
@@ -946,15 +1076,12 @@ class Store:
         kid_list = [r[0] for r in rows]
         bin_vecs = np.array([np.frombuffer(r[1], dtype=np.uint8) for r in rows])
 
-        # 2. Quantize query
         q_binary = np.frombuffer(self._quantize_binary(query_embedding), dtype=np.uint8)
 
-        # 3. Hamming distance via XOR + popcount lookup table
         popcount_lut = np.array([bin(i).count('1') for i in range(256)], dtype=np.int32)
         xor_result = np.bitwise_xor(bin_vecs, q_binary)
         hamming_distances = popcount_lut[xor_result].sum(axis=1)
 
-        # 4. Top-N candidates (lowest Hamming distance).
         # argpartition requires kth STRICTLY < N, so when the candidate pool is
         # smaller than n_candidates we just take everything.
         n_cand = min(n_candidates, len(kid_list))
@@ -963,7 +1090,6 @@ class Store:
         else:
             top_indices = np.arange(len(kid_list))
 
-        # 5. Load float32 vectors for candidates → cosine re-rank
         candidate_kids = [int(kid_list[i]) for i in top_indices]
         placeholders = ",".join("?" * len(candidate_kids))
         f32_rows = conn.execute(
@@ -980,7 +1106,6 @@ class Store:
             cos_sim = float(np.dot(q_vec, vec) / (q_norm * np.linalg.norm(vec) + 1e-10))
             scored.append((kid, cos_sim))
 
-        # 6. Sort by cosine similarity (descending), return top-k
         scored.sort(key=lambda x: -x[1])
         return scored[:n_results]
 
@@ -1081,8 +1206,8 @@ class Store:
         from "001_v5_schema.sql") is used as the version key. Safe to run at
         every startup — already-applied migrations are skipped.
         """
-        from pathlib import Path as _Path
         import datetime as _dt
+        from pathlib import Path as _Path
 
         migrations_dir = _Path(__file__).resolve().parent.parent / "migrations"
         if not migrations_dir.is_dir():
@@ -1104,6 +1229,32 @@ class Store:
         )
         self.db.commit()
 
+        # v14.2.0 renumbered the fork's own 029-033 migrations to 035-039
+        # because upstream claimed those five keys for its own migrations
+        # (029_atomic_facts .. 033_evidence_passages). A database that ran
+        # the fork's OLD migrations under 029-033 still carries tracker rows
+        # under those keys, which would make upstream's real 029-033 look
+        # already-applied and get silently skipped below, then crash
+        # 034_canonical_timestamps ("no such trigger: atomic_source_update").
+        # Delete those rows before the `applied` set is computed - matched by
+        # description, not by version alone, so a database that never ran the
+        # fork's old migrations is untouched. Losing these rows is safe:
+        # 035/039 are now PRAGMA-guarded no-ops (see their file comments) and
+        # 036-038 are idempotent UPDATE/INSERT-WHERE-NOT-EXISTS.
+        renumbered_fork_migrations = {
+            "029": "reflection phase errors",
+            "030": "backfill session rows",
+            "031": "backfill orphan session rows",
+            "032": "resolve learned errors",
+            "033": "reflection report stat names",
+        }
+        for old_version, old_description in renumbered_fork_migrations.items():
+            self.db.execute(
+                "DELETE FROM migrations WHERE version=? AND description=?",
+                (old_version, old_description),
+            )
+        self.db.commit()
+
         applied = {
             r[0] for r in self.db.execute("SELECT version FROM migrations").fetchall()
         }
@@ -1115,12 +1266,25 @@ class Store:
             if version in applied:
                 continue
             description = stem[len(version) + 1 :].replace("_", " ") or stem
-            script = sql_path.read_text()
+            script = sql_path.read_text(encoding="utf-8")
+            from memory_core.schema_migration import (
+                TRANSACTIONAL_SCHEMA_VERSION,
+                Migration,
+                MigrationRunner,
+            )
+            if int(version) >= TRANSACTIONAL_SCHEMA_VERSION:
+                MigrationRunner(self.db).apply(Migration(version, description, script))
+                LOG(f"Applied migration {version}: {description}")
+                continue
             try:
                 self.db.executescript(script)
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e).lower():
                     LOG(f"Migration {version} failed: {e}")
+                    # executescript commits as it goes, so the statements
+                    # before the failing one are already persisted; this
+                    # migration retries next startup against a
+                    # partially-applied schema, not a clean one.
                     continue  # don't mark applied — will retry next startup
                 # SQLite has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS, so a
                 # DB where the column already exists (restored backup, column
@@ -1142,6 +1306,14 @@ class Store:
             )
             self.db.commit()
             LOG(f"Applied migration {version}: {description}")
+
+        # reflection_reports is created by migration 001, inside the loop
+        # above, so this can only run after the loop -- see the docstring on
+        # apply_reflection_report_column_migrations for why it cannot live in
+        # apply_core_column_migrations (called from _migrate(), before this
+        # method runs).
+        apply_reflection_report_column_migrations(self.db, LOG)
+        self.db.commit()
 
     def _replay_migration_skipping_existing(self, script: str, version: str) -> bool:
         """Re-run `script` one statement at a time, tolerating existing columns.
@@ -1215,15 +1387,15 @@ class Store:
         return dict(r) if r else None
 
     def raw_append(self, sid, entry):
-        entry["_ts"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        entry["_ts"] = utc_now()
         p = MEMORY_DIR / "raw" / f"{sid}.jsonl"
-        with open(p, "a") as f:
+        with open(p, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
     def session_start(self, sid, project="general", branch=""):
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         self.db.execute(
             "INSERT OR IGNORE INTO sessions (id,started_at,project,branch) VALUES (?,?,?,?)",
             (sid, now, project, branch))
@@ -1296,7 +1468,7 @@ class Store:
                         context="", branch="", skip_dedup=False, filter_name=None,
                         importance="medium", skip_quality=False, coref=None,
                         agent_id=None, parent_agent_id=None,
-                        _from_outbox=False):
+                        _from_outbox=False, source_format: Literal['auto', 'conversation'] = 'auto'):
         """Save knowledge. Returns
         ``(record_id, was_deduplicated, was_redacted, private_sections, quality_meta)``.
 
@@ -1319,7 +1491,9 @@ class Store:
         try:
             from memory_core.telemetry import op_timer as _v11_op_timer
         except Exception:
-            from contextlib import nullcontext as _v11_op_timer  # type: ignore[assignment]
+            from contextlib import (
+                nullcontext as _v11_op_timer,  # type: ignore[assignment]
+            )
 
             def _v11_op_timer(_name):  # type: ignore[no-redef]
                 from contextlib import nullcontext
@@ -1332,39 +1506,20 @@ class Store:
                 filter_name=filter_name, importance=importance,
                 skip_quality=skip_quality, coref=coref,
                 agent_id=agent_id, parent_agent_id=parent_agent_id,
-                _from_outbox=_from_outbox,
+                _from_outbox=_from_outbox, source_format=source_format,
             )
 
     def _save_knowledge_impl(self, sid, content, ktype, project="general", tags=None,
                               context="", branch="", skip_dedup=False, filter_name=None,
                               importance="medium", skip_quality=False, coref=None,
                               agent_id=None, parent_agent_id=None,
-                              _from_outbox=False):
+                              _from_outbox=False, source_format: Literal['auto', 'conversation'] = 'auto'):
         """Underlying implementation; wrapped by `save_knowledge` for telemetry."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-        # v10 — Outbox / WriteIntent. Persist the original payload before
-        # any work so a mid-save crash is recoverable. _from_outbox=True
-        # signals a replay from the reconciler — skip intent creation
-        # to avoid an infinite intent → replay → intent loop.
-        intent = None
-        if not _from_outbox:
-            try:
-                import outbox as _ob
-                intent = _ob.create_intent(
-                    self.db,
-                    payload={
-                        "sid": sid, "content": content, "ktype": ktype,
-                        "project": project, "tags": list(tags or []),
-                        "context": context or "", "branch": branch or "",
-                        "filter_name": filter_name, "importance": importance,
-                        "agent_id": agent_id, "parent_agent_id": parent_agent_id,
-                    },
-                    session_id=sid, content=content, ktype=ktype, project=project,
-                )
-            except Exception as e:
-                LOG(f"outbox create_intent skipped: {e}")
-                intent = None
+        if source_format not in ('auto', 'conversation'):
+            raise ValueError('Unsupported source format')
+        if source_format == 'conversation' and filter_name:
+            raise ValueError('Conversation sources cannot use a destructive content filter')
+        now = utc_now()
 
         # Inline <private>...</private> tag redaction (P0.1) — BEFORE autofilter/dedup/sanitize
         private_sections = 0
@@ -1384,11 +1539,11 @@ class Store:
                 except Exception as e:
                     LOG(f"privacy_counters update error: {e}")
         except Exception as e:
-            LOG(f"private-tag redaction error: {e}")
+            raise ValueError("Private content redaction failed; nothing was persisted") from e
 
         # Optional content filter (token-saving preprocessor)
         # Auto-detect filter when caller didn't specify one.
-        if not filter_name:
+        if not filter_name and source_format == 'auto':
             try:
                 from autofilter import detect_filter
                 filter_name = detect_filter(content)
@@ -1400,7 +1555,9 @@ class Store:
         if filter_name:
             try:
                 from pathlib import Path as _Path
-                from content_filter import load_filter_config, filter_with_stats as _fws
+
+                from content_filter import filter_with_stats as _fws
+                from content_filter import load_filter_config
                 cfg_path = _Path(__file__).resolve().parent.parent / "filters" / f"{filter_name}.toml"
                 if cfg_path.exists():
                     cfg = load_filter_config(cfg_path)
@@ -1422,6 +1579,29 @@ class Store:
         context, redacted_x = self._sanitize_content(context)
         was_redacted = redacted_c or redacted_x
 
+        # Persist only the sanitized replay payload. _from_outbox=True
+        # signals a replay from the reconciler — skip intent creation
+        # to avoid an infinite intent → replay → intent loop.
+        intent = None
+        if not _from_outbox:
+            try:
+                import outbox as _ob
+                intent = _ob.create_intent(
+                    self.db,
+                    payload={
+                        "sid": sid, "content": content, "ktype": ktype,
+                        "project": project, "tags": list(tags or []),
+                        "context": context or "", "branch": branch or "",
+                        "filter_name": filter_name, "importance": importance,
+                        "source_format": source_format,
+                        "agent_id": agent_id, "parent_agent_id": parent_agent_id,
+                    },
+                    session_id=sid, content=content, ktype=ktype, project=project,
+                )
+            except (sqlite3.Error, ValueError, TypeError) as e:
+                LOG(f"outbox create_intent skipped: {e}")
+                intent = None
+
         # v10 — Coreference rewrite (opt-in). Expands pronouns/deictics in
         # the content using the last N records from the same session as
         # context, so semantic search later returns a self-contained
@@ -1430,7 +1610,8 @@ class Store:
         # MEMORY_COREF_ENABLED=true. Always falls through on error.
         try:
             from coref_resolver import resolve as _coref_resolve
-            cr = _coref_resolve(content, db=self.db, session_id=sid, coref=coref)
+            cr = _coref_resolve(content, db=self.db, session_id=sid, coref=coref,
+                               project=project)
             if cr.decision == "rewritten":
                 LOG(f"coref rewritten record (latency_ms={cr.latency_ms})")
                 content = cr.content
@@ -1490,7 +1671,7 @@ class Store:
         quality_meta: dict | None = None
         if not skip_quality and not _async_enrich:
             try:
-                from quality_gate import score_quality, log_decision
+                from quality_gate import log_decision, score_quality
                 score = score_quality(content, ktype=ktype, project=project)
                 quality_meta = {
                     "decision": score.decision,
@@ -1537,6 +1718,8 @@ class Store:
         if not skip_dedup:
             dup_id = self._find_duplicate(content, ktype, project)
             if dup_id:
+                if source_format == 'conversation':
+                    self.db.execute("UPDATE knowledge SET source_format='conversation' WHERE id=?", (dup_id,))
                 self.db.execute("UPDATE knowledge SET last_confirmed=? WHERE id=?", (now, dup_id))
                 self.db.commit()
                 LOG(f"Dedup: updated last_confirmed for id={dup_id}")
@@ -1556,10 +1739,10 @@ class Store:
         cur = self.db.execute("""
             INSERT INTO knowledge (session_id,type,content,context,project,tags,source,confidence,
                                    created_at,last_confirmed,recall_count,branch,importance,
-                                   agent_id,parent_agent_id)
-            VALUES (?,?,?,?,?,?,'explicit',1.0,?,?,0,?,?,?,?)
+                                   agent_id,parent_agent_id,source_format)
+            VALUES (?,?,?,?,?,?,'explicit',1.0,?,?,0,?,?,?,?,?)
         """, (sid, ktype, content, context, project, json.dumps(tags or []), now, now,
-              branch or "", importance_value, agent_id, parent_agent_id))
+              branch or "", importance_value, agent_id, parent_agent_id, source_format))
         self.db.commit()
         rid = cur.lastrowid
 
@@ -1591,10 +1774,12 @@ class Store:
         try:
             from memory_core.classifier import classify as _v11_classify
             from memory_core.embedding_spaces import (
-                resolve_space as _v11_resolve_space,
                 model_for_space as _v11_model_for_space,
             )
-            _cls = _v11_classify(content)
+            from memory_core.embedding_spaces import (
+                resolve_space as _v11_resolve_space,
+            )
+            _cls = _v11_classify(content, source_format=source_format)
             _v11_content_type = _cls.type
             _v11_language = _cls.language
             _v11_space = _v11_resolve_space(_cls.type, _cls.language)
@@ -1778,11 +1963,19 @@ class Store:
         if not _async_enrich:
             try:
                 from contradiction_detector import (
-                    should_run as _cd_should_run,
-                    detect_contradictions as _cd_detect,
-                    production_candidates_query as _cd_fetch,
-                    production_llm_call as _cd_llm,
                     apply_and_log as _cd_apply,
+                )
+                from contradiction_detector import (
+                    detect_contradictions as _cd_detect,
+                )
+                from contradiction_detector import (
+                    production_candidates_query as _cd_fetch,
+                )
+                from contradiction_detector import (
+                    production_llm_call as _cd_llm,
+                )
+                from contradiction_detector import (
+                    should_run as _cd_should_run,
                 )
                 ok, reason = _cd_should_run(ktype)
                 if ok and embs:
@@ -1865,11 +2058,11 @@ class Store:
 
     def bump_recall(self, ids):
         """Strengthen memories that are recalled (spaced repetition effect)."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         for kid in ids:
             self.db.execute(
-                "UPDATE knowledge SET recall_count=recall_count+1, last_recalled=?, last_confirmed=? WHERE id=?",
-                (now, now, kid))
+                "UPDATE knowledge SET recall_count=recall_count+1, last_recalled=? WHERE id=?",
+                (now, kid))
         self.db.commit()
 
     # ── Consolidation ──
@@ -1903,7 +2096,7 @@ class Store:
     def consolidate_group(self, sid, group):
         """Merge a group of similar records: keep longest, supersede rest."""
         longest = max(group, key=lambda r: len(r["content"]))
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         self.db.execute("UPDATE knowledge SET last_confirmed=? WHERE id=?", (now, longest["id"]))
         merged_ids = []
         for r in group:
@@ -1926,8 +2119,8 @@ class Store:
     def apply_retention(self):
         """Move old unconfirmed records: active→archived→purged."""
         now = datetime.now(timezone.utc)
-        archive_cutoff = (now - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat().replace("+00:00", "Z")
-        purge_cutoff = (now - timedelta(days=PURGE_AFTER_DAYS)).isoformat().replace("+00:00", "Z")
+        archive_cutoff = format_utc(now - timedelta(days=ARCHIVE_AFTER_DAYS))
+        purge_cutoff = format_utc(now - timedelta(days=PURGE_AFTER_DAYS))
 
         archived = self.db.execute("""
             UPDATE knowledge SET status='archived'
@@ -1970,13 +2163,18 @@ class Store:
                     r["tags"] = json.loads(r["tags"])
                 except Exception:
                     pass
-        sessions = self.q("SELECT * FROM sessions ORDER BY started_at")
+        sessions = self.q("SELECT * FROM sessions WHERE (? IS NULL OR project=?) ORDER BY started_at",
+                          (project, project))
+        relations = self.q("""SELECT rel.* FROM relations rel
+            JOIN knowledge a ON a.id=rel.from_id JOIN knowledge b ON b.id=rel.to_id
+            WHERE a.status='active' AND b.status='active'
+            AND (? IS NULL OR (a.project=? AND b.project=?))""", (project, project, project))
         return {
             "version": "2.1",
-            "exported_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "exported_at": utc_now(),
             "knowledge": rows,
             "sessions": sessions,
-            "relations": self.q("SELECT * FROM relations"),
+            "relations": relations,
         }
 
     # ── Version History ──
@@ -2016,21 +2214,25 @@ class Store:
         rec = self.q1("SELECT * FROM knowledge WHERE id=?", (kid,))
         if not rec:
             return None
+        spaces = [r[0] for r in self.db.execute(
+            "SELECT DISTINCT embedding_space FROM embeddings WHERE knowledge_id=?", (kid,))]
         self.db.execute("UPDATE knowledge SET status='deleted' WHERE id=?", (kid,))
         self._delete_embedding(kid)
         self.db.commit()
-        if self.chroma and not self._check_binary_search():
-            try:
-                self.chroma.delete(ids=[str(kid)])
-            except Exception:
-                pass
+        for space in {"text", *spaces}:
+            collection = self._chroma_collection_for(space)
+            if collection is not None:
+                try:
+                    collection.delete(ids=[str(kid)])
+                except Exception as error:  # noqa: BLE001 — SQL soft deletion still excludes this record
+                    LOG(f"Chroma delete failed for knowledge_id={kid} space={space}: {error}")
         return rec
 
     # ── Relations ──
 
     def add_relation(self, from_id, to_id, rel_type):
         """Create a relation between two knowledge records."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         # Verify both records exist
         if not self.q1("SELECT id FROM knowledge WHERE id=?", (from_id,)):
             return {"error": f"Record {from_id} not found"}
@@ -2080,7 +2282,7 @@ class Store:
     def save_observation(self, sid, tool_name, summary, observation_type="change",
                          files_affected=None, project="general", branch=""):
         """Save a lightweight observation (no dedup, no ChromaDB)."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         summary, _ = self._sanitize_content(summary)
         cur = self.db.execute("""
             INSERT INTO observations (session_id, tool_name, observation_type, summary,
@@ -2093,7 +2295,7 @@ class Store:
 
     def cleanup_old_observations(self):
         """Remove observations older than OBSERVATION_RETENTION_DAYS."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=OBSERVATION_RETENTION_DAYS)).isoformat().replace("+00:00", "Z")
+        cutoff = format_utc(datetime.now(timezone.utc) - timedelta(days=OBSERVATION_RETENTION_DAYS))
         deleted = self.db.execute(
             "DELETE FROM observations WHERE created_at < ?", (cutoff,)).rowcount
         self.db.commit()
@@ -2106,7 +2308,7 @@ class Store:
     def log_error(self, sid, description, category, severity="medium",
                   fix="", context="", project="general", tags=None):
         """Log a structured error and check for patterns."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         status = "resolved" if fix else "open"
         cur = self.db.execute("""
             INSERT INTO errors (session_id, category, severity, description, context,
@@ -2121,7 +2323,7 @@ class Store:
 
     def detect_error_pattern(self, category, project="general"):
         """Detect repeating error patterns (3+ same category in 30 days)."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat().replace("+00:00", "Z")
+        cutoff = format_utc(datetime.now(timezone.utc) - timedelta(days=30))
         row = self.db.execute("""
             SELECT COUNT(*) as cnt, GROUP_CONCAT(id) as ids
             FROM errors
@@ -2174,7 +2376,7 @@ class Store:
 
     def manage_insight(self, sid, action, **kw):
         """ExpeL-style insight management: add/upvote/downvote/edit/list/promote."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
 
         if action == "add":
             content = kw["content"]
@@ -2265,7 +2467,7 @@ class Store:
 
     def promote_insight_to_rule(self, sid, insight_id):
         """Promote a high-value insight to a behavioral rule."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         insight = self.q1("SELECT * FROM insights WHERE id=? AND status='active'", (insight_id,))
         if not insight:
             return {"error": "Insight not found or not active"}
@@ -2298,7 +2500,7 @@ class Store:
 
     def manage_rule(self, sid, action, **kw):
         """Manage behavioral rules (SOUL)."""
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
 
         if action == "list":
             # `limit` defaults to RULES_CONTEXT_LIMIT (MEMORY_RULES_LIMIT env
@@ -2484,7 +2686,7 @@ class Store:
             rows = rows[:effective]
 
         if rows:
-            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            now = utc_now()
             placeholders = ",".join("?" * len(rows))
             self.db.execute(
                 f"UPDATE rules SET fire_count=fire_count+1, last_fired=?, updated_at=? "
@@ -2503,7 +2705,7 @@ class Store:
             ]
             result["hint"] = (
                 f"{len(omitted)} more matching rules were cut by the limit and are listed "
-                "in `rules_index` (id/priority/category/head only). They still apply — "
+                "in `rules_index` (id/priority/category/head only). They still apply - "
                 "fetch their full text with self_rules(action='get', ids=[...])."
             )
         if phase is not None:
@@ -2543,7 +2745,7 @@ class Store:
         if phase is not None:
             tags.append(f"phase:{phase}")
 
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_now()
         self.db.execute(
             "UPDATE rules SET tags=?, updated_at=? WHERE id=?",
             (json.dumps(tags), now, rule_id),
@@ -2553,7 +2755,7 @@ class Store:
 
     def analyze_patterns(self, view="full_report", project=None, days=30):
         """Analyze error patterns and self-improvement metrics."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+        cutoff = format_utc(datetime.now(timezone.utc) - timedelta(days=days))
         pf = "AND project=?" if project else ""
         pp = (project,) if project else ()
         result = {}
@@ -2597,8 +2799,8 @@ class Store:
         if view in ("improvement_trend", "full_report"):
             weeks = []
             for w in range(4):
-                start = (datetime.now(timezone.utc) - timedelta(days=(w+1)*7)).isoformat().replace("+00:00", "Z")
-                end = (datetime.now(timezone.utc) - timedelta(days=w*7)).isoformat().replace("+00:00", "Z")
+                start = format_utc(datetime.now(timezone.utc) - timedelta(days=(w+1)*7))
+                end = format_utc(datetime.now(timezone.utc) - timedelta(days=w*7))
                 cnt = self.db.execute(f"""
                     SELECT COUNT(*) FROM errors WHERE created_at BETWEEN ? AND ? {pf}
                 """, (start, end, *pp)).fetchone()[0]
@@ -2628,6 +2830,7 @@ class Store:
 class Recall:
     def __init__(self, store: Store):
         self.s = store
+        self._bounded_reranker = None
 
     # ── RRF: Reciprocal Rank Fusion ──────────────────────────
     # Default tier weights: semantic gets slight boost, fuzzy is penalized
@@ -2729,6 +2932,18 @@ class Recall:
         per-tier breakdowns; this is the data path used by the
         `memory_explain_search` MCP tool.
         """
+        from memory_core.retrieval import SearchScope
+        scope = SearchScope(project=project, kind=ktype, branch=branch,
+                            spaces=embedding_space)
+        cacheable = not self.s.db.in_transaction
+        revision = (self.s.db.total_changes,
+                    self.s.db.execute("PRAGMA data_version").fetchone()[0])
+        if not cacheable or getattr(self, "_cache_revision", None) != revision:
+            if self.s.cache is not None:
+                self.s.cache.invalidate()
+            if getattr(self.s, "v9_cache", None) is not None:
+                self.s.v9_cache.invalidate_all()
+            self._cache_revision = revision
         # Normalize embedding_space param to a sorted list[str] (or None).
         if embedding_space is None or embedding_space == "":
             _v11_spaces: list[str] | None = None
@@ -2749,19 +2964,27 @@ class Recall:
         }
         # _explain bypasses both caches: the payload includes ephemeral
         # tier rankings that are not part of the cached representation.
-        if not _explain and _v9 is not None and _v9.l1.enabled:
+        if cacheable and not _explain and _v9 is not None and _v9.l1.enabled:
             hit = _v9.recall_get(query, mode="search", k=limit, filters=_v9_filters)
             if hit is not None:
+                if record_usage:
+                    from memory_core.retrieval import flatten_results
+                    self.s.bump_recall([item["id"] for item in flatten_results(hit)])
+                self._cache_revision = (self.s.db.total_changes, revision[1])
                 return hit
 
         # Check cache first (include fusion param in cache key)
-        if not _explain and self.s.cache is not None:
+        if cacheable and not _explain and self.s.cache is not None:
             cache_key = self.s.cache.make_key(query=query, project=project, ktype=ktype,
                                                limit=limit, detail=detail, branch=branch,
                                                fusion=fusion, rerank=rerank, diverse=diverse,
                                                embedding_space=",".join(_v11_spaces) if _v11_spaces else None)
             cached = self.s.cache.get(cache_key)
             if cached is not None:
+                if record_usage:
+                    from memory_core.retrieval import flatten_results
+                    self.s.bump_recall([item["id"] for item in flatten_results(cached)])
+                self._cache_revision = (self.s.db.total_changes, revision[1])
                 return cached
 
         # Stage 0 (optional): Query rewriting via Haiku.
@@ -2770,11 +2993,11 @@ class Recall:
         # heuristic intent detector to avoid paying LLM for every call.
         original_query = query
         if (HAS_QUERY_REWRITER and _qr_is_enabled()
+                and os.environ.get("MEMORY_USE_LLM_IN_HOT_PATH", "false").strip().lower() in ("1", "true", "yes", "on")
                 and _qr_decomposable(query)):
             try:
-                import anthropic as _anthropic
-                _client = _anthropic.Anthropic()
-                rw = _qr_rewrite(query, _client)
+                from ai_layer.planner_client import PlannerClient
+                rw = _qr_rewrite(query, PlannerClient(), model="configured")
                 canonical = (rw or {}).get("canonical", "").strip()
                 if canonical and len(canonical) > 3:
                     query = canonical
@@ -2797,7 +3020,8 @@ class Recall:
         tier_scores: dict[str, dict[int, float]] = {} if _explain else {}
 
         # Tier 1: FTS5 keyword search with BM25 scoring
-        fts_q = " OR ".join(Store._fts_escape(w) for w in re.split(r'\s+', query) if len(w) > 2) or Store._fts_escape(query)
+        from memory_core.query_terms import fts_match_query
+        fts_q = fts_match_query(query)
         try:
             conds = ["knowledge_fts MATCH ?", "k.status='active'"]
             params = [fts_q]
@@ -2805,6 +3029,11 @@ class Recall:
             if project:
                 conds.append("k.project=?")
                 params.append(project)
+                conds.extend([
+                    "f.rowid >= (SELECT min(id) FROM knowledge WHERE project=?)",
+                    "f.rowid <= (SELECT max(id) FROM knowledge WHERE project=?)",
+                ])
+                params.extend((project, project))
             if ktype != "all":
                 conds.append("k.type=?")
                 params.append(ktype)
@@ -2818,14 +3047,16 @@ class Recall:
             if _v11_spaces:
                 joins += " JOIN embeddings e ON e.knowledge_id=k.id"
                 ph = ",".join("?" * len(_v11_spaces))
-                conds.append(f"e.embedding_space IN ({ph})")
+                conds.append(f"COALESCE(e.embedding_space, 'text') IN ({ph})")
                 params.extend(_v11_spaces)
             params.append(limit * 3)
-            fts_rows = self.s.db.execute(f"""
-                SELECT k.*, bm25(knowledge_fts) AS _bm25
-                FROM knowledge_fts f JOIN knowledge k ON k.id=f.rowid{joins}
-                WHERE {' AND '.join(conds)} ORDER BY bm25(knowledge_fts) LIMIT ?
-            """, params).fetchall()
+            from memory_core.telemetry import op_timer
+            with op_timer("retrieval_fts_ms"):
+                fts_rows = self.s.db.execute(f"""
+                    SELECT k.*, bm25(knowledge_fts) AS _bm25
+                    FROM knowledge_fts f JOIN knowledge k ON k.id=f.rowid{joins}
+                    WHERE {' AND '.join(conds)} ORDER BY bm25(knowledge_fts) LIMIT ?
+                """, params).fetchall()
             # Proper BM25 normalization: relative to max in batch
             raw_scores = [abs(dict(r).get("_bm25", 0)) for r in fts_rows]
             max_bm25 = max(raw_scores) if raw_scores else 1.0
@@ -2841,119 +3072,75 @@ class Recall:
             if fts_tier:
                 tier_rankings["fts"] = fts_tier
         except Exception:
-            pass
+            from memory_core.telemetry import counters
+            counters.bump("retrieval_fts_errors")
+            logging.getLogger(__name__).exception("FTS retrieval failed", extra={"tier": "fts"})
 
-        # ── Tier 2: Semantic search (binary quantization or ChromaDB fallback) ──
-        can_embed = self.s.fastembed or self.s.embedder or self.s._check_ollama()
-        semantic_tier = []   # (doc_id, score) for RRF
-        hyde_tier = []       # (doc_id, score) for RRF
-        if self.s._check_binary_search() and can_embed:
-            embs = self.s.embed([query])
-            if embs:
-                try:
-                    candidates = self.s._binary_search(
-                        embs[0], n_candidates=50, project=project, n_results=limit * 3,
-                        embedding_spaces=_v11_spaces)
-                    for kid, cos_sim in candidates:
-                        score = max(0, cos_sim)
-                        semantic_tier.append((kid, score))
-                        if _explain:
-                            tier_scores.setdefault("semantic", {})[int(kid)] = float(cos_sim)
+        from memory_core.atomic_facts import FactRepository
+        try:
+            atomic_hits = FactRepository(self.s.db).search(query, scope, limit * 3)
+            if atomic_hits:
+                tier_rankings["atomic_facts"] = [hit["id"] for hit in atomic_hits]
+                for hit in atomic_hits:
+                    kid = hit["id"]
+                    if kid in results:
+                        results[kid]["via"].append("atomic_facts")
+                    else:
+                        results[kid] = {"r": hit, "score": 0.0, "via": ["atomic_facts"]}
+        except sqlite3.Error as error:
+            from memory_core.telemetry import counters
+            counters.bump("retrieval_atomic_facts_errors")
+            logging.getLogger(__name__).warning("Atomic fact search unavailable",
+                                                extra={"tier": "atomic_facts", "error": str(error)})
+
+        # Search each embedding model in its own vector space.
+        can_embed = self.s._embed_mode != "none"
+        self.s._semantic_diagnostics = []
+        semantic_tier = self.s._search_spaces(
+            query, project=project, spaces=_v11_spaces, limit=limit * 3, kind=ktype, branch=branch,
+        ) if can_embed else []
+        from memory_core.retrieval import fetch_active_records
+        semantic_records = fetch_active_records(
+            self.s.db, [kid for kid, _ in semantic_tier if kid not in results],
+        )
+        hyde_tier = []
+        for kid, similarity in semantic_tier:
+            if kid in results:
+                results[kid]["score"] += max(0, similarity)
+                results[kid]["via"].append("semantic")
+            else:
+                row = semantic_records.get(kid)
+                if row:
+                    results[kid] = {"r": row, "score": max(0, similarity), "via": ["semantic"]}
+            if _explain:
+                tier_scores.setdefault("semantic", {})[kid] = float(similarity)
+
+        if (can_embed and use_advanced and query_info and query_info.get("expand")
+                and (not _v11_spaces or "text" in _v11_spaces)):
+            try:
+                hyde_vector = hyde_expand(query, project)
+                if hyde_vector:
+                    hyde_tier = self.s._binary_search(
+                        hyde_vector, project=project, n_results=limit * 2,
+                        embedding_spaces=["text"],
+                        embedding_model=self.s._active_embed_model_name(),
+                        kind=ktype, branch=branch,
+                    )
+                    hyde_records = fetch_active_records(
+                        self.s.db, [kid for kid, _ in hyde_tier if kid not in results],
+                    )
+                    for kid, similarity in hyde_tier:
                         if kid in results:
-                            results[kid]["score"] += score
-                            results[kid]["via"].append("semantic")
+                            results[kid]["via"].append("hyde")
                         else:
-                            rec = self.s.q1("SELECT * FROM knowledge WHERE id=?", (kid,))
-                            if rec:
-                                results[kid] = {"r": rec, "score": score, "via": ["semantic"]}
-                except Exception:
-                    pass
-
-                # Tier 2b: HyDE with binary search
-                if use_advanced and query_info and query_info.get("expand"):
-                    try:
-                        hyde_emb = hyde_expand(query, project)
-                        if hyde_emb:
-                            candidates2 = self.s._binary_search(
-                                hyde_emb, n_candidates=50, project=project, n_results=limit * 2,
-                                embedding_spaces=_v11_spaces)
-                            for kid, cos_sim in candidates2:
-                                score = max(0, cos_sim) * 0.8
-                                hyde_tier.append((kid, score))
-                                if _explain:
-                                    tier_scores.setdefault("hyde", {})[int(kid)] = float(cos_sim)
-                                if kid in results:
-                                    results[kid]["score"] += score * 0.5
-                                    if "hyde" not in results[kid]["via"]:
-                                        results[kid]["via"].append("hyde")
-                                else:
-                                    rec = self.s.q1("SELECT * FROM knowledge WHERE id=?", (kid,))
-                                    if rec:
-                                        results[kid] = {"r": rec, "score": score, "via": ["hyde"]}
-                    except Exception as e:
-                        LOG(f"HyDE search failed: {e}")
-
-        elif self.s.chroma and can_embed:
-            # Fallback: ChromaDB semantic search
-            embs = self.s.embed([query])
-            if embs:
-                # Build where filter — merge project + embedding_space when set.
-                # v11 Phase 6b — Chroma uses {"$in": [...]} for multi-value filters.
-                _w_clauses: list[dict] = [{"status": "active"}]
-                if project:
-                    _w_clauses.append({"project": project})
-                if _v11_spaces:
-                    _w_clauses.append({"embedding_space": {"$in": _v11_spaces}})
-                if len(_w_clauses) == 1:
-                    where = _w_clauses[0]
-                else:
-                    where = {"$and": _w_clauses}
-                try:
-                    cr = self.s.chroma.query(
-                        query_embeddings=embs, where=where,
-                        n_results=limit * 3, include=["distances", "documents", "metadatas"])
-                    for i, rid_s in enumerate(cr["ids"][0]):
-                        rid = int(rid_s)
-                        score = max(0, 1.0 - cr["distances"][0][i])
-                        semantic_tier.append((rid, score))
+                            row = hyde_records.get(kid)
+                            if row:
+                                results[kid] = {"r": row, "score": max(0, similarity), "via": ["hyde"]}
                         if _explain:
-                            tier_scores.setdefault("semantic", {})[rid] = float(score)
-                        if rid in results:
-                            results[rid]["score"] += score
-                            results[rid]["via"].append("semantic")
-                        else:
-                            rec = self.s.q1("SELECT * FROM knowledge WHERE id=?", (rid,))
-                            if rec:
-                                results[rid] = {"r": rec, "score": score, "via": ["semantic"]}
-                except Exception:
-                    pass
+                            tier_scores.setdefault("hyde", {})[kid] = float(similarity)
+            except Exception as error:  # noqa: BLE001 — preserve ordinary retrieval when optional expansion fails
+                LOG(f"HyDE search failed: {error}")
 
-                # Tier 2b: HyDE (ChromaDB fallback)
-                if use_advanced and query_info and query_info.get("expand"):
-                    try:
-                        hyde_emb = hyde_expand(query, project)
-                        if hyde_emb:
-                            cr2 = self.s.chroma.query(
-                                query_embeddings=[hyde_emb], where=where,
-                                n_results=limit * 2, include=["distances", "documents", "metadatas"])
-                            for i, rid_s in enumerate(cr2["ids"][0]):
-                                rid = int(rid_s)
-                                score = max(0, 1.0 - cr2["distances"][0][i]) * 0.8
-                                hyde_tier.append((rid, score))
-                                if _explain:
-                                    tier_scores.setdefault("hyde", {})[rid] = float(score)
-                                if rid in results:
-                                    results[rid]["score"] += score * 0.5
-                                    if "hyde" not in results[rid]["via"]:
-                                        results[rid]["via"].append("hyde")
-                                else:
-                                    rec = self.s.q1("SELECT * FROM knowledge WHERE id=?", (rid,))
-                                    if rec:
-                                        results[rid] = {"r": rec, "score": score, "via": ["hyde"]}
-                    except Exception as e:
-                        LOG(f"HyDE search failed: {e}")
-
-        # Store semantic/hyde tier rankings (sorted by score desc for RRF)
         if semantic_tier:
             semantic_tier.sort(key=lambda x: x[1], reverse=True)
             tier_rankings["semantic"] = [doc_id for doc_id, _ in semantic_tier]
@@ -2978,6 +3165,9 @@ class Recall:
                         self.s.db, q_emb, project=project, n_candidates=100, top_n=limit * 3
                     )
                     if repr_hits:
+                        repr_records = fetch_active_records(
+                            self.s.db, [kid for kid, _ in repr_hits if kid not in results],
+                        )
                         repr_tier: list[tuple[int, float]] = []
                         for kid, score in repr_hits:
                             repr_tier.append((kid, score))
@@ -2992,7 +3182,7 @@ class Recall:
                                 if winner and not prev:
                                     results[kid]["matched_repr"] = winner
                             else:
-                                rec = self.s.q1("SELECT * FROM knowledge WHERE id=?", (kid,))
+                                rec = repr_records.get(kid)
                                 if rec:
                                     results[kid] = {
                                         "r": rec,
@@ -3007,42 +3197,48 @@ class Recall:
 
         # ── Tier 3: Fuzzy search (catches typos and partial matches) ──
         if len(results) < limit:
-            try:
-                conds2 = ["k.status='active'"]
-                params2 = []
-                if project:
-                    conds2.append("k.project=?")
-                    params2.append(project)
-                if ktype != "all":
-                    conds2.append("k.type=?")
-                    params2.append(ktype)
-                if branch:
-                    conds2.append("(k.branch=? OR k.branch='')")
-                    params2.append(branch)
-                params2.append(limit * 5)
-                candidates = self.s.q(f"""
-                    SELECT * FROM knowledge k WHERE {' AND '.join(conds2)}
-                    ORDER BY last_confirmed DESC LIMIT ?
-                """, params2)
-                ql = query.lower()
-                fuzzy_tier = []
-                for r in candidates:
-                    if r["id"] in results:
-                        continue
-                    ratio = SequenceMatcher(None, ql, r["content"][:200].lower()).ratio()
-                    if ratio > 0.35:
-                        results[r["id"]] = {"r": r, "score": ratio * 0.6, "via": ["fuzzy"]}
-                        fuzzy_tier.append((r["id"], ratio))
-                        if _explain:
-                            tier_scores.setdefault("fuzzy", {})[int(r["id"])] = float(ratio)
-                if fuzzy_tier:
-                    fuzzy_tier.sort(key=lambda x: x[1], reverse=True)
-                    tier_rankings["fuzzy"] = [doc_id for doc_id, _ in fuzzy_tier]
-            except Exception:
-                pass
+            from memory_core.telemetry import op_timer
+            with op_timer("retrieval_fuzzy_ms"):
+                try:
+                    conds2 = ["k.status='active'"]
+                    params2 = []
+                    if project:
+                        conds2.append("k.project=?")
+                        params2.append(project)
+                    if ktype != "all":
+                        conds2.append("k.type=?")
+                        params2.append(ktype)
+                    if branch:
+                        conds2.append("(k.branch=? OR k.branch='')")
+                        params2.append(branch)
+                    params2.append(limit * 5)
+                    candidates = self.s.q(f"""
+                        SELECT * FROM knowledge k WHERE {' AND '.join(conds2)}
+                        ORDER BY last_confirmed DESC LIMIT ?
+                    """, params2)
+                    ql = query.lower()
+                    fuzzy_tier = []
+                    for r in candidates:
+                        if r["id"] in results:
+                            continue
+                        ratio = SequenceMatcher(None, ql, r["content"][:200].lower()).ratio()
+                        if ratio > 0.35:
+                            results[r["id"]] = {"r": r, "score": ratio * 0.6, "via": ["fuzzy"]}
+                            fuzzy_tier.append((r["id"], ratio))
+                            if _explain:
+                                tier_scores.setdefault("fuzzy", {})[int(r["id"])] = float(ratio)
+                    if fuzzy_tier:
+                        fuzzy_tier.sort(key=lambda x: x[1], reverse=True)
+                        tier_rankings["fuzzy"] = [doc_id for doc_id, _ in fuzzy_tier]
+                except Exception:
+                    from memory_core.telemetry import counters
+                    counters.bump("retrieval_fuzzy_errors")
+                    logging.getLogger(__name__).exception("Fuzzy retrieval failed", extra={"tier": "fuzzy"})
+
 
         # ── Tier 4: Graph expansion ──
-        top5 = sorted(results, key=lambda x: results[x]["score"], reverse=True)[:5]
+        graph_candidates = [kid for kid in results if results[kid]["via"] != ["atomic_facts"]]
+        top5 = sorted(graph_candidates or results, key=lambda x: results[x]["score"], reverse=True)[:5]
         graph_tier = []
         if use_advanced and query_info and query_info.get("deep_graph"):
             # Multi-hop graph traversal (2 hops for architecture queries)
@@ -3091,6 +3287,10 @@ class Recall:
                     self.s.db, query, project,
                     k=max(5, limit // 2), embed_fn=ep_embed,
                 )
+                episode_records = fetch_active_records(self.s.db, [
+                    fid for hit in ep_hits for fid in (getattr(hit, "fact_ids", ()) or ())[:5]
+                    if fid not in results
+                ])
                 for hit in ep_hits:
                     fact_ids = list(getattr(hit, "fact_ids", ()) or ())
                     if not fact_ids:
@@ -3098,10 +3298,7 @@ class Recall:
                     base = float(getattr(hit, "score", 0.0))
                     for rank, fid in enumerate(fact_ids[:5]):
                         if fid not in results:
-                            row = self.s.db.execute(
-                                "SELECT * FROM knowledge WHERE id=? AND status='active'",
-                                (fid,),
-                            ).fetchone()
+                            row = episode_records.get(fid)
                             if row is None:
                                 continue
                             ep_score = base * (1.0 / (1 + rank))
@@ -3126,6 +3323,14 @@ class Recall:
                 pass
             except Exception as e:
                 LOG(f"episode tier error: {e}")
+
+        for kid in list(results):
+            if not scope.allows(results[kid]["r"], self.s.db):
+                del results[kid]
+        from memory_core.telemetry import counters
+        for tier, ids in tier_rankings.items():
+            counters.bump(f"retrieval_{tier}_candidates", len(ids))
+            tier_rankings[tier] = [kid for kid in ids if kid in results]
 
         # ── Noise filter: drop records carrying excluded tags ──
         # Operational tags like ``recovery`` or ``auto-extract`` mark records
@@ -3222,7 +3427,7 @@ class Recall:
         # cosine; other tiers (fts/semantic/fuzzy/graph/episode) use the
         # parent half-life. LLM-generated summaries age fastest.
         try:
-            from config import get_repr_half_life_days, get_parent_half_life_days
+            from config import get_parent_half_life_days, get_repr_half_life_days
         except Exception:
             get_repr_half_life_days = lambda _t: DECAY_HALF_LIFE  # type: ignore[assignment]
             get_parent_half_life_days = lambda: DECAY_HALF_LIFE   # type: ignore[assignment]
@@ -3267,7 +3472,9 @@ class Recall:
         if use_rrf and tier_rankings:
             # Compute RRF scores with per-tier decay folded in
             rrf_scores = self._rrf_fuse(
-                tier_rankings, self.RRF_WEIGHTS, self.RRF_K,
+                tier_rankings, {**self.RRF_WEIGHTS, "atomic_facts":
+                    0.0 if any(ids for tier, ids in tier_rankings.items() if tier != "atomic_facts") else 1.0},
+                self.RRF_K,
                 score_weight=_tier_score_weight,
             )
 
@@ -3278,7 +3485,7 @@ class Recall:
                 if doc_id in results:
                     item = results[doc_id]
                     boost = item["importance_boost"]
-                    item["rrf_score"] = rrf_sc * boost
+                    item["rrf_score"] = rrf_sc * boost * (0.3 if item.get("drift") else 1.0)
                     item["score"] *= item["decay_factor"] * boost
 
             # Documents not in any tier ranking (shouldn't happen, but safety net)
@@ -3337,7 +3544,22 @@ class Recall:
         # but can hurt recall on conversational data. Off by default.
         if rerank and HAS_RERANKER and len(ranked) > 1:
             try:
-                ranked = rerank_results(query, ranked, top_k=limit)
+                if os.environ.get("MEMORY_BOUNDED_RERANK", "false").lower() in ("true", "1", "yes"):
+                    from ai_layer.bounded_reranker import BoundedReranker
+                    from memory_core.query_terms import lexical_terms
+                    if len(lexical_terms(query)) >= 3:
+                        if self._bounded_reranker is None:
+                            self._bounded_reranker = BoundedReranker(
+                                os.environ.get("MEMORY_RERANK_LOCAL_MODEL", ""),
+                                deadline_ms=int(os.environ.get("MEMORY_RERANK_DEADLINE_MS", "250")),
+                                candidates=int(os.environ.get("MEMORY_RERANK_CANDIDATES", "20")),
+                                startup_seconds=float(os.environ.get("MEMORY_RERANK_STARTUP_SECONDS", "60")))
+                        ordered = self._bounded_reranker.rank(query, [item["r"] for item in ranked])
+                        by_id = {item["r"]["id"]: item for item in ranked}
+                        ranked = [by_id[hit["id"]] for hit in ordered]
+                    ranked = ranked[:limit]
+                else:
+                    ranked = rerank_results(query, ranked, top_k=limit)
             except Exception as e:
                 LOG(f"Reranker failed, using original ranking: {e}")
                 ranked = ranked[:limit]
@@ -3430,6 +3652,8 @@ class Recall:
                             })
             except Exception as e:
                 LOG(f"graph_expand failed, keeping original ranked: {e}")
+
+        ranked = [item for item in ranked if scope.allows(item["r"], self.s.db)][:limit]
 
         # Spaced-repetition feedback: a recalled record scores higher next
         # time (`recall_boost` below). Callers that measure retrieval rather
@@ -3546,9 +3770,14 @@ class Recall:
             if router_classification.entities:
                 result["routed_entities"] = router_classification.entities
 
+        cacheable = cacheable and not self.s.db.in_transaction
+        self._cache_revision = (self.s.db.total_changes, revision[1]) if cacheable else None
+
+        result["semantic_diagnostics"] = getattr(self.s, "_semantic_diagnostics", [])
+
         # Cache the result. _explain payloads are NOT cached — they include
         # ephemeral tier rankings tied to a single execution.
-        if not _explain and self.s.cache is not None:
+        if cacheable and not _explain and self.s.cache is not None:
             cache_key = self.s.cache.make_key(query=query, project=project, ktype=ktype,
                                                limit=limit, detail=detail, branch=branch,
                                                fusion=fusion, rerank=rerank, diverse=diverse,
@@ -3556,7 +3785,7 @@ class Recall:
             self.s.cache.put(cache_key, result, project=project)
 
         # v9 A2 L1: mirror into fast LRU tagged with the ids this result touched.
-        if not _explain and _v9 is not None and _v9.l1.enabled:
+        if cacheable and not _explain and _v9 is not None and _v9.l1.enabled:
             try:
                 _ids: list[int] = []
                 for _tier in result.get("results", {}).values():
@@ -3677,7 +3906,7 @@ class Recall:
         # Health metrics
         stale = s.db.execute("""
             SELECT COUNT(*) FROM knowledge
-            WHERE status='active' AND last_confirmed < datetime('now', '-90 days')
+            WHERE status='active' AND last_confirmed < strftime('%Y-%m-%dT%H:%M:%f000Z', 'now', '-90 days')
         """).fetchone()[0]
         never_recalled = s.db.execute("""
             SELECT COUNT(*) FROM knowledge WHERE status='active' AND (recall_count=0 OR recall_count IS NULL)
@@ -3850,7 +4079,15 @@ class Recall:
 # MCP Server
 # ═══════════════════════════════════════════════════════════
 
-app = Server("claude-total-memory")
+try:
+    from version import VERSION as _SERVER_VERSION
+except Exception:
+    _SERVER_VERSION = ""
+
+# serverInfo the client displays. The name tracked the pre-v7 package name
+# until 13.0.4, and the version was never passed at all, so every client
+# rendered an empty string.
+app = Server("total-agent-memory", version=_SERVER_VERSION)
 store: Store = None
 recall: Recall = None
 SID: str = None
@@ -3938,13 +4175,22 @@ async def _tool_catalogue():
                     "type": {"type": "string", "enum": ["decision", "fact", "solution", "lesson", "convention", "all"],
                              "default": "all"},
                     "limit": {"type": "integer", "default": 10},
-                    "mode": {"type": "string", "enum": ["search", "index", "timeline"], "default": "search",
+                    "mode": {"type": "string", "enum": ["search", "index", "timeline", "context", "evidence"], "default": "search",
                              "description": "Progressive-disclosure mode: 'search' (default) = normal results, "
                                             "'index' = ultra-compact metadata only (id+title+score+type+project+created_at, "
                                             "~40-60 tok/hit, no cognitive expansion, use memory_get(ids=...) to fetch full content), "
-                                            "'timeline' = top-K hits expanded with ±neighbors from same session (chronological)"},
+                                            "'timeline' = chronological compact view; "
+                                            "'context' = source excerpts; 'evidence' = indexed passage search with bounded follow-up retrieval"},
+                    "context_max_chars": {"type": "integer", "minimum": 512, "default": 24000,
+                                          "description": "Context character budget; evidence mode uses the same value as a stricter UTF-8 byte budget."},
+                    "evidence_followup": {"type": "boolean", "default": True,
+                                          "description": "Evidence mode: allow one search for an explicitly supplied missing_relation."},
+                    "missing_relation": {"type": "object", "properties": {
+                        "subject": {"type": "string"}, "relation": {"type": "string"}, "time": {"type": "string"}},
+                        "required": ["subject", "relation"], "additionalProperties": False,
+                        "description": "Evidence mode: missing relation; subject must occur in the original question."},
                     "neighbors": {"type": "integer", "default": 2,
-                                  "description": "Timeline mode only: how many records before/after each hit to include."},
+                                  "description": "Timeline/context modes: records before/after each hit; context accepts 0–3."},
                     "detail": {"type": "string", "enum": ["compact", "summary", "full", "auto"], "default": "full",
                                "description": "Level of detail: 'compact' ~50 tokens/result (id+title+score), "
                                               "'summary' truncates content to 150 chars, 'full' returns everything, "
@@ -3993,6 +4239,30 @@ async def _tool_catalogue():
             },
         ),
         Tool(
+            name="memory_index_passages",
+            description="Build local passage indexes before evidence searches. Repeat using next_after_id until remaining=0.",
+            inputSchema={"type": "object", "properties": {
+                "project": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                "after_id": {"type": "integer", "minimum": 0, "default": 0}}, "required": ["project"]},
+        ),
+        Tool(
+            name="memory_answer",
+            description="Generate and verify a cited answer using the configured reasoning LLM. "
+                        "Evidence carries recording dates; when records about the same subject disagree, the latest one gives the "
+                        "current value and the answer names the value it replaced. First runs negative retrieval: a contradiction-seeking "
+                        "second search; a score >= 0.60 hands both sides to the reader and answers with a caveat "
+                        "(MEMORY_CONTRADICTION_POLICY=abstain refuses instead), 0.30-0.60 answers with a caveat (see `negative`). "
+                        "Up to one missing-relation retrieval and eight LLM calls including inversion retry and bounded quote repair. Explicit project required. "
+                        "Citation offsets refer to returned evidence content. Ordinary recall remains local.",
+            inputSchema={"type": "object", "properties": {
+                "query": {"type": "string", "minLength": 1}, "project": {"type": "string", "minLength": 1},
+                "branch": {"type": "string"}, "type": {"type": "string", "enum": ["all", "fact", "decision", "solution", "lesson", "convention"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
+                "max_bytes": {"type": "integer", "minimum": 512, "maximum": 24000, "default": 24000},
+                "followup": {"type": "boolean", "default": True}}, "required": ["query", "project"], "additionalProperties": False},
+        ),
+        Tool(
             name="memory_save",
             description="Save knowledge explicitly. Types: decision (MUST include WHY in context), "
                         "solution, lesson, fact, convention. Auto-dedup via Jaccard + fuzzy similarity. "
@@ -4006,6 +4276,8 @@ async def _tool_catalogue():
                 "type": "object",
                 "properties": {
                     "content": {"type": "string", "description": "The knowledge to save"},
+                    "source_format": {"type": "string", "enum": ["auto", "conversation"], "default": "auto",
+                                      "description": "Conversation preserves dialogue structure and bypasses automatic CLI filters."},
                     "type": {"type": "string", "enum": ["decision", "fact", "solution", "lesson", "convention"]},
                     "project": {"type": "string", "default": "general"},
                     "tags": {"type": "array", "items": {"type": "string"}},
@@ -4256,9 +4528,9 @@ async def _tool_catalogue():
                         "Actions: list, get (full text by ids), fire (record relevance), "
                         "rate (success=true/false), suspend, activate, retire, add_manual. "
                         "Auto-suspend: success_rate < 0.2 after 10+ RATINGS (success_count+fail_count), "
-                        "checked only when action='rate' runs — an unrated rule is never suspended, "
+                        "checked only when action='rate' runs - an unrated rule is never suspended, "
                         "however often it fires. "
-                        "For list: no result cap by default — all matching active rules are "
+                        "For list: no result cap by default - all matching active rules are "
                         "returned unless `limit` is passed or the MEMORY_RULES_LIMIT env var is set. "
                         "For get: pass `ids` (max 50) to retrieve the full rows behind the "
                         "`rules_index` entries self_rules_context returns when its limit truncates; "
@@ -4333,14 +4605,14 @@ async def _tool_catalogue():
                         "Call at SESSION START to load rules. Returns rules filtered by project and scope. "
                         "v8.0: pass `phase` to lazy-load rules relevant to current task phase — core "
                         "rules (no phase tag) + rules tagged phase:<X>. Cuts prompt tokens ~70%. "
-                        "No result cap by default — all matching active rules are returned unless "
+                        "No result cap by default - all matching active rules are returned unless "
                         "`limit` is passed or the MEMORY_RULES_LIMIT env var is set. "
                         "Only rules actually returned get fire_count/last_fired bumped, which "
-                        "feeds self_patterns rule_effectiveness — narrowing this limit also "
+                        "feeds self_patterns rule_effectiveness - narrowing this limit also "
                         "narrows that telemetry. "
                         "When the limit truncates, the response carries `rules_index` "
                         "(id/priority/category/head for every omitted rule, same ordering) and "
-                        "a `hint`: those rules still bind you — fetch their full text with "
+                        "a `hint`: those rules still bind you - fetch their full text with "
                         "self_rules(action='get', ids=[...]). Both keys are absent when nothing "
                         "was cut. "
                         "After task completion, rate rules: self_rules(action='rate', id=X, success=true/false).",
@@ -4747,7 +5019,7 @@ async def _tool_catalogue():
                         "description": "Omit it: this server's own session is used. "
                                        "Pass one only to end a session this process "
                                        "does not own (a hook naming the Claude Code "
-                                       "session, a subagent) — a session row is "
+                                       "session, a subagent) - a session row is "
                                        "created for it if none exists.",
                     },
                     "summary": {"type": "string"},
@@ -4820,6 +5092,7 @@ async def _tool_catalogue():
                 "type": "object",
                 "properties": {
                     "content": {"type": "string"},
+                    "source_format": {"type": "string", "enum": ["auto", "conversation"], "default": "auto"},
                     "type": {"type": "string", "enum": ["decision", "fact", "solution", "lesson", "convention"]},
                     "project": {"type": "string", "default": "general"},
                     "tags": {"type": "array", "items": {"type": "string"}},
@@ -4911,7 +5184,7 @@ async def _tool_catalogue():
                         "type": "boolean",
                         "default": False,
                         "description": "Only rows whose stored embed_model is not the "
-                                       "active one — what a store left mixed by a backend "
+                                       "active one - what a store left mixed by a backend "
                                        "switch or a silent fallback needs. Rows with no "
                                        "embedding at all are not touched.",
                     },
@@ -5100,9 +5373,9 @@ async def _tool_catalogue():
                 "properties": {
                     "query": {"type": "string"},
                     "project": {"type": "string"},
-                    "max_iters": {"type": "integer", "default": 4},
-                    "k_per_iter": {"type": "integer", "default": 5},
-                    "llm_model": {"type": "string", "default": "haiku"},
+                    "max_iters": {"type": "integer", "default": 4, "minimum": 1, "maximum": 12},
+                    "k_per_iter": {"type": "integer", "default": 10, "minimum": 1, "maximum": 50},
+                    "llm_model": {"type": "string", "default": "configured"},
                 },
                 "required": ["query"],
             },
@@ -5316,6 +5589,7 @@ def _eval_run_locomo(
     Wires `recall_fn` and `file_warnings_fn` to the live Store/Recall.
     """
     import time as _t
+
     from eval_harness import EvalHarness
 
     def _recall_fn(query: str, params: dict):
@@ -5359,7 +5633,7 @@ async def _do(name, a):
 
     if name == "memory_recall":
         mode_param = a.get("mode", "search")
-        if mode_param not in ("search", "index", "timeline"):
+        if mode_param not in ("search", "index", "timeline", "context", "evidence"):
             mode_param = "search"
 
         detail_param = a.get("detail", "full")
@@ -5375,8 +5649,9 @@ async def _do(name, a):
         # neighbours. Underlying search runs at "full" detail regardless of the
         # caller's detail= for those modes.
         search_detail = "full" if mode_param != "search" else detail_param
+        search_limit = min(50, a.get("limit", 10) * 2) if mode_param == "evidence" else a.get("limit", 10)
         result = recall.search(a["query"], a.get("project"), a.get("type", "all"),
-                               a.get("limit", 10), search_detail,
+                               search_limit, search_detail,
                                a.get("branch"), a.get("fusion", "rrf"),
                                a.get("rerank", False), a.get("diverse", False))
         if a.get("detail") == "auto":
@@ -5497,7 +5772,7 @@ async def _do(name, a):
         # with the 'structured' tag and attach parsed schema payload.
         if a.get("decisions_only"):
             try:
-                from decisions import parse_stored_decision, STRUCTURED_TAG
+                from decisions import STRUCTURED_TAG, parse_stored_decision
 
                 # Rebuild result on a shallow copy so we never mutate the
                 # cached value (cache key does not include decisions_only).
@@ -5546,17 +5821,37 @@ async def _do(name, a):
                 result = index_response(result)
             except Exception as e:
                 LOG(f"index_response error: {e}")
+        elif mode_param == "context":
+            from config import get_recall_excluded_tags
+            from memory_core.evidence_context import EvidenceContext
+            from memory_core.evidence_pack import DEFAULT_EVIDENCE_CHARS
+            from memory_core.evidence_window import ANSWER_GUIDANCE
+            from memory_core.retrieval import SearchScope, flatten_results
+            evidence = EvidenceContext(store.db, get_recall_excluded_tags()).build(
+                flatten_results(result), query=a["query"],
+                scope=SearchScope(project=a.get("project"), kind=a.get("type", "all"), branch=a.get("branch")),
+                radius=int(a.get("neighbors", 1)),
+                max_chars=a.get("context_max_chars", DEFAULT_EVIDENCE_CHARS),
+            )
+            result = {**result, "mode": "context", "results": evidence, "total": len(evidence),
+                      "answer_guidance": ANSWER_GUIDANCE,
+                      "total_tokens": Store._estimate_tokens(json.dumps(evidence, ensure_ascii=False) + ANSWER_GUIDANCE)}
         elif mode_param == "timeline":
             try:
+                from memory_core.retrieval import SearchScope
                 from recall_modes import timeline_response
                 result = timeline_response(
                     result, store,
                     neighbors=int(a.get("neighbors", 2)),
                     limit=int(a.get("limit", 5)),
+                    scope=SearchScope(project=a.get("project"), kind=a.get("type", "all"), branch=a.get("branch")),
                 )
             except Exception as e:
                 LOG(f"timeline_response error: {e}")
 
+        if mode_param == "evidence":
+            from evidence_endpoint import evidence_response
+            result = evidence_response(store, recall, a, result)
         return J(result)
 
     elif name == "memory_timeline":
@@ -5564,11 +5859,22 @@ async def _do(name, a):
                   ["query", "session_number", "sessions_ago", "date_from", "date_to", "project", "limit"]}
         return J(recall.timeline(**kwargs))
 
+    elif name == "memory_index_passages":
+        from evidence_endpoint import index_passages
+        return J(index_passages(store, a))
+
+    elif name == "memory_answer":
+        from dataclasses import asdict
+
+        from answer_endpoint import answer_response
+        return J(asdict(answer_response(store, recall, a)))
+
     elif name == "memory_save":
         rid, was_dedup, was_redacted, private_sections, quality_meta = store.save_knowledge(
             SID, a["content"], a["type"],
             a.get("project", "general"), a.get("tags", []), a.get("context", ""),
             branch=a.get("branch", BRANCH), filter_name=a.get("filter"),
+            source_format=a.get("source_format", "auto"),
             importance=a.get("importance", "medium"),
             coref=a.get("coref"),
             agent_id=a.get("agent_id"),
@@ -5639,7 +5945,8 @@ async def _do(name, a):
             SID, a["new_content"], old_rec["type"], old_rec["project"],
             json.loads(old_rec.get("tags", "[]")),
             f"Updated: {a.get('reason', '')}. Was: {old_rec['content'][:200]}",
-            branch=old_rec.get("branch", ""), skip_dedup=True, skip_quality=True)
+            branch=old_rec.get("branch", ""), skip_dedup=True, skip_quality=True,
+            source_format=old_rec.get("source_format", "auto"))
         store.db.execute(
             "UPDATE knowledge SET status='superseded',superseded_by=? WHERE id=?",
             (new_id, old["id"]))
@@ -5700,7 +6007,7 @@ async def _do(name, a):
             ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             proj = a.get("project", "all")
             path = MEMORY_DIR / "backups" / f"export_{proj}_{ts}.json"
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2, default=str)
             return J({"exported": True, "file": str(path),
                        "knowledge_count": len(data["knowledge"]), "sessions_count": len(data["sessions"])})
@@ -5734,8 +6041,8 @@ async def _do(name, a):
     elif name == "memory_forget":
         dry_run = a.get("dry_run", True)
         if dry_run:
-            archive_cutoff = (datetime.now(timezone.utc) - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat().replace("+00:00", "Z")
-            purge_cutoff = (datetime.now(timezone.utc) - timedelta(days=PURGE_AFTER_DAYS)).isoformat().replace("+00:00", "Z")
+            archive_cutoff = format_utc(datetime.now(timezone.utc) - timedelta(days=ARCHIVE_AFTER_DAYS))
+            purge_cutoff = format_utc(datetime.now(timezone.utc) - timedelta(days=PURGE_AFTER_DAYS))
             would_archive = store.db.execute("""
                 SELECT COUNT(*) FROM knowledge
                 WHERE status='active' AND last_confirmed < ? AND recall_count = 0 AND confidence < 0.8
@@ -6241,7 +6548,7 @@ async def _do(name, a):
         from session_continuity import SessionContinuity
         sc = SessionContinuity(store.db)
         # No tool hands the live SID to a caller, so one that has to supply
-        # `session_id` invents it — 231 of 256 stored summaries name a session
+        # `session_id` invents it - 231 of 256 stored summaries name a session
         # that never existed. Defaulting to this process's own session is the
         # only value a caller could not have known to pass.
         return J(sc.session_end(
@@ -6385,6 +6692,7 @@ async def _do(name, a):
             SID, a["content"], a["type"],
             a.get("project", "general"), a.get("tags", []), a.get("context", ""),
             branch=a.get("branch", BRANCH), filter_name=a.get("filter"),
+            source_format=a.get("source_format", "auto"),
             importance=a.get("importance", "medium"),
             skip_quality=True,  # the explicit fast contract: no quality gate
             coref=False,        # never spend an LLM round-trip on the fast path
@@ -6525,7 +6833,7 @@ async def _do(name, a):
         cap = a.get("limit")
         # `embedding_space` describes the CONTENT (text vs code), not the model
         # that encoded it, so it cannot select rows left behind by a backend
-        # switch — those are all `text` too. `stale_only` selects exactly the
+        # switch - those are all `text` too. `stale_only` selects exactly the
         # rows whose stored model is no longer the active one, which is what a
         # drifted store needs re-encoded.
         stale_only = bool(a.get("stale_only", False))
@@ -6535,7 +6843,7 @@ async def _do(name, a):
         # embedding row matches the requested space (or every active row
         # when no space is set).
         sql = (
-            "SELECT k.id, k.content, k.context "
+            "SELECT k.id, k.content, k.context, k.source_format "
             "FROM knowledge k "
             "LEFT JOIN embeddings e ON e.knowledge_id=k.id "
             "WHERE k.status='active'"
@@ -6549,7 +6857,7 @@ async def _do(name, a):
             sql += f" AND COALESCE(e.embedding_space,'text') IN ({ph})"
             params.extend(spaces)
         if stale_only:
-            # A row with no embedding at all is not stale, it is absent — a
+            # A row with no embedding at all is not stale, it is absent - a
             # different job, and one this would silently take on.
             sql += " AND e.knowledge_id IS NOT NULL AND e.embed_model <> ?"
             params.append(active_model)
@@ -6578,7 +6886,7 @@ async def _do(name, a):
                 continue
             for r, vec in zip(chunk, embs):
                 try:
-                    cls = _v11_classify(r["content"])
+                    cls = _v11_classify(r["content"], source_format=r["source_format"])
                     space = _v11_resolve_space(cls.type, cls.language)
                     store._upsert_embedding(
                         r["id"], vec, model_name,
@@ -6737,8 +7045,8 @@ async def _do(name, a):
     elif name == "memory_eval_temporal":
         mode = a.get("mode", "fast")
         try:
-            from temporal_kg import TemporalKG
             from temporal_filter import parse_query_dates  # type: ignore  # noqa: F401
+            from temporal_kg import TemporalKG
         except Exception as exc:
             return J({
                 "status": "not_implemented",
@@ -7071,7 +7379,16 @@ async def _do(name, a):
     elif name == "memory_recall_iterative":
         from v11_handlers import handle_recall_iterative
         def _search(q, project, ktype, k):
-            return recall.search(q, project, ktype, limit=k)
+            from config import get_recall_excluded_tags
+            from memory_core.evidence_window import EvidenceWindow
+            from memory_core.retrieval import SearchScope, flatten_results
+            hits = flatten_results(recall.search(q, project, ktype, limit=k, detail="full"))
+            evidence = EvidenceWindow(store.db, get_recall_excluded_tags()).expand(
+                hits, scope=SearchScope(project=project, kind=ktype), radius=1,
+            )
+            from memory_core.evidence_chains import EvidenceChains
+            return EvidenceChains(store.db, get_recall_excluded_tags()).expand(
+                evidence, SearchScope(project=project, kind=ktype))
         return J(handle_recall_iterative(a, search_fn=_search))
 
     elif name == "memory_temporal_query":
@@ -7111,7 +7428,7 @@ def _detect_project():
     spawned in, or the working directory's name outside a repository.
 
     The server process is started by the client inside the project directory,
-    which is why `_detect_git_branch` above works — the same cwd names the
+    which is why `_detect_git_branch` above works - the same cwd names the
     project. Without this every session row was written as 'general', so
     `memory_timeline` and any per-project session analytics saw one bucket.
 
@@ -7146,8 +7463,8 @@ def _session_id():
     one human session shares an identity: knowledge saved through the tools,
     and the summary the SessionEnd hook writes (which names the Claude Code
     session, since that is all a hook knows). They used to be two ids for the
-    same session — the server minted `mcp_<ts>_<pid>` and never looked at the
-    environment it was handed — so the two halves could not be joined, and
+    same session - the server minted `mcp_<ts>_<pid>` and never looked at the
+    environment it was handed - so the two halves could not be joined, and
     `sessions` grew a row per identity space rather than per session.
 
     Falls back to the minted form for hosts that publish nothing (Codex,
@@ -7195,8 +7512,9 @@ async def _run_streamable_http(host: str, port: int):
     over the network. Lives at /mcp so the same image can host the
     dashboard on 37737 and MCP on 3737 without path conflicts.
     """
-    import uvicorn
     from contextlib import asynccontextmanager
+
+    import uvicorn
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
     from starlette.applications import Starlette
     from starlette.requests import Request
