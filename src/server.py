@@ -21,6 +21,8 @@ import logging
 import math
 import os
 import re
+import signal
+import socket
 import sqlite3
 import struct
 import subprocess
@@ -792,9 +794,9 @@ class Store:
         """v10 — replay any save_knowledge intents from a previous crash.
 
         Runs on every Store.__init__ after migrations apply. Idempotent
-        thanks to the existing dedup path (`_find_duplicate`): a re-run
-        of a payload whose record was already inserted returns the
-        existing id and the intent is closed as 'superseded'.
+        thanks to the dedup path (`_find_duplicate`): a replayed payload
+        whose record was already inserted returns the existing id (replays
+        never replace) and the intent is closed as 'superseded'.
         """
         try:
             import outbox
@@ -1139,29 +1141,8 @@ class Store:
                 LOG("FTS5 rebuild: OK")
             except Exception as e2:
                 LOG(f"FTS5 rebuild failed: {e2} — recreating from scratch...")
-                self.db.execute("DROP TABLE IF EXISTS knowledge_fts")
-                self.db.execute("DROP TRIGGER IF EXISTS k_fts_i")
-                self.db.execute("DROP TRIGGER IF EXISTS k_fts_u")
-                self.db.executescript("""
-                    CREATE VIRTUAL TABLE knowledge_fts USING fts5(
-                        content, context, tags, content='knowledge', content_rowid='id'
-                    );
-                    CREATE TRIGGER k_fts_i AFTER INSERT ON knowledge BEGIN
-                        INSERT INTO knowledge_fts(rowid,content,context,tags)
-                        VALUES (new.id,new.content,new.context,new.tags);
-                    END;
-                    CREATE TRIGGER k_fts_u AFTER UPDATE ON knowledge BEGIN
-                        INSERT INTO knowledge_fts(knowledge_fts,rowid,content,context,tags)
-                        VALUES ('delete',old.id,old.content,old.context,old.tags);
-                        INSERT INTO knowledge_fts(rowid,content,context,tags)
-                        VALUES (new.id,new.content,new.context,new.tags);
-                    END;
-                """)
-                self.db.execute(
-                    "INSERT INTO knowledge_fts(rowid,content,context,tags) "
-                    "SELECT id,content,context,tags FROM knowledge WHERE status='active'"
-                )
-                self.db.commit()
+                from memory_core.fts_schema import recreate_knowledge_fts
+                recreate_knowledge_fts(self.db)
                 LOG("FTS5 recreated from scratch: OK")
 
     def _apply_sql_migrations(self):
@@ -1354,22 +1335,31 @@ class Store:
         return '"' + word.replace('"', '""') + '"'
 
     def _find_duplicate(self, content, ktype, project):
-        """Check if very similar knowledge already exists."""
+        """Return the id of an active record that states exactly what `content` states.
+
+        Near-duplicates are not duplicates: a record that differs in one value
+        ("... is Argentina" -> "... is Armenia") is an update and must be stored.
+        """
+        from memory_core.dedup import candidate_match_query, repeats
+        from memory_core.fts_schema import project_token
+
         try:
-            words = [w for w in content.split()[:12] if len(w) > 2]
-            if not words:
+            terms = candidate_match_query(content)
+            if not terms:
                 return None
-            fts_q = " OR ".join(self._fts_escape(w) for w in words)
+            fts_q = f"content : ({terms}) AND fts_project : {project_token(project)}"
+            # Materialized so SQLite runs MATCH once instead of once per
+            # project row.
             rows = self.q("""
-                SELECT k.id, k.content FROM knowledge_fts f
-                JOIN knowledge k ON k.id=f.rowid
-                WHERE f.content MATCH ? AND k.status='active' AND k.project=? AND k.type=?
-                ORDER BY rank LIMIT 5
+                WITH f AS MATERIALIZED (
+                    SELECT rowid AS id FROM knowledge_fts WHERE knowledge_fts MATCH ?
+                )
+                SELECT k.id, k.content FROM f JOIN knowledge k ON k.id=f.id
+                WHERE k.status='active' AND k.project=? AND k.type=?
+                ORDER BY k.id
             """, (fts_q, project, ktype))
             for row in rows:
-                if self._jaccard(content, row["content"]) > 0.85:
-                    return row["id"]
-                if self._fuzzy_ratio(content, row["content"]) > 0.90:
+                if repeats(content, row["content"]):
                     return row["id"]
         except Exception as e:
             LOG(f"Dedup FTS error: {e}")
@@ -1396,7 +1386,8 @@ class Store:
                         context="", branch="", skip_dedup=False, filter_name=None,
                         importance="medium", skip_quality=False, coref=None,
                         agent_id=None, parent_agent_id=None,
-                        _from_outbox=False, source_format: Literal['auto', 'conversation'] = 'auto'):
+                        _from_outbox=False, source_format: Literal['auto', 'conversation'] = 'auto',
+                        repeat: Literal['replace', 'confirm'] = 'replace'):
         """Save knowledge. Returns
         ``(record_id, was_deduplicated, was_redacted, private_sections, quality_meta)``.
 
@@ -1427,6 +1418,8 @@ class Store:
                 from contextlib import nullcontext
                 return nullcontext()
 
+        if repeat not in ("replace", "confirm"):
+            raise ValueError(f"repeat must be 'replace' or 'confirm', got {repeat!r}")
         with _v11_op_timer("save_total_ms"):
             return self._save_knowledge_impl(
                 sid, content, ktype, project=project, tags=tags,
@@ -1435,13 +1428,15 @@ class Store:
                 skip_quality=skip_quality, coref=coref,
                 agent_id=agent_id, parent_agent_id=parent_agent_id,
                 _from_outbox=_from_outbox, source_format=source_format,
+                repeat=repeat,
             )
 
     def _save_knowledge_impl(self, sid, content, ktype, project="general", tags=None,
                               context="", branch="", skip_dedup=False, filter_name=None,
                               importance="medium", skip_quality=False, coref=None,
                               agent_id=None, parent_agent_id=None,
-                              _from_outbox=False, source_format: Literal['auto', 'conversation'] = 'auto'):
+                              _from_outbox=False, source_format: Literal['auto', 'conversation'] = 'auto',
+                              repeat: Literal['replace', 'confirm'] = 'replace'):
         """Underlying implementation; wrapped by `save_knowledge` for telemetry."""
         if source_format not in ('auto', 'conversation'):
             raise ValueError('Unsupported source format')
@@ -1643,9 +1638,18 @@ class Store:
                 # Quality gate must never break the underlying save.
                 LOG(f"quality_gate error (continuing): {e}")
 
+        # repeat='replace': a repeat of a stored statement replaces it, so the
+        # statement carries the time it was last made: after "A", "B", "A" the
+        # current value is A again, and readers that order by created_at must
+        # see that. repeat='confirm' keeps the stored row and its authorship
+        # (team stores record a confirmation). An outbox replay is the same
+        # write, not a new statement, and always confirms.
+        replaces = None
         if not skip_dedup:
             dup_id = self._find_duplicate(content, ktype, project)
-            if dup_id:
+            if dup_id and repeat == "replace" and not _from_outbox:
+                replaces = dup_id
+            elif dup_id:
                 if source_format == 'conversation':
                     self.db.execute("UPDATE knowledge SET source_format='conversation' WHERE id=?", (dup_id,))
                 self.db.execute("UPDATE knowledge SET last_confirmed=? WHERE id=?", (now, dup_id))
@@ -1673,6 +1677,20 @@ class Store:
               branch or "", importance_value, agent_id, parent_agent_id, source_format))
         self.db.commit()
         rid = cur.lastrowid
+
+        if replaces:
+            self.db.execute(
+                "UPDATE knowledge SET status='superseded', superseded_by=? WHERE id=? AND status='active'",
+                (rid, replaces),
+            )
+            self._delete_embedding(replaces)
+            self.db.commit()
+            if self.chroma and not self._check_binary_search():
+                try:
+                    self.chroma.delete(ids=[str(replaces)])
+                except Exception as e:  # noqa: BLE001 — chroma raises its own types; cleanup must not fail the save
+                    LOG(f"Chroma delete of replaced id={replaces} failed: {e}")
+            LOG(f"Repeat: id={rid} replaces id={replaces}")
 
         # v2.1.145 agent lineage — when both agent and parent ids are present
         # record a `spawned_by` assertion in the temporal KG so recall can
@@ -1976,7 +1994,7 @@ class Store:
             except Exception as e:
                 LOG(f"enrichment enqueue failed (sync fallback would re-run heavy stages): {e}")
 
-        return rid, False, was_redacted, private_sections, quality_meta
+        return rid, replaces is not None, was_redacted, private_sections, quality_meta
 
     def bump_recall(self, ids):
         """Strengthen memories that are recalled (spaced repetition effect)."""
@@ -2876,11 +2894,6 @@ class Recall:
             if project:
                 conds.append("k.project=?")
                 params.append(project)
-                conds.extend([
-                    "f.rowid >= (SELECT min(id) FROM knowledge WHERE project=?)",
-                    "f.rowid <= (SELECT max(id) FROM knowledge WHERE project=?)",
-                ])
-                params.extend((project, project))
             if ktype != "all":
                 conds.append("k.type=?")
                 params.append(ktype)
@@ -2899,11 +2912,27 @@ class Recall:
             params.append(limit * 3)
             from memory_core.telemetry import op_timer
             with op_timer("retrieval_fts_ms"):
-                fts_rows = self.s.db.execute(f"""
-                    SELECT k.*, bm25(knowledge_fts) AS _bm25
-                    FROM knowledge_fts f JOIN knowledge k ON k.id=f.rowid{joins}
-                    WHERE {' AND '.join(conds)} ORDER BY bm25(knowledge_fts) LIMIT ?
-                """, params).fetchall()
+                if project:
+                    # The project's token is ANDed into MATCH so FTS5 ranks
+                    # only that project's matches; materialized so the planner
+                    # does not re-run MATCH per project row instead.
+                    from memory_core.fts_schema import SCOPED_BM25_WEIGHTS, scoped_match
+                    params[0] = scoped_match(fts_q, project)
+                    fts_rows = self.s.db.execute(f"""
+                        WITH f AS MATERIALIZED (
+                            SELECT rowid AS id, bm25(knowledge_fts, {SCOPED_BM25_WEIGHTS}) AS _bm25
+                            FROM knowledge_fts WHERE {conds[0]}
+                        )
+                        SELECT k.*, f._bm25 AS _bm25
+                        FROM f JOIN knowledge k ON k.id=f.id{joins}
+                        WHERE {' AND '.join(conds[1:])} ORDER BY f._bm25, k.id LIMIT ?
+                    """, params).fetchall()
+                else:
+                    fts_rows = self.s.db.execute(f"""
+                        SELECT k.*, bm25(knowledge_fts) AS _bm25
+                        FROM knowledge_fts f JOIN knowledge k ON k.id=f.rowid{joins}
+                        WHERE {' AND '.join(conds)} ORDER BY bm25(knowledge_fts) LIMIT ?
+                    """, params).fetchall()
             # Proper BM25 normalization: relative to max in batch
             raw_scores = [abs(dict(r).get("_bm25", 0)) for r in fts_rows]
             max_bm25 = max(raw_scores) if raw_scores else 1.0
@@ -4113,7 +4142,9 @@ async def _tool_catalogue():
         Tool(
             name="memory_save",
             description="Save knowledge explicitly. Types: decision (MUST include WHY in context), "
-                        "solution, lesson, fact, convention. Auto-dedup via Jaccard + fuzzy similarity. "
+                        "solution, lesson, fact, convention. Saving the same words again (case and punctuation "
+                        "aside) replaces the stored record, so it carries the latest date; any other text, "
+                        "including a changed value, is stored as a new record. "
                         "v10: a quality gate scores the record before save; below-threshold records are "
                         "rejected with a `rejected_by_quality_gate: true` response (override with "
                         "MEMORY_QUALITY_GATE_ENABLED=false). Use `importance` to surface critical "
@@ -6593,17 +6624,8 @@ async def _do(name, a):
         except Exception:
             n_before = 0
         try:
-            store.db.execute("DROP TABLE IF EXISTS knowledge_fts")
-            store.db.execute(
-                "CREATE VIRTUAL TABLE knowledge_fts USING fts5("
-                "content, context, tags, content='knowledge', content_rowid='id'"
-                ")"
-            )
-            store.db.execute(
-                "INSERT INTO knowledge_fts(rowid, content, context, tags) "
-                "SELECT id, content, context, tags FROM knowledge"
-            )
-            store.db.commit()
+            from memory_core.fts_schema import recreate_knowledge_fts
+            recreate_knowledge_fts(store.db)
         except Exception as e:
             return J({"rebuilt": False, "error": str(e)})
         n_after = store.db.execute(
@@ -7231,7 +7253,8 @@ async def _run_stdio():
         await app.run(r, w, app.create_initialization_options())
 
 
-async def _run_streamable_http(host: str, port: int):
+async def _run_streamable_http(host: str, port: int, sock: socket.socket | None = None,
+                               stateless: bool = False):
     """HTTP transport (MCP Streamable HTTP, spec 2025-03-26).
 
     Exposes:
@@ -7242,6 +7265,10 @@ async def _run_streamable_http(host: str, port: int):
     MCP server runs as a daemon and clients (or sidecars) talk to it
     over the network. Lives at /mcp so the same image can host the
     dashboard on 37737 and MCP on 3737 without path conflicts.
+
+    `sock` is a listening socket shared with sibling worker processes
+    (MCP_HTTP_WORKERS); those run `stateless`, because consecutive
+    requests of one client can reach different workers.
     """
     from contextlib import asynccontextmanager
 
@@ -7252,14 +7279,13 @@ async def _run_streamable_http(host: str, port: int):
     from starlette.responses import JSONResponse, Response
     from starlette.routing import Mount, Route
 
-    # One manager per process — handles session multiplexing for many
-    # concurrent clients. ``stateless=False`` keeps short-lived sessions
-    # in memory, matching local-only deployments.
+    # One manager per process. A single process keeps short-lived sessions
+    # in memory; workers sharing a socket cannot, so they run stateless.
     manager = StreamableHTTPSessionManager(
         app=app,
         event_store=None,
         json_response=False,
-        stateless=False,
+        stateless=stateless,
     )
 
     async def handle_mcp(scope, receive, send):
@@ -7271,6 +7297,7 @@ async def _run_streamable_http(host: str, port: int):
             "transport": "streamable-http",
             "session_id": SID,
             "memory_dir": str(MEMORY_DIR),
+            "pid": os.getpid(),
         })
 
     @asynccontextmanager
@@ -7300,17 +7327,109 @@ async def _run_streamable_http(host: str, port: int):
         timeout_graceful_shutdown=5,
     )
     server = uvicorn.Server(config)
-    LOG(f"MCP HTTP transport listening on http://{host}:{port}/mcp (healthz: /healthz)")
-    await server.serve()
+    LOG(f"MCP HTTP transport listening on http://{host}:{port}/mcp (healthz: /healthz, pid {os.getpid()})")
+    await server.serve(sockets=[sock] if sock is not None else None)
+
+
+HTTP_TRANSPORTS = ("http", "streamable-http", "streamable_http")
+HTTP_LISTEN_BACKLOG = 2048
+
+
+def _transport() -> str:
+    return (os.environ.get("MCP_TRANSPORT", "stdio") or "stdio").lower().strip()
+
+
+def _http_address() -> tuple[str, int]:
+    return os.environ.get("MCP_HTTP_HOST", "127.0.0.1"), int(os.environ.get("MCP_HTTP_PORT", "3737"))
+
+
+def _http_workers() -> int:
+    raw = os.environ.get("MCP_HTTP_WORKERS", "1").strip() or "1"
+    try:
+        workers = int(raw)
+    except ValueError:
+        raise SystemExit(f"MCP_HTTP_WORKERS must be a positive integer, got {raw!r}") from None
+    if workers < 1:
+        raise SystemExit(f"MCP_HTTP_WORKERS must be a positive integer, got {raw!r}")
+    return workers
+
+
+HTTP_LISTEN_FD_ENV = "MCP_HTTP_LISTEN_FD"
+
+
+def _hold_init_lock():
+    """Exclusive lock that serialises worker start-up.
+
+    Workers start together; on a fresh store they would race to apply the
+    schema migrations. The first one to hold the lock applies them.
+    """
+    import fcntl
+
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    lock = open(MEMORY_DIR / ".http-workers.lock", "w")  # noqa: SIM115 — released in _http_worker
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    return lock
+
+
+async def _http_worker(host: str, port: int, sock: socket.socket, init_lock):
+    import fcntl
+
+    try:
+        await _bootstrap_session()
+    finally:
+        fcntl.flock(init_lock, fcntl.LOCK_UN)
+        init_lock.close()
+    await _run_streamable_http(host, port, sock=sock, stateless=True)
+
+
+def _serve_http_workers(host: str, port: int, workers: int) -> None:
+    """Run `workers` HTTP server processes on one listening socket.
+
+    Tool calls run synchronously inside a process's event loop, so one
+    process serves one call at a time. Each worker is a fresh interpreter
+    with its own Store and SQLite connection, handed the listening socket
+    by file descriptor; SQLite (WAL) serialises their writes. If any worker
+    exits, the others are stopped and its exit code is passed on, so the
+    service manager (systemd, Docker, k8s) restarts the whole group.
+    """
+    if os.name != "posix":
+        raise SystemExit("MCP_HTTP_WORKERS > 1 needs a POSIX system (Linux, macOS); use one worker.")
+    sock = socket.create_server((host, port), backlog=HTTP_LISTEN_BACKLOG)
+    fd = sock.fileno()
+    env = dict(os.environ, MCP_HTTP_WORKERS="1", **{HTTP_LISTEN_FD_ENV: str(fd)})
+    children = [
+        subprocess.Popen([sys.executable, os.path.abspath(__file__)], env=env, pass_fds=(fd,))
+        for _ in range(workers)
+    ]
+    sock.close()
+    LOG(f"MCP HTTP: {workers} workers on http://{host}:{port}/mcp, pids {[c.pid for c in children]}")
+
+    def stop_children(signum=None, frame=None):
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+
+    signal.signal(signal.SIGTERM, stop_children)
+    signal.signal(signal.SIGINT, stop_children)
+    by_pid = {child.pid: child for child in children}
+    exit_code: int | None = None
+    while by_pid:
+        pid, status = os.wait()
+        if by_pid.pop(pid, None) is None:
+            continue
+        if exit_code is None:
+            exit_code = os.waitstatus_to_exitcode(status)
+            if by_pid:
+                LOG(f"HTTP worker {pid} exited with {exit_code}; stopping the others")
+                stop_children()
+    sys.exit(exit_code or 0)
 
 
 async def main():
     await _bootstrap_session()
-    transport = (os.environ.get("MCP_TRANSPORT", "stdio") or "stdio").lower().strip()
-    if transport in ("http", "streamable-http", "streamable_http"):
-        host = os.environ.get("MCP_HTTP_HOST", "127.0.0.1")
-        port = int(os.environ.get("MCP_HTTP_PORT", "3737"))
-        await _run_streamable_http(host, port)
+    transport = _transport()
+    if transport in HTTP_TRANSPORTS:
+        await _run_streamable_http(*_http_address())
     elif transport == "stdio":
         await _run_stdio()
     else:
@@ -7320,5 +7439,16 @@ async def main():
         )
 
 
+def run() -> None:
+    """Process entry point: one server, a worker handed a socket, or a group of workers."""
+    listen_fd = os.environ.get(HTTP_LISTEN_FD_ENV)
+    if listen_fd:
+        asyncio.run(_http_worker(*_http_address(), socket.socket(fileno=int(listen_fd)), _hold_init_lock()))
+    elif _transport() in HTTP_TRANSPORTS and _http_workers() > 1:
+        _serve_http_workers(*_http_address(), _http_workers())
+    else:
+        asyncio.run(main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    run()

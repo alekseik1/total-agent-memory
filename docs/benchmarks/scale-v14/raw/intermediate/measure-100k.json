@@ -1,0 +1,47 @@
+{
+  "records": 100000,
+  "rows": {
+    "knowledge": 100000,
+    "embeddings": 100000,
+    "graph_nodes": 100220,
+    "graph_edges": 337627,
+    "knowledge_nodes": 437627
+  },
+  "first_recall_ms": 2210.6,
+  "recall_tenant": {
+    "n": 300,
+    "p50": 24.4,
+    "p95": 63.9,
+    "p99": 70.4,
+    "max": 84.5,
+    "mean": 36.0,
+    "hit_at_5": 1.0
+  },
+  "recall_all": {
+    "n": 300,
+    "p50": 106.6,
+    "p95": 177.9,
+    "p99": 186.3,
+    "max": 481.9,
+    "mean": 127.2,
+    "hit_at_5": 0.973
+  },
+  "save": {
+    "n": 50,
+    "p50": 39.1,
+    "p95": 57.1,
+    "p99": 155.3,
+    "max": 246.8,
+    "mean": 41.4
+  },
+  "recall_after_write": {
+    "n": 50,
+    "p50": 27.2,
+    "p95": 67.9,
+    "p99": 68.9,
+    "max": 69.5,
+    "mean": 38.5
+  },
+  "db_mb": 688.6,
+  "peak_rss_mb": 1044.7
+}

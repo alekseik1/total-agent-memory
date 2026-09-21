@@ -57,6 +57,7 @@ def _service_defs() -> list[ServiceDef]:
                 "MCP_TRANSPORT": os.environ.get("MCP_TRANSPORT", "http"),
                 "MCP_HTTP_HOST": os.environ.get("MCP_HTTP_HOST", "0.0.0.0"),
                 "MCP_HTTP_PORT": os.environ.get("MCP_HTTP_PORT", "3737"),
+                "MCP_HTTP_WORKERS": os.environ.get("MCP_HTTP_WORKERS", "1"),
             },
         ),
         ServiceDef(

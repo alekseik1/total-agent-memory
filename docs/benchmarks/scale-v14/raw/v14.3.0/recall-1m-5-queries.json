@@ -1,0 +1,1 @@
+{"records": 1010598, "note": "5 needle queries per series; full series was stopped after 29 min", "recall_tenant_ms": [8079, 63977, 6331, 7724, 63598], "recall_all_ms": [7999, 7752, 5025, 4980, 7696]}

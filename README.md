@@ -6,7 +6,7 @@
 > Persistent, local memory for AI coding agents: Claude Code, Codex CLI, Cursor, any MCP client.
 > Temporal knowledge graph · procedural memory · AST codebase ingest · cross-project analogy · 3D WebGL visualization.
 
-[![Version](https://img.shields.io/badge/version-14.3.0-8ad.svg)](https://pypi.org/project/total-agent-memory/)
+[![Version](https://img.shields.io/badge/version-14.3.1-8ad.svg)](https://pypi.org/project/total-agent-memory/)
 [![Tests](https://img.shields.io/badge/tests-2162%20passing-4a9.svg)](docs/benchmarks/release-final-v14-20260915/RESULTS.md)
 [![IDEs](https://img.shields.io/badge/IDEs-9%20supported-4a9.svg)]()
 [![LongMemEval R@5](https://img.shields.io/badge/LongMemEval%20R@5-95.1%25-4a9.svg)](evals/longmemeval-2026-08-27-v13-store.json)
@@ -22,6 +22,33 @@
 [![Donate](https://img.shields.io/badge/PayPal-Donate-00457C.svg?logo=paypal&logoColor=white)](https://PayPal.Me/vbcherepanov)
 
 **Why this, not mem0 / Letta / Zep / Supermemory / Cognee?** → [docs/vs-competitors.md](docs/vs-competitors.md)
+
+---
+
+## Version 14.3.1 — updates are no longer dropped, recall stays fast at 1M records
+
+**Release date: 2026-09-21.**
+
+Two problems that got worse as a store grew. Dedup treated near-identical texts as repeats, so
+an update that changed one value ("Messi's citizenship is Argentina" → "... Armenia",
+"PostgreSQL 16" → "18") was dropped and the old value kept; on MemoryAgentBench
+FactConsolidation 14.3.0 lost 36 of 455 facts. And several queries behind every recall and save
+read the whole store. Measured on one machine with 200 synthetic tenants
+([report](docs/benchmarks/scale-v14/RESULTS.md)):
+
+| | 14.3.0 | 14.3.1 |
+|---|---:|---:|
+| Tenant-scoped `memory_recall`, 100k records, p50 / p95 | 781 / 1,901 ms | 25 / 35 ms |
+| Tenant-scoped `memory_recall`, 1M records, p50 / p95 | 6–64 s | 105 / 147 ms |
+| HTTP calls/s, 100k records, 16 clients | 1.3 | 37 (one process), 117 (`MCP_HTTP_WORKERS=4`) |
+
+| Change | How you use it |
+|---|---|
+| **Updates are kept** | Automatic. A record is a repeat only when it has the same words in the same order (case, punctuation and ё/е aside). A repeat replaces the stored record, so "A", then "B", then "A" leaves A as the latest. |
+| **Scoped search follows the project, not the store** | Automatic. Migration 035 puts the project into the full-text index (rebuilt once, about 30 s per million records); graph seeds and `available_solutions` use indexes. |
+| **HTTP workers** | `MCP_HTTP_WORKERS=4` with `MCP_TRANSPORT=http`: four server processes on one port, stateless sessions, POSIX only. In Docker Compose: `TAM_MCP_WORKERS=4`. |
+| **Scale benchmark** | `benchmarks/scale_bench.py` loads a synthetic multi-tenant corpus through the real save path and measures recall, save, HTTP throughput and concurrent writers. |
+| **MemoryAgentBench** | FactConsolidation results: [findings](docs/benchmarks/memoryagentbench/FINDINGS.md). |
 
 ---
 
@@ -115,14 +142,14 @@ Install the candidate wheel in a dedicated environment. Linux/macOS:
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./dist/total_agent_memory-14.3.0-py3-none-any.whl
+python -m pip install ./dist/total_agent_memory-14.3.1-py3-none-any.whl
 ```
 
 Windows PowerShell, using the environment directly without changing the execution policy:
 
 ```powershell
 py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install .\dist\total_agent_memory-14.3.0-py3-none-any.whl
+.\.venv\Scripts\python.exe -m pip install .\dist\total_agent_memory-14.3.1-py3-none-any.whl
 $env:PATH = "$PWD\.venv\Scripts;$env:PATH"
 ```
 
@@ -218,6 +245,7 @@ Optional remote LLM providers receive the content used in those tasks. Keep Olla
 
 ## Table of contents
 
+- [Version 14.3.1 — updates are no longer dropped, recall stays fast at 1M records](#version-1431--updates-are-no-longer-dropped-recall-stays-fast-at-1m-records)
 - [Version 14.3.0 — Jev as the contradiction checker](#version-1430--jev-as-the-contradiction-checker)
 - [Version 14.2.0 — facts that change over time](#version-1420--facts-that-change-over-time)
 - [Version 14.1.0 — what is new](#version-1410--what-is-new)
@@ -679,7 +707,7 @@ These are the published distribution channels. For the unpublished v14 candidate
 | **uvx** (Python via uv) | `uvx total-agent-memory` | One-off run with no install. Best for trying without commitment. |
 | **pipx** (Python isolated) | `pipx install total-agent-memory` | Installs the `total-agent-memory`, `tam`, `tam-lookup`, `lookup-memory` binaries on PATH in an isolated venv. |
 | **brew** (macOS / Linuxbrew) | `brew install vbcherepanov/tap/total-memory` | Bottle-style install with `tam` and legacy `claude-total-memory` symlinks. |
-| **Docker** (multi-arch) | `docker run -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:14.3.0` | Containerized (linux/amd64 + linux/arm64). Dashboard on `:37737`. |
+| **Docker** (multi-arch) | `docker run -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:14.3.1` | Containerized (linux/amd64 + linux/arm64). Dashboard on `:37737`. |
 | **Claude Code plugin** | `/plugin marketplace add vbcherepanov/total-agent-memory`<br>`/plugin install total-agent-memory@vbcherepanov` | Installs the MCP server, the `memory-protocol` skill and all seven capture hooks in one step, from inside Claude Code. The bootstrap reuses an existing install if it finds one, so nothing is downloaded twice. |
 | **Manual clone** | `git clone https://github.com/vbcherepanov/total-agent-memory ~/total-agent-memory && cd ~/total-agent-memory && ./install.sh --ide claude-code` | Full control. Lets you hack on the server, run benchmarks, and pick which background services to enable. Detailed walkthrough below. |
 
