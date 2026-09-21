@@ -1331,7 +1331,7 @@ Environment variables (all optional):
 | `MEMORY_ENRICH_BATCH` | `5` | Rows claimed per tick (clamp `1..50`) |
 | `MEMORY_ENRICH_MAX_ATTEMPTS` | `3` | Retries before flipping a row to `failed` |
 | `MEMORY_ENRICH_STALE_AFTER_SEC` | `60` | Seconds before a `processing` row is reclaimed (worker crash recovery) |
-| `MEMORY_RULES_LIMIT` | _unset → no cap_ | Cap on rules returned by `self_rules_context` (overridable per-call via `limit`). Only rules actually returned get `fire_count`/`last_fired` bumped, which feeds the `self_patterns` `rule_effectiveness` report — narrowing this also narrows that telemetry. A truncated response carries `rules_index` (id/priority/category/head of every omitted rule) plus a `hint`; fetch their full text with `self_rules(action="get", ids=[...])`. |
+| `MEMORY_RULES_LIMIT` | _unset → no cap_ | Cap on rules returned by `self_rules_context` (overridable per-call via `limit`). Only rules actually returned get `fire_count`/`last_fired` bumped, which feeds the `self_patterns` `rule_effectiveness` report - narrowing this also narrows that telemetry. A truncated response carries `rules_index` (id/priority/category/head of every omitted rule) plus a `hint`; fetch their full text with `self_rules(action="get", ids=[...])`. |
 
 > CPU-only / WSL hosts: if Ollama keeps timing out, lower `MEMORY_TRIPLE_MAX_PREDICT` before raising timeouts. `install-codex.sh` writes conservative defaults automatically. **For 30-40s save latency on WSL2 → set `MEMORY_ASYNC_ENRICHMENT=true`** — see below.
 

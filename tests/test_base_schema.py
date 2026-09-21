@@ -1,4 +1,4 @@
-"""Tests for src/base_schema.py — the single-source-of-truth SQLite schema."""
+"""Tests for src/base_schema.py - the single-source-of-truth SQLite schema."""
 
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ def test_apply_full_schema_seeds_fact_merge_session():
 def test_the_shared_schema_creates_the_self_improvement_tables():
     """`apply_full_schema` must build the same tables production has.
 
-    It used to omit errors/insights/rules — they were created only by
+    It used to omit errors/insights/rules - they were created only by
     `Store._create_self_improvement_tables`, which the test fixture never
     called. Nothing noticed until migration 038 became the first migration to
     touch `errors` and broke every fixture built this way. A schema the tests

@@ -1,7 +1,7 @@
 """`session_end` must not force a caller to name a session it cannot know.
 
 No tool hands out this process's SID, so a caller obliged to pass `session_id`
-invents one — which is how 231 of 256 stored summaries came to name sessions
+invents one - which is how 231 of 256 stored summaries came to name sessions
 that never existed. Omitting it now means "this server's own session".
 """
 

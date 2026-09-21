@@ -159,7 +159,7 @@ services:
       <<: *memory-env
       REFLECT_DEBOUNCE_SEC: "5"
       REFLECT_INTERVAL_SEC: "3600"
-      # Scheduled full (digest+synthesize) run — same 4x/day cadence as the
+      # Scheduled full (digest+synthesize) run - same 4x/day cadence as the
       # macOS/systemd calendar jobs (02/08/14/20), interval-based here since
       # Docker has no calendar scheduler. Independent of the auto/drain path.
       REFLECT_FULL_INTERVAL_SEC: "21600"

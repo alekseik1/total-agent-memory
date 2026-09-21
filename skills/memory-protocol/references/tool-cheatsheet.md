@@ -294,10 +294,10 @@ consolidation.
 **Load behavioural rules at session start.** Returns a curated set
 filtered by current project + phase. The `phase` filter uses
 `phase:X` tags (zero-migration mechanic). `limit` caps the number of
-rules returned (default: unset — no cap; also settable via the
+rules returned (default: unset - no cap; also settable via the
 `MEMORY_RULES_LIMIT` env var). Only rules actually returned get their
 `fire_count`/`last_fired` bumped, which feeds the `self_patterns`
-`rule_effectiveness` report — narrowing `limit` also narrows that
+`rule_effectiveness` report - narrowing `limit` also narrows that
 telemetry.
 
 ### `self_patterns(view?, project?, days?)`

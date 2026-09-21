@@ -5,12 +5,12 @@
 -- `Store.session_start` stamps 'general' because the server had no project
 -- resolution at bootstrap. The result on a real database: every row in
 -- `sessions` open (`ended_at IS NULL`) and in one project bucket, while
--- `session_summaries` held the truth — 1,685 rows against 77 summaries in the
+-- `session_summaries` held the truth - 1,685 rows against 77 summaries in the
 -- last 30 days alone. Both leaks are fixed in code; this repairs the history.
 --
 -- Only sessions that actually have a summary are touched. A session with no
 -- summary was never ended (a crash, a killed client), and saying otherwise
--- would invent an end time — those rows stay open on purpose.
+-- would invent an end time - those rows stay open on purpose.
 --
 -- Where one session_id somehow carries several summaries, the latest one wins
 -- (MAX(ended_at)); project/branch are taken from that same newest row.

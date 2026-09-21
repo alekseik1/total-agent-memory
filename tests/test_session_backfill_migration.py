@@ -62,7 +62,7 @@ def test_a_session_with_a_summary_is_closed_and_named(db):
 
 
 def test_a_session_without_a_summary_stays_open(db):
-    """It was never ended — the migration must not invent an end time."""
+    """It was never ended - the migration must not invent an end time."""
     _session(db, "s2")
     db.commit()
 
@@ -101,7 +101,7 @@ def test_the_newest_summary_wins_when_a_session_has_several(db):
 
 
 def test_a_summary_that_only_says_general_does_not_overwrite_the_row(db):
-    """'general' in the summary is the same placeholder — not an improvement."""
+    """'general' in the summary is the same placeholder - not an improvement."""
     _session(db, "s5")
     _summary(db, "s5", project="general", branch="")
     db.commit()

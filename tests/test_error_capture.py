@@ -1,4 +1,4 @@
-"""Tests for src/error_capture.py - v7.0 Phase D."""
+"""Tests for src/error_capture.py — v7.0 Phase D."""
 
 import sqlite3
 from pathlib import Path

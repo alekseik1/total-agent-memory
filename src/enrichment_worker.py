@@ -538,7 +538,7 @@ class _WorkerThread(threading.Thread):
         """The file behind `store.db`, or None when there is none to reopen."""
         try:
             row = self._store.db.execute("PRAGMA database_list").fetchone()
-        except Exception as e:  # noqa: BLE001 — a test double must not kill the thread
+        except Exception as e:  # noqa: BLE001 - a test double must not kill the thread
             LOG(f"own connection unavailable, sharing the store's: {e}")
             return None
         return (row[2] or None) if row else None
@@ -554,9 +554,9 @@ class _WorkerThread(threading.Thread):
 
         A Store that predates `db_path` still gets its own connection: the
         file is asked of the connection itself via `PRAGMA database_list`.
-        Only when neither route yields a path — a test double whose `db` is
+        Only when neither route yields a path - a test double whose `db` is
         not a connection, or an in-memory database, which cannot be reopened
-        and whose private copy would silently drain a different, empty queue —
+        and whose private copy would silently drain a different, empty queue -
         does the worker keep sharing, preserving previous behaviour rather
         than refusing to start.
         """
@@ -568,7 +568,7 @@ class _WorkerThread(threading.Thread):
         # No journal_mode here: WAL is a persistent property of the file, set
         # by whoever opened it first (server.py). Re-declaring it takes a lock
         # no other connection may hold, so it fails with "database is locked"
-        # exactly when a second writer exists — the case this code is for.
+        # exactly when a second writer exists - the case this code is for.
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         return conn, True

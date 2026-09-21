@@ -6,7 +6,7 @@
 -- was 25 of 256 summaries. The other 231 name sessions the MCP process never
 -- opened: the Claude Code session id a hook reports (a bare uuid), an id a
 -- caller made up (`mcp_20260830_ag2683_expired_draft_loop`), an API session
--- (`session_01TVefg...`). They were real sessions — they just ended under an
+-- (`session_01TVefg...`). They were real sessions - they just ended under an
 -- identity this server does not issue, and `session_end` had no reason to
 -- create a row. It does now; this repairs the history.
 --

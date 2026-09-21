@@ -90,7 +90,7 @@ def main() -> None:
             pending_since = 0.0
             continue
 
-        # Scheduled full run (digest+synthesize) — its own independent
+        # Scheduled full run (digest+synthesize) - its own independent
         # cadence, never triggered by on-save activity. An earlier attempt
         # escalated the auto/drain path to full based on DB state; that was
         # reverted because it let a routine save hold .reflect.lock for a

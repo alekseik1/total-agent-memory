@@ -14,7 +14,7 @@ def fcdb():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     # apply_full_schema now creates errors/rules itself (base_schema.py
-    # apply_self_improvement_tables) — no need to hand-roll them here.
+    # apply_self_improvement_tables) - no need to hand-roll them here.
     apply_full_schema(conn)
     yield conn
     conn.close()

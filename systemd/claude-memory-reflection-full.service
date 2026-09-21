@@ -1,5 +1,5 @@
 [Unit]
-Description=Claude Memory — full reflection (digest+synthesize) 4x/day
+Description=Claude Memory - full reflection (digest+synthesize) 4x/day
 Documentation=https://github.com/vbcherepanov/total-agent-memory
 After=network-online.target
 

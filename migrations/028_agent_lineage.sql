@@ -13,10 +13,10 @@
 -- The columns themselves are added by `base_schema.apply_core_column_migrations`,
 -- which runs before this file and is PRAGMA-guarded. This migration used to
 -- ALTER them in too, which meant it raised `duplicate column name: agent_id`
--- on every startup and was never recorded as applied — it had still not applied
+-- on every startup and was never recorded as applied - it had still not applied
 -- on a database that had been running it for months.
 --
 -- The two partial indexes this migration used to create are also now issued
 -- unconditionally by `apply_core_column_migrations`, so nothing is left for
--- this file to do — it stays as a historical marker so `version` 028 remains
+-- this file to do - it stays as a historical marker so `version` 028 remains
 -- a recorded, applied row in every database, rather than a gap in the chain.
