@@ -2,7 +2,7 @@
 
 `_save_report` (src/reflection/agent.py) wrote synthesis['edges_strengthened']
 into column `new_nodes`, synthesis['clusters_found'] into `patterns_found`,
-and synthesis['skills_proposed'] into `skills_refined` — a live report read
+and synthesis['skills_proposed'] into `skills_refined` - a live report read
 `new_nodes=116176`, which is strengthened graph edges, not new nodes. 039
 renames the three columns to match what they actually hold, and drops
 `rules_proposed`, which every INSERT hardcoded to 0.

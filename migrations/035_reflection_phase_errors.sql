@@ -19,7 +19,7 @@
 -- version >= TRANSACTIONAL_SCHEMA_VERSION run through
 -- `memory_core.schema_migration.MigrationRunner`, which has no tolerance for
 -- "duplicate column name" the way the legacy path's
--- `Store._replay_migration_skipping_existing` does — a bare re-run would
+-- `Store._replay_migration_skipping_existing` does - a bare re-run would
 -- raise `MigrationFailed` uncaught and crash `Store.__init__`. The real work
 -- moved to `base_schema.apply_reflection_report_column_migrations`
 -- (PRAGMA-guarded, same pattern as `apply_core_column_migrations`), called

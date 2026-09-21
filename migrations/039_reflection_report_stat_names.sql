@@ -4,14 +4,14 @@
 --
 -- `_save_report` (src/reflection/agent.py) wrote synthesis['edges_strengthened']
 -- into `new_nodes`, synthesis['clusters_found'] into `patterns_found`, and
--- synthesis['skills_proposed'] into `skills_refined` — none of those pairs
+-- synthesis['skills_proposed'] into `skills_refined` - none of those pairs
 -- share a meaning. On a real database this reads `new_nodes=116176`, which is
 -- strengthened graph edges, not new nodes. Renaming to match what is actually
 -- stored; the existing rows carry over unchanged, `RENAME COLUMN` only
 -- relabels them.
 --
 -- `rules_proposed` was hardcoded to 0 in every INSERT `_save_report` ever
--- issued — nothing in this codebase computes or writes a real value for it.
+-- issued - nothing in this codebase computes or writes a real value for it.
 -- A column that always lies is worse than no column; dropped rather than
 -- renamed.
 --
@@ -22,7 +22,7 @@
 -- not safe to repeat: SQLite raises "no such column" the second time, and
 -- migrations with a version >= TRANSACTIONAL_SCHEMA_VERSION run through
 -- `memory_core.schema_migration.MigrationRunner`, which has no tolerance for
--- that error — a bare re-run would raise `MigrationFailed` uncaught and
+-- that error - a bare re-run would raise `MigrationFailed` uncaught and
 -- crash `Store.__init__`. The real work moved to
 -- `base_schema.apply_reflection_report_column_migrations` (PRAGMA-guarded,
 -- same pattern as `apply_core_column_migrations`), called from

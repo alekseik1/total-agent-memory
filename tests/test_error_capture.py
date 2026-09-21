@@ -1,4 +1,4 @@
-"""Tests for src/error_capture.py — v7.0 Phase D."""
+"""Tests for src/error_capture.py - v7.0 Phase D."""
 
 import sqlite3
 from pathlib import Path
@@ -106,7 +106,7 @@ def test_learn_error_with_a_fix_is_resolved_and_stamped(ec, ec_db):
 
 
 def test_learn_error_rejects_empty_fix_instead_of_leaving_the_row_open(ec, ec_db):
-    """fix is a required, validated field — an empty fix never reaches the
+    """fix is a required, validated field - an empty fix never reaches the
     INSERT, so there is no path where learn_error writes an open row."""
     with pytest.raises(ValueError):
         ec.learn_error(**_sample(fix=""))
@@ -213,7 +213,7 @@ def test_rules_for_pattern(ec):
 
 def test_resolve_marks_error_resolved(ec, ec_db):
     # learn_error requires a fix, so it never leaves a row open (see the
-    # migration-038 tests below) — insert an open row directly to exercise
+    # migration-038 tests below) - insert an open row directly to exercise
     # resolve() on its own, e.g. an error logged by another writer.
     cur = ec_db.execute(
         """INSERT INTO errors (session_id, category, severity, description,

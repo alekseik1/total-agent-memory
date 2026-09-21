@@ -2,13 +2,13 @@
 
 `src/sql/base_schema.sql` holds the DDL; this module just locates and reads
 it. Lives under `src/` (not `migrations/`) so it ships inside the `src`
-package-data glob (`**/*.sql`) in a wheel install — `migrations/` is a
+package-data glob (`**/*.sql`) in a wheel install - `migrations/` is a
 top-level non-package directory and is absent from a non-editable install.
 Kept separate from `server.py` so tests can load the real schema without
 paying for the server's heavy imports (chromadb, sentence-transformers).
 
 Production reads it via `Store._schema()`; the pytest `db` fixture reads the
-same text. That is the point — a fixture that invents its own tables lets code
+same text. That is the point - a fixture that invents its own tables lets code
 ship against a schema production does not have.
 """
 
@@ -35,7 +35,7 @@ def apply_full_schema(db: sqlite3.Connection) -> None:
 
     Exists for tests. A fixture that hand-rolls its own ``knowledge`` table is
     how `fact_merger` shipped writing to a column production does not have with
-    a fully green suite — so fixtures call this instead of inventing DDL.
+    a fully green suite - so fixtures call this instead of inventing DDL.
     """
     db.executescript(base_schema_sql())
     apply_core_column_migrations(db)
@@ -54,12 +54,12 @@ def apply_core_column_migrations(db: sqlite3.Connection, log=lambda _msg: None) 
     calls it too, so a column can never exist in tests but not in production.
 
     `recall_count`, `last_recalled` and `updated_at` ARE already declared in
-    the base DDL (`src/sql/base_schema.sql`) — the base DDL covers fresh
+    the base DDL (`src/sql/base_schema.sql`) - the base DDL covers fresh
     databases, this function covers pre-existing ones, and each ALTER here is
     PRAGMA-guarded so running both against the same column is safe. The rule
     this protects: no column may be added by a bare `ALTER TABLE` in a
     numbered `migrations/*.sql` file if it also lives in the base DDL, because
-    `_apply_sql_migrations` retries any migration that raises — so a column
+    `_apply_sql_migrations` retries any migration that raises - so a column
     present in both the base DDL and a migration file makes that migration
     fail, and retry, on every single startup, forever.
     """
@@ -109,7 +109,7 @@ def apply_reflection_report_column_migrations(db: sqlite3.Connection, log=lambda
     ``apply_core_column_migrations`` above.
 
     `reflection_reports` is created by `migrations/001_v5_schema.sql`, not the
-    base DDL, so this cannot run from `apply_core_column_migrations` — that
+    base DDL, so this cannot run from `apply_core_column_migrations` - that
     function runs from `Store._migrate()`, which executes before
     `Store._apply_sql_migrations()` has had a chance to run migration 001. It
     must instead run after `_apply_sql_migrations`'s loop, once the table is
@@ -123,7 +123,7 @@ def apply_reflection_report_column_migrations(db: sqlite3.Connection, log=lambda
     before the v14.2.0 merge renumbered them). A database that already
     applied them under the old numbers runs them again under the new ones,
     and `ADD COLUMN` / `RENAME COLUMN` / `DROP COLUMN` are not safe to
-    repeat in SQLite — see the comment atop each of those files.
+    repeat in SQLite - see the comment atop each of those files.
     """
     tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     if "reflection_reports" not in tables:
@@ -149,13 +149,13 @@ def apply_reflection_report_column_migrations(db: sqlite3.Connection, log=lambda
 
 
 def apply_self_improvement_tables(db: sqlite3.Connection) -> None:
-    """Create errors/insights/rules — the Self-Improving Agent tables.
+    """Create errors/insights/rules - the Self-Improving Agent tables.
 
     Shared by ``Store._create_self_improvement_tables`` and the
     ``apply_full_schema`` test fixture builder, for the same reason
     ``apply_core_column_migrations`` is shared: these tables live outside
     `src/sql/base_schema.sql` (they predate it and are created lazily), so a
-    fixture that skips this step doesn't have the `errors` table at all — and
+    fixture that skips this step doesn't have the `errors` table at all - and
     any `migrations/*.sql` file that touches `errors` (e.g. 032) breaks every
     test built on `apply_full_schema` the moment it does. All statements are
     `IF NOT EXISTS`, so calling this unconditionally is safe.
