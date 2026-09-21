@@ -1284,6 +1284,10 @@ class Store:
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e).lower():
                     LOG(f"Migration {version} failed: {e}")
+                    # executescript commits as it goes, so the statements
+                    # before the failing one are already persisted; this
+                    # migration retries next startup against a
+                    # partially-applied schema, not a clean one.
                     continue  # don't mark applied — will retry next startup
                 # SQLite has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS, so a
                 # DB where the column already exists (restored backup, column

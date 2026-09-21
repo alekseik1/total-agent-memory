@@ -138,9 +138,25 @@ def apply_reflection_report_column_migrations(db: sqlite3.Connection, log=lambda
     protects sequential replay, not a concurrent first run. With the lock
     taken first, the second caller blocks until the first commits, then
     re-reads the now-migrated schema and is a no-op.
+
+    This function cannot verify its caller's transaction state - it only
+    takes a `Connection`, not the code that produced one. `BEGIN IMMEDIATE`
+    raises `cannot start a transaction within a transaction` if handed a
+    connection that already has one open. Neither current caller's own
+    `executescript` loop can trigger that - `executescript` commits as it
+    goes, so it never leaves an implicit transaction open even when a
+    statement in it fails. The reachable case is an external caller holding
+    an uncommitted write on the same connection before invoking this
+    function directly (see
+    `test_reflection_report_column_migrations_noops_on_an_open_transaction`);
+    skipping rather than raising keeps that caller's transaction from being
+    killed by `Store.__init__`.
     """
     tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     if "reflection_reports" not in tables:
+        return
+    if db.in_transaction:
+        log("apply_reflection_report_column_migrations: connection already has an open transaction, skipping")
         return
 
     db.execute("BEGIN IMMEDIATE")

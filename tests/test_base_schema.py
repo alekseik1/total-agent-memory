@@ -213,3 +213,31 @@ def test_reflection_report_column_migrations_serializes_concurrent_first_runs(tm
 
     conn_a.close()
     conn_b.close()
+
+
+def test_reflection_report_column_migrations_noops_on_an_open_transaction():
+    """Neither current caller (`Store._apply_sql_migrations`,
+    `apply_full_schema`) should ever hand this an in-progress transaction -
+    but this function only gets a `Connection`, not the code that produced
+    it, so it cannot verify that. `BEGIN IMMEDIATE` raises "cannot start a
+    transaction within a transaction" into a connection that already has one
+    open; a prior round's fix for that made this a no-op instead of letting
+    the exception kill `Store.__init__`.
+    """
+    from base_schema import apply_full_schema, apply_reflection_report_column_migrations
+
+    db = sqlite3.connect(":memory:")
+    apply_full_schema(db)
+    cols_before = {r[1] for r in db.execute("PRAGMA table_info(reflection_reports)").fetchall()}
+
+    db.execute("INSERT INTO sessions (id, started_at) VALUES ('leak-probe', 'x')")
+    assert db.in_transaction is True
+
+    apply_reflection_report_column_migrations(db)  # must not raise
+
+    assert db.in_transaction is True, "a no-op must leave the caller's transaction exactly as handed"
+    cols_after = {r[1] for r in db.execute("PRAGMA table_info(reflection_reports)").fetchall()}
+    assert cols_after == cols_before, "a no-op must not partially migrate the table"
+
+    db.rollback()
+    db.close()
