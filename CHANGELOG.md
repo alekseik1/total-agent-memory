@@ -4,6 +4,12 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+## [14.3.0] - 2026-09-21
+
+- `MEMORY_CONTRADICTION_SCORER=jev` scores the contradiction pairs of `memory_answer` with TypeSafe's Jev (System One API): one `noul` question per pair, one request per pass. Same accuracy as the Claude Haiku 4.5 scorer within noise (LongMemEval knowledge-update 35/78 vs 36/78); the median contradiction pass drops from 3.1 s to 1.9 s, and Jev billed $0.038 for all 78 questions. Needs `TYPESAFE_API_KEY`; `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` are optional. The default scorer is unchanged.
+- The Jev client rejects empty keys and keys with control characters without echoing them, retries 408/429/5xx and connection errors with backoff, and honours `retry-after-ms` / `Retry-After` up to 60 s.
+- `benchmarks/knowledge_update_eval.py` records per-question contradiction-pass time and Jev token usage.
+
 ## [14.2.0] - 2026-09-21
 
 - `memory_answer` answers with the latest value of a fact that changed over time ("Mary loves red", later "Mary no longer likes red; she has fallen for green" → *green, previously red*). The reader and verifier now see each record's recording date, and a value stays current until a later record changes it. LongMemEval knowledge-update 12/78 → 35/78 with Claude Haiku 4.5; see `docs/benchmarks/knowledge-update-v14/RESULTS.md`.

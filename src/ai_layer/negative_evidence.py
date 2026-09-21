@@ -7,6 +7,8 @@ builds these two adapters from its configured provider and injects them:
   question into a contradiction-seeking query.
 * :class:`LLMContradictionScorer` — a ``ContradictionBatchFn`` that scores
   every (positive, negative) pair of one pass in a single structured call.
+* :class:`JevContradictionScorer` — the same contract on TypeSafe's Jev: one
+  ``noul`` question per pair, one System One request per pass.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import json
 import re
 
 from ai_layer.grounded_schema import object_schema
+from ai_layer.jev_client import JevClient
 from llm_provider import LLMProvider, StructuredLLMProvider
 from memory_core.telemetry import counters
 
@@ -80,6 +83,44 @@ def parse_scores(raw: str, pair_count: int) -> list[float]:
     if sorted(scores) != list(range(1, pair_count + 1)):
         raise ValueError('Contradiction scorer did not score every pair exactly once')
     return [scores[index] for index in range(1, pair_count + 1)]
+
+
+JEV_STATE = 'Contradiction check between remembered facts.'
+JEV_CRITERIA = {
+    'true': 'Both facts are about the person or thing the question asks about, and fact B makes fact A '
+            'no longer true now (a changed preference, replaced value or negation).',
+    'false': 'Fact B does not change what fact A says about the person or thing the question asks about: '
+             'it concerns someone else, adds a compatible detail, restates it, or only recalls the past.',
+}
+
+
+class JevContradictionScorer:
+    """Scores all pairs of one negative pass in one TypeSafe System One call.
+
+    Each pair becomes a ``noul`` question; its probability is the contradiction
+    score. Jev returns calibrated probabilities directly, with no text to parse.
+    """
+
+    def __init__(self, client: JevClient):
+        self.client = client
+
+    def __call__(self, pairs: list[tuple[str, str]], *, question: str | None = None) -> list[float]:
+        if not pairs:
+            return []
+        counters.bump('negative_scorer_jev_calls')
+        asked = {'question': _clip(question)} if question and question.strip() else {}
+        questions = {f'p{index}': {'type': 'noul', 'instructions': {**asked, 'fact_a': _clip(a), 'fact_b': _clip(b)},
+                                   'criteria': JEV_CRITERIA}
+                     for index, (a, b) in enumerate(pairs, 1)}
+        answers = self.client.systemone(JEV_STATE, questions)
+        scores = []
+        for index in range(1, len(pairs) + 1):
+            answer = answers.get(f'p{index}')
+            value = answer.get('noul') if isinstance(answer, dict) else None
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f'Jev returned no noul probability for pair {index}')
+            scores.append(max(0.0, min(1.0, float(value))))
+        return scores
 
 
 class LLMContradictionScorer:
