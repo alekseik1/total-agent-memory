@@ -1017,10 +1017,15 @@ class Store:
         from memory_core.vector_search import VectorScope
 
         if db is not None:
+            if embedding_model or kind != "all" or branch:
+                raise NotImplementedError(
+                    "_binary_search(db=...) does not support embedding_model/kind/branch - "
+                    "no caller needs them on this path today; add support to "
+                    "_binary_search_via_connection before passing one here."
+                )
             return self._binary_search_via_connection(
                 db, query_embedding, n_candidates=n_candidates, project=project,
                 n_results=n_results, embedding_spaces=embedding_spaces,
-                embedding_model=embedding_model, kind=kind, branch=branch,
             )
 
         scope = VectorScope(
@@ -1034,17 +1039,18 @@ class Store:
         )
 
     def _binary_search_via_connection(self, conn, query_embedding, *, n_candidates=50,
-                                       project=None, n_results=10, embedding_spaces=None,
-                                       embedding_model=None, kind="all", branch=None):
+                                       project=None, n_results=10, embedding_spaces=None):
         """Uncached Hamming pre-filter + cosine re-rank through an explicit Connection.
 
         Only used by `_binary_search` when a caller supplies `db` - see that
-        docstring. Duplicates the pre-v14 `_binary_search` body rather than
-        threading a Connection override through `self._vector_search`'s pool
-        cache, which is keyed to a single Connection and not safe to share
-        across threads. Filters mirror `VectorScope.sql()` exactly (including
-        the `embed_dim` filter) so this path can't silently return results
-        for the wrong vector width or ignore a filter the cached path honours.
+        docstring; that caller refuses `embedding_model`/`kind`/`branch` before
+        reaching here, so this method does not accept them. Duplicates the
+        pre-v14 `_binary_search` body rather than threading a Connection
+        override through `self._vector_search`'s pool cache, which is keyed
+        to a single Connection and not safe to share across threads. The
+        `embed_dim` and `embedding_space` filters mirror `VectorScope.sql()`
+        so this path can't silently return results for the wrong vector
+        width or embedding space.
         """
         import numpy as np
 
@@ -1053,15 +1059,6 @@ class Store:
         if project:
             conds.append("k.project=?")
             params.append(project)
-        if embedding_model:
-            conds.append("e.embed_model=?")
-            params.append(embedding_model)
-        if kind != "all":
-            conds.append("k.type=?")
-            params.append(kind)
-        if branch:
-            conds.append("(k.branch=? OR k.branch='')")
-            params.append(branch)
         if embedding_spaces:
             ph = ",".join("?" * len(embedding_spaces))
             conds.append(f"COALESCE(e.embedding_space,'text') IN ({ph})")
