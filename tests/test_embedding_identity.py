@@ -241,6 +241,7 @@ def test_a_diverging_rebuild_is_skipped_not_rewritten_under_a_fallback_label(sto
     assert result["rebuilt"] == 0
     assert result["skipped"] == 1
     assert "error" in result
+    assert "nothing was rewritten" in result["error"]
 
     row = store.db.execute(
         "SELECT embed_model, embed_dim, embedding_provider FROM embeddings WHERE knowledge_id=1"
@@ -253,6 +254,46 @@ def test_a_diverging_rebuild_is_skipped_not_rewritten_under_a_fallback_label(sto
     result2 = _rebuild(store, stale_only=True)
     assert result2["rebuilt"] == 0
     assert result2["skipped"] == 1
+
+
+def test_a_mid_run_divergence_reports_rebuilt_and_skipped_separately(store, monkeypatch):
+    """The test above only covers row 0 of chunk 0, where `i == 0` makes
+    `skipped += len(rows) - i` indistinguishable from `skipped +=
+    len(chunk)`. With batch_size=1 and several stale rows, the backend
+    answers correctly for the first row (rebuilt=1, committed) and only
+    then diverges - `rebuilt` must survive the abort instead of being
+    folded into `skipped`."""
+    store._embed_mode = "fastembed"
+    calls = {"n": 0}
+
+    def _fastembed(batch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [[0.7] * 384 for _ in batch]
+        return None  # unavailable from the second call on
+
+    monkeypatch.setattr(store, "_fastembed_embed", _fastembed)
+    monkeypatch.setattr(store, "_check_ollama", lambda: False)
+    monkeypatch.setenv("MEMORY_ALLOW_OLLAMA_IN_HOT_PATH", "true")
+    store._embedder = _Embedder(384)
+
+    _seed(store, 1, "nomic-embed-text", 768, "ollama")
+    _seed(store, 2, "nomic-embed-text", 768, "ollama")
+    _seed(store, 3, "nomic-embed-text", 768, "ollama")
+    store.db.commit()
+
+    result = _rebuild(store, stale_only=True, batch_size=1)
+
+    assert result["rebuilt"] == 1
+    assert result["skipped"] == 2
+    assert "error" in result
+    assert "nothing was rewritten" not in result["error"]
+    assert "1 row(s) already rebuilt" in result["error"]
+
+    models = dict(store.db.execute("SELECT knowledge_id, embed_model FROM embeddings").fetchall())
+    assert models[1] == server.FASTEMBED_MODEL  # row 1 really was rebuilt...
+    assert models[2] == "nomic-embed-text"       # ...rows 2 and 3 were left untouched
+    assert models[3] == "nomic-embed-text"
 
 
 def test_a_batch_with_a_partial_cache_hit_does_not_mix_backends(store, monkeypatch):

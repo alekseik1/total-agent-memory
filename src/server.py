@@ -485,6 +485,20 @@ class Store:
             return OLLAMA_EMBED_MODEL
         return EMBEDDING_MODEL
 
+    def embed_diverges_from_active(self, model_name: str) -> str | None:
+        """None if `model_name` (the identity that just answered) matches
+        the configured backend; otherwise the reason a caller like
+        `memory_rebuild_embeddings` should abort rather than write it under
+        `stale_only`'s selection criterion - the configured backend, not the
+        one that actually answered."""
+        active = self._active_embed_model_name()
+        if model_name == active:
+            return None
+        return (
+            f"configured embedding backend produces '{active}', "
+            f"but '{model_name}' answered instead"
+        )
+
     def embed_identity(self) -> tuple[str, str]:
         """Public (embed_model, embed_provider) for rows this Store writes.
 
@@ -5221,7 +5235,9 @@ async def _tool_catalogue():
             description="v11.0: re-encode every record (or every record in a given embedding "
                         "space) and update the binary + float32 vectors. Idempotent. Pass "
                         "embedding_space='code' to refresh only code rows after switching the "
-                        "code embedder. Returns {rebuilt: int, skipped: int}.",
+                        "code embedder. Returns {rebuilt: int, skipped: int}, plus an `error` "
+                        "key and no further writes if the backend that answers diverges from "
+                        "the configured one partway through.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -6935,17 +6951,19 @@ async def _do(name, a):
             if not embs or len(embs) != len(chunk):
                 skipped += len(chunk)
                 continue
-            if model_name != active_model:
+            divergence = store.embed_diverges_from_active(model_name)
+            if divergence:
                 # The identity that actually answered is not the configured
                 # one, so the configured backend is unavailable right now.
                 # `stale_only` selects rows by comparing to `active_model` -
                 # writing a fallback vector under a row here would make that
                 # row stale again on the next run (never converges) and
                 # narrows an existing good vector while calling it rebuilt.
-                backend_error = (
-                    f"configured embedding backend produces '{active_model}', "
-                    f"but '{model_name}' answered instead - nothing was rewritten"
+                state = (
+                    f"{rebuilt} row(s) already rebuilt and committed before the abort"
+                    if rebuilt else "nothing was rewritten"
                 )
+                backend_error = f"{divergence} - {state}"
                 skipped += len(rows) - i
                 break
             for r, vec in zip(chunk, embs):
