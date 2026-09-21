@@ -273,6 +273,57 @@ def test_a_batch_with_a_partial_cache_hit_does_not_mix_backends(store, monkeypat
     class _PartialCache:
         l2 = _L2()
 
+        def __init__(self):
+            self.sets: list[tuple[str, int, str]] = []
+
+        def embed_get(self, text, expected_model=None):
+            return [0.5] * 768 if text == "alpha" else None
+
+        def embed_set(self, text, vector, model):
+            self.sets.append((text, len(vector), model))
+
+    store.v9_cache = _PartialCache()
+
+    vectors, (model, provider) = store.embed_with_identity(["alpha", "beta"])
+
+    assert len(vectors[0]) == 384
+    assert len(vectors[1]) == 384
+    assert model == server.EMBEDDING_MODEL and provider == "st"
+    assert model != active
+    # Both halves must be re-cached under the identity that actually
+    # produced them - "alpha" (recomputed) as well as "beta" (fresh), or
+    # the next call pays for the recompute again and reads back a wrong
+    # label from the stale L2 entry.
+    assert ("alpha", 384, server.EMBEDDING_MODEL) in store.v9_cache.sets
+    assert ("beta", 384, server.EMBEDDING_MODEL) in store.v9_cache.sets
+
+
+def test_a_flapping_backend_does_not_answer_the_recompute_differently(store, monkeypatch):
+    """The previous fix recomputed the cached half by re-entering the whole
+    fallback chain (`_compute`) instead of calling the backend that answered
+    `fresh` directly. A backend with no failure state of its own
+    (`_ollama_embed`) that is down for the first call and back up by the
+    second answers the recompute too - mixing a 768-dim ollama vector into
+    a batch labelled 384-dim ST. The recompute must call the SAME backend
+    `fresh` used, not the fallback chain again."""
+    store._embed_mode = "ollama"
+    store._embedder = _Embedder(384)
+    calls = {"n": 0}
+
+    def _flapping_ollama(batch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # down for the fresh half
+        return [[0.9] * 768 for _ in batch]  # recovered for the would-be recompute
+
+    monkeypatch.setattr(store, "_ollama_embed", _flapping_ollama)
+
+    class _L2:
+        enabled = True
+
+    class _PartialCache:
+        l2 = _L2()
+
         def embed_get(self, text, expected_model=None):
             return [0.5] * 768 if text == "alpha" else None
 
@@ -283,7 +334,49 @@ def test_a_batch_with_a_partial_cache_hit_does_not_mix_backends(store, monkeypat
 
     vectors, (model, provider) = store.embed_with_identity(["alpha", "beta"])
 
-    assert len(vectors[0]) == 384
-    assert len(vectors[1]) == 384
     assert model == server.EMBEDDING_MODEL and provider == "st"
-    assert model != active
+    assert len(vectors[0]) == 384  # recomputed via ST, not the now-recovered ollama
+    assert len(vectors[1]) == 384
+    assert calls["n"] == 1  # ollama was never asked to answer the recompute
+
+
+def test_a_failed_recompute_drops_the_cached_half_not_a_silent_hole(store, monkeypatch):
+    """When the backend that answered `fresh` can't answer again for the
+    cached half either, the cached indices are dropped (None) rather than
+    the whole call crashing or silently mixing in stale data - the fresh
+    half still comes back intact under its own honest identity."""
+    store._embed_mode = "ollama"
+
+    class _FlakyEmbedder:
+        def __init__(self):
+            self.n = 0
+
+        def encode(self, batch):
+            import numpy as np
+            self.n += 1
+            if self.n == 1:
+                return np.array([[0.1] * 384 for _ in batch], dtype=np.float32)
+            raise RuntimeError("backend unavailable for the recompute")
+
+    store._embedder = _FlakyEmbedder()
+    monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
+
+    class _L2:
+        enabled = True
+
+    class _PartialCache:
+        l2 = _L2()
+
+        def embed_get(self, text, expected_model=None):
+            return [0.5] * 768 if text == "alpha" else None
+
+        def embed_set(self, text, vector, model):
+            pass
+
+    store.v9_cache = _PartialCache()
+
+    vectors, (model, provider) = store.embed_with_identity(["alpha", "beta"])
+
+    assert model == server.EMBEDDING_MODEL and provider == "st"
+    assert vectors[0] is None
+    assert len(vectors[1]) == 384

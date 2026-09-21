@@ -769,6 +769,27 @@ class Store:
                 return None, (model_name, self._embed_mode)
             return cached, (model_name, self._embed_mode)
 
+        def _compute_via(batch, provider):
+            """Call exactly the backend that produced `fresh`, with no
+            fallback chain. Re-entering `_compute` here would let a
+            flapping backend (e.g. an ollama tunnel with no failure state
+            of its own, `_ollama_embed`) answer from a DIFFERENT backend
+            on this second call than it just did on the first, mixing two
+            backends' vectors under the one identity this call reports.
+            """
+            if provider in ("openai", "cohere"):
+                return self._provider_embed(batch)
+            if provider == "fastembed":
+                return self._fastembed_embed(batch)
+            if provider == "ollama":
+                return self._ollama_embed(batch)
+            if provider == "st":
+                try:
+                    return self.embedder.encode(batch).tolist()
+                except Exception:
+                    return None
+            return None
+
         # A partial L2 hit whose fresh half fell back to a different backend
         # cannot be returned under one identity: the cached half really is
         # `model_name` (embed_get guarded on it), the fresh half is not. Don't
@@ -777,9 +798,26 @@ class Store:
         # vector in the batch agrees with the one identity this call returns.
         cached_idx = [i for i in range(len(texts)) if cached[i] is not None]
         if cached_idx and fresh_model != model_name:
-            recomputed, _, _ = _compute([texts[i] for i in cached_idx])
-            for local_i, global_i in enumerate(cached_idx):
-                cached[global_i] = recomputed[local_i] if recomputed is not None else None
+            recomputed = _compute_via([texts[i] for i in cached_idx], fresh_provider)
+            if recomputed is None or len(recomputed) != len(cached_idx):
+                # The backend that just answered for the fresh half didn't
+                # answer for the cached half either - abandon the merge for
+                # these indices rather than emit a hole under a healthy
+                # identity. What survives is the fresh half, honestly
+                # labelled by the identity this call returns.
+                for i in cached_idx:
+                    cached[i] = None
+            else:
+                for local_i, global_i in enumerate(cached_idx):
+                    cached[global_i] = recomputed[local_i]
+                    # Persist under the identity that produced it so the
+                    # next call for this text doesn't pay this recompute
+                    # again.
+                    if l2 is not None and l2.l2.enabled:
+                        try:
+                            l2.embed_set(texts[global_i], recomputed[local_i], fresh_model)
+                        except Exception:
+                            pass
 
         # ── merge + persist back into L2 ───────────────────
         # Cache under the model that actually produced the vector: `embed_get`
