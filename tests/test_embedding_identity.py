@@ -241,3 +241,37 @@ def test_a_rebuilt_row_is_labelled_by_the_backend_that_rebuilt_it(store, monkeyp
     ).fetchone()
     assert row["embed_model"] == server.EMBEDDING_MODEL
     assert row["embedding_provider"] == "st"
+
+
+def test_a_batch_with_a_partial_cache_hit_does_not_mix_backends(store, monkeypatch):
+    """L2 holds 'alpha' under the active model; the rest of the batch falls
+    back to a different backend. `embed_with_identity` used to return the
+    fresh half's identity for the whole batch, so the cached half (a real
+    768-dim Ollama vector) got written to a row labelled as the 384-dim ST
+    fallback that never produced it. Every vector in the batch must now
+    come back under the one identity the call returns."""
+    store._embed_mode = "ollama"
+    store._embedder = _Embedder(384)
+    monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
+    active = store._active_embed_model_name()
+
+    class _L2:
+        enabled = True
+
+    class _PartialCache:
+        l2 = _L2()
+
+        def embed_get(self, text, expected_model=None):
+            return [0.5] * 768 if text == "alpha" else None
+
+        def embed_set(self, text, vector, model):
+            pass
+
+    store.v9_cache = _PartialCache()
+
+    vectors, (model, provider) = store.embed_with_identity(["alpha", "beta"])
+
+    assert len(vectors[0]) == 384
+    assert len(vectors[1]) == 384
+    assert model == server.EMBEDDING_MODEL and provider == "st"
+    assert model != active

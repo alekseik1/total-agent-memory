@@ -769,6 +769,18 @@ class Store:
                 return None, (model_name, self._embed_mode)
             return cached, (model_name, self._embed_mode)
 
+        # A partial L2 hit whose fresh half fell back to a different backend
+        # cannot be returned under one identity: the cached half really is
+        # `model_name` (embed_get guarded on it), the fresh half is not. Don't
+        # merge two backends' vectors under a single label - recompute the
+        # cached texts too, through the backend that just answered, so every
+        # vector in the batch agrees with the one identity this call returns.
+        cached_idx = [i for i in range(len(texts)) if cached[i] is not None]
+        if cached_idx and fresh_model != model_name:
+            recomputed, _, _ = _compute([texts[i] for i in cached_idx])
+            for local_i, global_i in enumerate(cached_idx):
+                cached[global_i] = recomputed[local_i] if recomputed is not None else None
+
         # ── merge + persist back into L2 ───────────────────
         # Cache under the model that actually produced the vector: `embed_get`
         # guards on `expected_model`, and a wrong label makes that guard pass
