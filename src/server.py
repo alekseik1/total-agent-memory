@@ -4094,7 +4094,9 @@ async def _tool_catalogue():
         Tool(
             name="memory_answer",
             description="Generate and verify a cited answer using the configured reasoning LLM. "
-                        "Up to one missing-relation retrieval and five LLM calls including bounded quote repair. Explicit project required. "
+                        "First runs negative retrieval: a contradiction-seeking second search; a contradiction score >= 0.60 "
+                        "returns 'Not enough information' without picking a side, 0.30-0.60 answers with a caveat (see `negative`). "
+                        "Up to one missing-relation retrieval and eight LLM calls including inversion retry and bounded quote repair. Explicit project required. "
                         "Citation offsets refer to returned evidence content. Ordinary recall remains local.",
             inputSchema={"type": "object", "properties": {
                 "query": {"type": "string", "minLength": 1}, "project": {"type": "string", "minLength": 1},

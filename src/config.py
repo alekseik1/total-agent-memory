@@ -758,6 +758,11 @@ def allow_ollama_in_hot_path() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def is_negative_retrieval_enabled() -> bool:
+    """Contradiction-seeking second pass in memory_answer (on by default)."""
+    return _get_bool_env("MEMORY_NEGATIVE_RETRIEVAL", default=True)
+
+
 def is_rerank_enabled() -> bool:
     raw = (os.environ.get("MEMORY_RERANK_ENABLED", "false") or "false").strip().lower()
     return raw in ("1", "true", "yes", "on")

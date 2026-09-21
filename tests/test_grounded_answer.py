@@ -215,11 +215,13 @@ def test_mcp_answer_contract_and_configured_provider(store, monkeypatch):
     import answer_endpoint
     import server
     row = save(store, 'Dave remembers California Love.')
-    provider = Provider([supported(row['id'], row['content']), {'supported': True, 'reason': 'supported'}])
+    provider = Provider(['Dave never remembered California Love', supported(row['id'], row['content']),
+                         {'supported': True, 'reason': 'supported'}])
     monkeypatch.setattr(answer_endpoint, 'make_provider', lambda name: provider)
     monkeypatch.setattr(server.recall, 'search', lambda *args, **kwargs: {'results': {'fact': [row]}})
     response = json.loads(asyncio.run(server.call_tool('memory_answer', {'query': 'Dave song?', 'project': 'p'}))[0].text)
     assert response['answer'] == 'California Love' and response['verification']['supported']
+    assert response['negative']['decision'] == 'no_contradiction' and response['caveat'] is None
     schema = next(tool for tool in asyncio.run(server.list_tools()) if tool.name == 'memory_answer').input_schema
     assert schema['required'] == ['query', 'project']
 
@@ -265,3 +267,80 @@ def test_saved_dialogue_is_indexed_through_durable_worker_queue(store, monkeypat
     worker.run_pending(store.db, max_rows=1, store=store)
     assert store.db.execute('SELECT count(*) FROM evidence_passages WHERE knowledge_id=?', (row['id'],)).fetchone()[0] > 0
     assert store.db.execute("SELECT status FROM enrichment_queue WHERE knowledge_id=?", (row['id'],)).fetchone()[0] == 'done'
+
+
+class Scorer:
+    def __init__(self, score):
+        self.score, self.calls = score, []
+
+    def __call__(self, pairs):
+        self.calls.append(pairs)
+        return [self.score for _ in pairs]
+
+
+def negative_service(store, rows, provider, scorer):
+    def search(query, limit):
+        return rows
+    return GroundedAnswerService(store.db, search, GroundedReader(provider, 'test'),
+                                 contradiction_scorer=scorer, inversion_client=None)
+
+
+def test_hard_contradiction_abstains_without_reading(store):
+    loves = save(store, 'Alice loves teal.')
+    hates = save(store, 'Alice told Bob that she now hates teal.')
+    provider, scorer = Provider([]), Scorer(0.95)
+    result = negative_service(store, [loves, hates], provider, scorer).answer('What colour does Alice like?', SearchScope('p'))
+    assert result.answer == 'Not enough information' and not provider.calls
+    assert result.negative.decision == 'hard_contradict' and result.negative.contradiction_score == pytest.approx(0.95)
+    assert result.draft.rejection.startswith('hard contradiction at score 0.95')
+    assert result.search_calls == 2 and result.caveat is None
+    assert scorer.calls == [[('Alice loves teal.', 'Alice told Bob that she now hates teal.'),
+                             ('Alice told Bob that she now hates teal.', 'Alice loves teal.')]]
+
+
+def test_soft_contradiction_answers_with_caveat(store):
+    row = save(store, 'Alice loves teal.')
+    other = save(store, 'Alice said teal feels a bit loud lately.')
+    provider = Provider([supported(row['id'], row['content'], subject='Alice'), {'supported': True, 'reason': 'cited'}])
+    result = negative_service(store, [row, other], provider, Scorer(0.45)).answer('What colour does Alice like?', SearchScope('p'))
+    assert result.negative.decision == 'soft_contradict'
+    assert result.caveat.startswith('Evidence is mixed: soft contradiction at score 0.45')
+    assert result.answer == f'California Love\n\nCaveat: {result.caveat}'
+
+
+def test_no_contradiction_keeps_the_answer_and_skips_self_pairs(store):
+    row = save(store, 'Dave remembers California Love.')
+    provider, scorer = Provider([supported(row['id'], row['content']), {'supported': True, 'reason': 'cited'}]), Scorer(0.9)
+    result = negative_service(store, [row], provider, scorer).answer('Dave song?', SearchScope('p'))
+    assert result.answer == 'California Love' and result.negative.decision == 'no_contradiction'
+    assert scorer.calls == [] and result.caveat is None
+
+
+def test_negative_pass_is_skipped_without_evidence(store):
+    provider, scorer = Provider([]), Scorer(0.9)
+    result = negative_service(store, [], provider, scorer).answer('Dave song?', SearchScope('p'))
+    assert result.answer == 'Not enough information' and result.negative is None and not scorer.calls
+
+
+def test_mcp_answer_can_disable_negative_pass(store, monkeypatch):
+    import answer_endpoint
+    import server
+    row = save(store, 'Dave remembers California Love.')
+    provider = Provider([supported(row['id'], row['content']), {'supported': True, 'reason': 'supported'}])
+    monkeypatch.setenv('MEMORY_NEGATIVE_RETRIEVAL', 'false')
+    monkeypatch.setattr(answer_endpoint, 'make_provider', lambda name: provider)
+    monkeypatch.setattr(server.recall, 'search', lambda *args, **kwargs: {'results': {'fact': [row]}})
+    response = json.loads(asyncio.run(server.call_tool('memory_answer', {'query': 'Dave song?', 'project': 'p'}))[0].text)
+    assert response['answer'] == 'California Love' and response['negative'] is None and len(provider.calls) == 2
+
+
+def test_llm_scorer_parses_scores_and_rejects_incomplete_output():
+    from ai_layer.negative_evidence import LLMContradictionScorer, parse_scores
+    provider = Provider(['```json\n{"scores":[{"pair":2,"contradiction":0.1},{"pair":1,"contradiction":1.7}]}\n```'])
+    assert LLMContradictionScorer(provider, 'test')([('a', 'b'), ('c', 'd')]) == [1.0, 0.1]
+    assert '"fact_a": "a"' in provider.calls[0]
+    for raw in ('{"scores":[{"pair":1,"contradiction":0.2}]}', '{"scores":[{"pair":1,"contradiction":true},{"pair":2,"contradiction":0}]}',
+                '{"scores":[{"pair":1,"contradiction":0.2},{"pair":1,"contradiction":0.3}]}', 'no json'):
+        with pytest.raises((TypeError, ValueError)):
+            parse_scores(raw, 2)
+    assert LLMContradictionScorer(Provider([]), 'test')([]) == []

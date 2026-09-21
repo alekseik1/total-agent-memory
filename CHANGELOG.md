@@ -4,6 +4,12 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+## [14.1.0] - 2026-09-21
+
+- `memory_answer` now runs negative retrieval: an inverted, contradiction-seeking second search whose (positive, negative) pairs are scored in one batched call. A score ≥ 0.60 abstains with *Not enough information* without picking a side; 0.30–0.60 answers with a caveat. The verdict is returned under `negative`; `MEMORY_NEGATIVE_RETRIEVAL=false` disables it.
+- Fix `memory_answer` failing with "Reader returned invalid grounded evidence" on Anthropic and Ollama providers: both now implement structured completion (forced tool call / JSON-schema `format`) instead of returning markdown-fenced JSON.
+- Point the README Docker example at the current image.
+
 ## [14.0.0] - 2026-09-15
 
 - Require Python 3.11 or newer. 13.x already imported `tomllib` and `datetime.UTC`, so it never ran on 3.10 despite declaring support; package metadata, installers and CI now state the real minimum.

@@ -200,10 +200,29 @@ class OllamaProvider:
         )
         return str(resp.get("response", "")).strip()
 
+    def complete_structured(self, prompt: str, schema: dict[str, object], *, model: str | None = None,
+                            max_tokens: int = 512, temperature: float = 0.0, timeout: float = 60.0) -> str:
+        # Ollama constrains decoding to a JSON schema passed as `format`.
+        body = {
+            "model": model or self._default_model or config.get_llm_model(),
+            "prompt": prompt,
+            "stream": False,
+            "format": schema,
+            "options": {"num_predict": max_tokens, "temperature": temperature},
+        }
+        resp = _http_post_json(f"{self.api_base}/api/generate", body=body, headers={}, timeout=timeout)
+        text = resp.get("response") if isinstance(resp, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            raise RuntimeError("OllamaProvider: empty structured completion")
+        return text.strip()
+
 
 # ──────────────────────────────────────────────
 # OpenAI-compatible (OpenAI, OpenRouter, Groq, Together, DeepSeek, LM Studio…)
 # ──────────────────────────────────────────────
+
+
+STRUCTURED_TOOL_NAME = "respond"
 
 
 @runtime_checkable
@@ -394,6 +413,34 @@ class AnthropicProvider:
             return str(content[0]["text"]).strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"AnthropicProvider: malformed response: {exc}") from exc
+
+    def complete_structured(self, prompt: str, schema: dict[str, object], *, model: str | None = None,
+                            max_tokens: int = 512, temperature: float = 0.0, timeout: float = 60.0) -> str:
+        # The Messages API has no JSON-schema response mode; a forced tool call
+        # is the documented way to get schema-shaped output instead of prose or
+        # a markdown-fenced JSON block.
+        if not self.api_key:
+            raise RuntimeError("AnthropicProvider: missing api_key")
+        body = {
+            "model": model or self._default_model or config.get_llm_model_for_provider("anthropic"),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+            "tools": [{"name": STRUCTURED_TOOL_NAME, "description": "Return the response object.",
+                       "input_schema": schema}],
+            "tool_choice": {"type": "tool", "name": STRUCTURED_TOOL_NAME, "disable_parallel_tool_use": True},
+        }
+        headers = {"x-api-key": self.api_key, "anthropic-version": self.API_VERSION}
+        resp = _http_post_json(f"{self.api_base}/messages", body=body, headers=headers, timeout=timeout)
+        try:
+            for block in resp["content"]:
+                if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == STRUCTURED_TOOL_NAME:
+                    if not isinstance(block.get("input"), dict):
+                        break
+                    return json.dumps(block["input"], ensure_ascii=False)
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError("AnthropicProvider: malformed structured completion") from exc
+        raise RuntimeError("AnthropicProvider: structured completion returned no tool input")
 
 
 # ──────────────────────────────────────────────
