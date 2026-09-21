@@ -65,7 +65,10 @@ async def run() -> bool:
             answer = result['answer'].split('\n\nCaveat:')[0]
             ok = bool(expected.search(answer))
             passed &= ok
+            negative = result.get('negative') or {}
             print(f'\n{"PASS" if ok else "FAIL"}  {question}\n  answer:   {answer}')
+            print(f'  contradiction check: {negative.get("decision")} at {negative.get("contradiction_score")} '
+                  f'(scorer: {os.environ.get("MEMORY_CONTRADICTION_SCORER") or "llm"})')
             for hit in result['evidence']:
                 print(f'  recorded: {hit.get("created_at")}  {hit["content"]}')
     return passed

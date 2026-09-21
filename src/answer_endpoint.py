@@ -3,11 +3,20 @@ from __future__ import annotations
 from typing import TypedDict
 
 import config
-from ai_layer.grounded_answer import GroundedAnswer, GroundedAnswerService
+from ai_layer.grounded_answer import (
+    GroundedAnswer,
+    GroundedAnswerService,
+    QuestionContradictionScorer,
+)
 from ai_layer.grounded_reader import GroundedReader
-from ai_layer.negative_evidence import LLMContradictionScorer, ProviderInversionClient
+from ai_layer.jev_client import JevClient
+from ai_layer.negative_evidence import (
+    JevContradictionScorer,
+    LLMContradictionScorer,
+    ProviderInversionClient,
+)
 from evidence_endpoint import EvidenceRecall, EvidenceStore
-from llm_provider import make_provider
+from llm_provider import LLMProvider, make_provider
 from memory_core.retrieval import MemoryHit, SearchScope, flatten_results
 
 
@@ -19,6 +28,13 @@ class AnswerOptions(TypedDict, total=False):
     limit: int
     max_bytes: int
     followup: bool
+
+
+def contradiction_scorer(provider: LLMProvider, model: str | None) -> QuestionContradictionScorer:
+    if config.get_contradiction_scorer() == 'jev':
+        return JevContradictionScorer(JevClient(config.get_typesafe_api_key(), config.get_typesafe_base_url(),
+                                                config.get_typesafe_model()))
+    return LLMContradictionScorer(provider, model)
 
 
 def answer_response(store: EvidenceStore, recall: EvidenceRecall, options: AnswerOptions) -> GroundedAnswer:
@@ -33,7 +49,7 @@ def answer_response(store: EvidenceStore, recall: EvidenceRecall, options: Answe
     negative = config.is_negative_retrieval_enabled()
     service = GroundedAnswerService(
         store.db, search, reader, config.get_recall_excluded_tags(),
-        contradiction_scorer=LLMContradictionScorer(provider, model) if negative else None,
+        contradiction_scorer=contradiction_scorer(provider, model) if negative else None,
         inversion_client=ProviderInversionClient(provider, model) if negative else None,
         contradiction_policy=config.get_contradiction_policy())
     result = service.answer(

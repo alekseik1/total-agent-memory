@@ -4099,7 +4099,8 @@ async def _tool_catalogue():
                         "Evidence carries recording dates; when records about the same subject disagree, the latest one gives the "
                         "current value and the answer names the value it replaced. First runs negative retrieval: a contradiction-seeking "
                         "second search; a score >= 0.60 hands both sides to the reader and answers with a caveat "
-                        "(MEMORY_CONTRADICTION_POLICY=abstain refuses instead), 0.30-0.60 answers with a caveat (see `negative`). "
+                        "(MEMORY_CONTRADICTION_POLICY=abstain refuses instead), 0.30-0.60 answers with a caveat (see `negative`); "
+                        "MEMORY_CONTRADICTION_SCORER=jev scores the pairs with TypeSafe's Jev instead of the LLM. "
                         "Up to one missing-relation retrieval and eight LLM calls including inversion retry and bounded quote repair. Explicit project required. "
                         "Citation offsets refer to returned evidence content. Ordinary recall remains local.",
             inputSchema={"type": "object", "properties": {
