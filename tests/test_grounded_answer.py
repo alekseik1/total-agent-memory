@@ -271,31 +271,73 @@ def test_saved_dialogue_is_indexed_through_durable_worker_queue(store, monkeypat
 
 class Scorer:
     def __init__(self, score):
-        self.score, self.calls = score, []
+        self.score, self.calls, self.questions = score, [], []
 
-    def __call__(self, pairs):
+    def __call__(self, pairs, *, question=None):
         self.calls.append(pairs)
+        self.questions.append(question)
         return [self.score for _ in pairs]
 
 
-def negative_service(store, rows, provider, scorer):
+def negative_service(store, rows, provider, scorer, policy='resolve'):
     def search(query, limit):
         return rows
     return GroundedAnswerService(store.db, search, GroundedReader(provider, 'test'),
-                                 contradiction_scorer=scorer, inversion_client=None)
+                                 contradiction_scorer=scorer, inversion_client=None, contradiction_policy=policy)
 
 
-def test_hard_contradiction_abstains_without_reading(store):
+def stamp(store, row, created_at):
+    store.db.execute('UPDATE knowledge SET created_at=? WHERE id=?', (created_at, row['id']))
+    store.db.commit()
+    return {**row, 'created_at': created_at}
+
+
+def test_hard_contradiction_abstains_without_reading_when_policy_is_abstain(store):
     loves = save(store, 'Alice loves teal.')
     hates = save(store, 'Alice told Bob that she now hates teal.')
     provider, scorer = Provider([]), Scorer(0.95)
-    result = negative_service(store, [loves, hates], provider, scorer).answer('What colour does Alice like?', SearchScope('p'))
+    result = negative_service(store, [loves, hates], provider, scorer, policy='abstain').answer(
+        'What colour does Alice like?', SearchScope('p'))
     assert result.answer == 'Not enough information' and not provider.calls
     assert result.negative.decision == 'hard_contradict' and result.negative.contradiction_score == pytest.approx(0.95)
     assert result.draft.rejection.startswith('hard contradiction at score 0.95')
     assert result.search_calls == 2 and result.caveat is None
     assert scorer.calls == [[('Alice loves teal.', 'Alice told Bob that she now hates teal.'),
                              ('Alice told Bob that she now hates teal.', 'Alice loves teal.')]]
+    assert scorer.questions == ['What colour does Alice like?']
+
+
+def test_hard_contradiction_reaches_the_reader_with_recording_dates(store):
+    old = stamp(store, save(store, 'Mary loves the color red.'), '2026-05-01T10:00:00Z')
+    new = stamp(store, save(store, 'Mary no longer likes red; she has fallen for green.'), '2026-08-20T10:00:00Z')
+    draft = {'status': 'supported', 'answer': 'Green (previously red)', 'missing': None,
+             'claims': [{'subject': 'Mary', 'event': 'now loves green', 'time': '', 'modality': 'asserted',
+                         'citations': [{'source_id': new['id'], 'quote': 'she has fallen for green'}]}]}
+    provider = Provider([draft, {'supported': True, 'reason': 'latest record wins'}])
+    result = negative_service(store, [old, new], provider, Scorer(0.95)).answer('What color does Mary love?', SearchScope('p'))
+    assert result.negative.decision == 'hard_contradict'
+    assert result.caveat.startswith('Memory holds conflicting records; resolved by recording date: hard contradiction')
+    assert result.answer == f'Green (previously red)\n\nCaveat: {result.caveat}'
+    reader_payload = json.loads(provider.calls[0][provider.calls[0].index('{"QUESTION"'):])
+    assert [(item['id'], item['recorded']) for item in reader_payload['EVIDENCE']] == [
+        (old['id'], '2026-05-01T10:00:00Z'), (new['id'], '2026-08-20T10:00:00Z')]
+    assert '"recorded": "2026-08-20T10:00:00Z"' in provider.calls[1]
+
+
+def test_unknown_contradiction_policy_is_rejected(store):
+    with pytest.raises(ValueError, match='Unknown contradiction policy'):
+        negative_service(store, [], Provider([]), Scorer(0.1), policy='guess')
+
+
+@pytest.mark.parametrize(('raw', 'expected'), [(None, 'resolve'), ('abstain', 'abstain'), (' Resolve ', 'resolve'),
+                                               ('bogus', 'resolve')])
+def test_contradiction_policy_env(monkeypatch, raw, expected):
+    import config
+    if raw is None:
+        monkeypatch.delenv('MEMORY_CONTRADICTION_POLICY', raising=False)
+    else:
+        monkeypatch.setenv('MEMORY_CONTRADICTION_POLICY', raw)
+    assert config.get_contradiction_policy() == expected
 
 
 def test_soft_contradiction_answers_with_caveat(store):
@@ -338,9 +380,45 @@ def test_llm_scorer_parses_scores_and_rejects_incomplete_output():
     from ai_layer.negative_evidence import LLMContradictionScorer, parse_scores
     provider = Provider(['```json\n{"scores":[{"pair":2,"contradiction":0.1},{"pair":1,"contradiction":1.7}]}\n```'])
     assert LLMContradictionScorer(provider, 'test')([('a', 'b'), ('c', 'd')]) == [1.0, 0.1]
-    assert '"fact_a": "a"' in provider.calls[0]
+    assert '"fact_a": "a"' in provider.calls[0] and 'QUESTION' not in provider.calls[0].split('{"PAIRS"')[1]
+    scoped = Provider(['{"scores":[{"pair":1,"contradiction":0.0}]}'])
+    assert LLMContradictionScorer(scoped, 'test')([('Fedor loves maroon.', 'Fedor loves white.')],
+                                                  question='What color does Mary love?') == [0.0]
+    assert '{"QUESTION": "What color does Mary love?", "PAIRS"' in scoped.calls[0]
     for raw in ('{"scores":[{"pair":1,"contradiction":0.2}]}', '{"scores":[{"pair":1,"contradiction":true},{"pair":2,"contradiction":0}]}',
                 '{"scores":[{"pair":1,"contradiction":0.2},{"pair":1,"contradiction":0.3}]}', 'no json'):
         with pytest.raises((TypeError, ValueError)):
             parse_scores(raw, 2)
     assert LLMContradictionScorer(Provider([]), 'test')([]) == []
+
+
+def test_recall_lexical_tier_matches_inflected_russian_name(store):
+    import server
+    save(store, 'Маша любит красный цвет.')
+    newer = save(store, 'Маше больше не нравится красный — она полюбила зелёный.')
+    for index in range(30):
+        save(store, f'Деплой номер {index} прошёл через GitHub Actions.')
+    result = server.Recall(store).search('Какой цвет любит Маша?', project='p', limit=5, record_usage=False)
+    found = [hit for hits in result['results'].values() for hit in hits if hit['id'] == newer['id']]
+    assert found and 'fts' in found[0]['via']
+
+
+@pytest.mark.parametrize(('text', 'name', 'expected'), [
+    ('Маше больше не нравится красный.', 'Маша', True),
+    ('Основной язык Тимура — Go.', 'Тимур', True),
+    ('Анне Петровне позвонили утром.', 'Анна Петровна', True),
+    ('Он купил машину.', 'Маша', False),
+    ('Alice loves teal.', 'Alic', False),
+    ('Alice loves teal.', 'alice', True),
+])
+def test_contains_name_matches_russian_inflections_only(text, name, expected):
+    from memory_core.grounding import contains_name
+    assert contains_name(text, name) is expected
+
+
+def test_russian_claim_subject_is_grounded_in_inflected_quote(store):
+    row = save(store, 'Маше больше не нравится красный — она полюбила зелёный.')
+    draft = {'status': 'supported', 'answer': 'Зелёный', 'missing': None,
+             'claims': [{'subject': 'Маша', 'event': 'любит зелёный', 'time': '', 'modality': 'asserted',
+                         'citations': [{'source_id': row['id'], 'quote': 'Маше больше не нравится красный — она полюбила зелёный'}]}]}
+    assert parse_draft(json.dumps(draft), 'Какой цвет любит Маша?', [row]).claims[0].subject == 'Маша'

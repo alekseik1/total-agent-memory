@@ -19,6 +19,9 @@ tree-sitter-language-pack>=1.13
 # pyproject.toml too, so every install channel retrieves with the same model.
 fastembed
 
+# Russian stemming for the lexical recall tier (FTS5 matches exact word forms).
+snowballstemmer>=2.2
+
 # Optional (guarded import with a working fallback: apscheduler -> manual
 # drain, watchdog -> polling)
 apscheduler

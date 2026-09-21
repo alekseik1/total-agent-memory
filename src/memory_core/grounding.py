@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from memory_core.query_terms import lexical_terms
+from memory_core.query_terms import lexical_terms, russian_stem
 
 MAX_BINDING_CHARS = 500
 _TURN = re.compile(r'(?m)^(?:\[[^\n]+\]\s*)?([\w][\w .-]{0,40}):[ \t]+')
@@ -15,8 +15,22 @@ class InvalidGrounding(ValueError):
     pass
 
 
+_WORD = re.compile(r'\w+')
+_CYRILLIC = re.compile(r'[а-яё]', re.IGNORECASE)
+
+
 def contains_name(text: str, name: str) -> bool:
-    return bool(name.strip() and re.search(r'(?<!\w)' + re.escape(name.strip()) + r'(?!\w)', text, re.IGNORECASE))
+    name = name.strip()
+    if not name:
+        return False
+    if re.search(r'(?<!\w)' + re.escape(name) + r'(?!\w)', text, re.IGNORECASE):
+        return True
+    if not _CYRILLIC.search(name):
+        return False
+    # Russian names inflect ("Маша" is cited as "Маше"): compare Snowball stems word by word.
+    wanted = [russian_stem(word) for word in _WORD.findall(name.casefold())]
+    words = [russian_stem(word) for word in _WORD.findall(text.casefold())]
+    return any(words[index:index + len(wanted)] == wanted for index in range(len(words) - len(wanted) + 1))
 
 
 def citation_context(content: str, quote: str) -> str:

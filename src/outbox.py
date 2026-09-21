@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
+from memory_core.timestamps import utc_now
+
 LOG = lambda msg: sys.stderr.write(f"[outbox] {msg}\n")
 
 _DEFAULT_GRACE_SECONDS = 60
@@ -67,7 +69,7 @@ class WriteIntent:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return utc_now()
 
 
 def compute_content_hash(content: str, ktype: str | None, project: str | None) -> str:

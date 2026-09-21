@@ -147,7 +147,7 @@ def _find_knowledge_gaps(db: sqlite3.Connection) -> list[dict[str, str]]:
         rows = db.execute("""
             SELECT content, project FROM knowledge
             WHERE status = 'active'
-              AND created_at > datetime('now', '-7 days')
+              AND created_at > strftime('%Y-%m-%dT%H:%M:%f000Z', 'now', '-7 days')
               AND (LOWER(content) LIKE '%todo%'
                    OR LOWER(content) LIKE '%изучить%'
                    OR LOWER(content) LIKE '%разобраться%'
@@ -211,7 +211,7 @@ def _find_knowledge_gaps(db: sqlite3.Connection) -> list[dict[str, str]]:
             SELECT content, project FROM knowledge
             WHERE status = 'active'
               AND type = 'fact'
-              AND created_at > datetime('now', '-3 days')
+              AND created_at > strftime('%Y-%m-%dT%H:%M:%f000Z', 'now', '-3 days')
               AND content LIKE '%?%'
             ORDER BY created_at DESC LIMIT 5
         """).fetchall()

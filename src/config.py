@@ -763,6 +763,20 @@ def is_negative_retrieval_enabled() -> bool:
     return _get_bool_env("MEMORY_NEGATIVE_RETRIEVAL", default=True)
 
 
+CONTRADICTION_POLICIES = ("resolve", "abstain")
+
+
+def get_contradiction_policy() -> str:
+    """What memory_answer does on a hard contradiction.
+
+    ``resolve`` (default) hands both sides, with their recording dates, to the
+    reader, which answers with the current value. ``abstain`` refuses without
+    reading. Unknown values fall back to ``resolve``.
+    """
+    raw = os.environ.get("MEMORY_CONTRADICTION_POLICY", "").strip().lower()
+    return raw if raw in CONTRADICTION_POLICIES else CONTRADICTION_POLICIES[0]
+
+
 def is_rerank_enabled() -> bool:
     raw = (os.environ.get("MEMORY_RERANK_ENABLED", "false") or "false").strip().lower()
     return raw in ("1", "true", "yes", "on")

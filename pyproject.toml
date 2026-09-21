@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "total-agent-memory"
-version = "14.1.0"
+version = "14.2.0"
 description = "Persistent local memory MCP server for Claude Code, Codex CLI, Cursor and any MCP client: 74 tools — temporal knowledge graph, procedural memory, episodic memory, AST codebase ingest, pre-edit guard, auto-consolidating error capture"
 readme = "README.md"
 license = "MIT"
@@ -54,6 +54,9 @@ dependencies = [
     # arrive transitively today; an upstream drop would break us silently.
     "httpx>=0.25.0",
     "numpy>=1.24.0",
+    # Russian stemming for the lexical recall tier: FTS5 unicode61 matches
+    # exact word forms only, so "Маша" never met "Маше". Pure Python, BSD.
+    "snowballstemmer>=2.2",
 ]
 
 [project.optional-dependencies]

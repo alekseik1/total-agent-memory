@@ -4,6 +4,15 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+## [14.2.0] - 2026-09-21
+
+- `memory_answer` answers with the latest value of a fact that changed over time ("Mary loves red", later "Mary no longer likes red; she has fallen for green" → *green, previously red*). The reader and verifier now see each record's recording date, and a value stays current until a later record changes it. LongMemEval knowledge-update 12/78 → 35/78 with Claude Haiku 4.5; see `docs/benchmarks/knowledge-update-v14/RESULTS.md`.
+- A hard contradiction no longer refuses before reading: both sides go to the reader with their dates. `MEMORY_CONTRADICTION_POLICY=abstain` restores the 14.1.0 refusal. The contradiction scorer sees the question, so a conflict about someone else no longer blocks the answer.
+- Russian word forms: Cyrillic terms are stemmed in the lexical recall tier and in claim grounding ("Маша" finds "Маше"). New dependency `snowballstemmer`.
+- One stored timestamp format, `2026-09-21T08:21:37.622445Z` (UTC). Migration 034 rewrites older `+00:00`, fraction-less and zone-less values; zone-less values were local time and are converted with that zone's DST rules. Relative-time SQL filters compare against the same format.
+- Answers are written in the language of the question.
+- Add `benchmarks/knowledge_update_eval.py` and `scripts/smoke_knowledge_update.py`.
+
 ## [14.1.0] - 2026-09-21
 
 - `memory_answer` now runs negative retrieval: an inverted, contradiction-seeking second search whose (positive, negative) pairs are scored in one batched call. A score ≥ 0.60 abstains with *Not enough information* without picking a side; 0.30–0.60 answers with a caveat. The verdict is returned under `negative`; `MEMORY_NEGATIVE_RETRIEVAL=false` disables it.

@@ -23,12 +23,14 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parent
 sys.path.insert(0, str(SRC))
+
+from memory_core.timestamps import utc_now
 
 
 def _log(msg: str) -> None:
@@ -37,7 +39,7 @@ def _log(msg: str) -> None:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return utc_now()
 
 
 # ────────────────────────────────────────────────
