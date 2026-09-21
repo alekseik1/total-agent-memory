@@ -73,3 +73,4 @@ benchmarks/results/v11_latency_fast.json
 # Live install artefacts
 .claude-memory-buffer/
 src.bak-*/
+.grepai/
