@@ -22,11 +22,11 @@
 #                         pre-download; Ollama probe, dashboard service and
 #                         LaunchAgents still run for real (for smoke tests)
 #   INSTALL_SKIP_PIP=1    skip ONLY dependency installation (venv/pip/editable
-#                         install), independent of INSTALL_TEST_MODE — for
+#                         install), independent of INSTALL_TEST_MODE - for
 #                         users who manage their own Python environment and
 #                         don't want install.sh touching it
 #   INSTALL_FORCE_LAUNCHAGENTS=1   re-enable just the LaunchAgent install step
-#                         even when INSTALL_TEST_MODE=1 — for tests that need
+#                         even when INSTALL_TEST_MODE=1 - for tests that need
 #                         real LaunchAgent installation without mutating the
 #                         developer's Python environment (pip, model
 #                         download, Ollama probe, dashboard stay skipped)
@@ -114,18 +114,16 @@ DASHBOARD_SERVICE="$INSTALL_DIR/scripts/dashboard-service.sh"
 
 # Test mode: skip heavy steps (pip, model DL, launchctl, dashboard install)
 TEST_MODE="${INSTALL_TEST_MODE:-0}"
-SKIP_DEPENDENCY_SETUP=0
 case "$TEST_MODE" in
-    1|skip-heavy) SKIP_DEPENDENCY_SETUP=1 ;;
-    0) ;;
+    1|skip-heavy|0) ;;
     *) echo "ERROR: INSTALL_TEST_MODE must be 0, 1 or skip-heavy" >&2; exit 1 ;;
 esac
 # Finer-grained switch: skip ONLY dependency installation, independent of
 # TEST_MODE, so tests can exercise LaunchAgents without touching pip.
 SKIP_PIP="${INSTALL_SKIP_PIP:-0}"
-if [ "$SKIP_DEPENDENCY_SETUP" = "1" ]; then
-    SKIP_PIP=1
-fi
+case "$TEST_MODE" in
+    1|skip-heavy) SKIP_PIP=1 ;;
+esac
 # Test-mode override: re-enable just the LaunchAgent install step (Step 5)
 # even under INSTALL_TEST_MODE=1, so a test can verify plist substitution
 # without pip, model download, Ollama probe, or the `claude` CLI running.
@@ -369,7 +367,7 @@ SRV_PATH="$INSTALL_DIR/src/server.py"
 
 # -- 3. Pre-download embedding model --
 echo "-> Step 3: Loading embedding model (first time only)..."
-if [ "$SKIP_DEPENDENCY_SETUP" = "1" ]; then
+if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "skip-heavy" ]; then
     echo "  SKIP (test mode): embedding model pre-download"
 else
     # Warm the model the server actually uses. This warmed the

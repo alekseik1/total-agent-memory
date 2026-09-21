@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 
 _KNOWN_RUNNER_ASYMMETRY = {"migrations"}
 
@@ -120,7 +121,7 @@ def test_the_shared_schema_creates_the_self_improvement_tables():
 
     It used to omit errors/insights/rules — they were created only by
     `Store._create_self_improvement_tables`, which the test fixture never
-    called. Nothing noticed until migration 032 became the first migration to
+    called. Nothing noticed until migration 038 became the first migration to
     touch `errors` and broke every fixture built this way. A schema the tests
     use that production does not have (or the reverse) makes green meaningless.
     """
@@ -147,3 +148,68 @@ def test_production_and_the_fixture_build_the_self_improvement_tables_alike():
 
     src = inspect.getsource(server.Store._create_self_improvement_tables)
     assert "apply_self_improvement_tables" in src, src
+
+
+def test_reflection_report_column_migrations_serializes_concurrent_first_runs(tmp_path):
+    """Two `Store.__init__` calls racing to run this migration on the same
+    file (a concurrent MCP session plus the launchd reflection runner) must
+    not crash with `duplicate column name` / `no such column`.
+
+    `PRAGMA table_info` then `ALTER TABLE` with no transaction lets both
+    connections read the pre-migration schema before either writes, so both
+    attempt the same `ADD COLUMN` / `RENAME COLUMN`. `BEGIN IMMEDIATE` takes
+    the write lock before the PRAGMA read, so the second connection blocks
+    until the first commits, then re-reads the already-migrated schema and
+    is a no-op.
+    """
+    from base_schema import apply_reflection_report_column_migrations
+
+    db_path = tmp_path / "memory.db"
+    seed = sqlite3.connect(str(db_path))
+    seed.executescript(
+        """
+        CREATE TABLE reflection_reports (
+            id TEXT PRIMARY KEY,
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            type TEXT NOT NULL,
+            new_nodes INTEGER DEFAULT 0,
+            patterns_found INTEGER DEFAULT 0,
+            skills_refined INTEGER DEFAULT 0,
+            rules_proposed INTEGER DEFAULT 0
+        );
+        """
+    )
+    seed.commit()
+    seed.close()
+
+    conn_a = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn_b = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn_a.execute("PRAGMA busy_timeout=15000")
+    conn_b.execute("PRAGMA busy_timeout=15000")
+
+    started = threading.Barrier(2, timeout=5)
+    errors: list[str] = []
+
+    def run(conn):
+        started.wait()
+        try:
+            apply_reflection_report_column_migrations(conn)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{type(e).__name__}: {e}")
+
+    t_a = threading.Thread(target=run, args=(conn_a,))
+    t_b = threading.Thread(target=run, args=(conn_b,))
+    t_a.start()
+    t_b.start()
+    t_a.join(timeout=10)
+    t_b.join(timeout=10)
+
+    assert errors == [], errors
+
+    cols = {r[1] for r in conn_a.execute("PRAGMA table_info(reflection_reports)").fetchall()}
+    assert {"edges_strengthened", "clusters_found", "skills_proposed", "phase_errors"} <= cols
+    assert not ({"new_nodes", "patterns_found", "skills_refined", "rules_proposed"} & cols)
+
+    conn_a.close()
+    conn_b.close()

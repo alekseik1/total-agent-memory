@@ -426,7 +426,7 @@ def test_worker_ticks_do_not_corrupt_concurrent_store_writes(tmp_path, monkeypat
 
     store_conn = sqlite3.connect(str(tmp_path / "memory.db"), check_same_thread=False)
     store_conn.row_factory = sqlite3.Row
-    # Mirror server.py:268-270 — WAL is what lets a second connection write.
+    # Mirror server.py:268-270 - WAL is what lets a second connection write.
     store_conn.execute("PRAGMA journal_mode=WAL")
     apply_full_schema(store_conn)
     store_conn.execute(
@@ -441,7 +441,7 @@ def test_worker_ticks_do_not_corrupt_concurrent_store_writes(tmp_path, monkeypat
     started = threading.Barrier(2, timeout=5)
 
     def write_burst(conn, writer, errors):
-        """Commit every 7th row so a transaction spans several statements —
+        """Commit every 7th row so a transaction spans several statements -
         a one-statement-per-commit loop is too narrow to catch the race."""
         for i in range(burst):
             try:
@@ -476,7 +476,7 @@ def test_worker_ticks_do_not_corrupt_concurrent_store_writes(tmp_path, monkeypat
         t.stop()
         t.join(timeout=10)
 
-    assert ticked.is_set(), "worker never ticked — the test proved nothing"
+    assert ticked.is_set(), "worker never ticked - the test proved nothing"
     assert main_errors == []
     assert worker_errors == []
     counts = dict(
@@ -489,7 +489,7 @@ def test_worker_ticks_do_not_corrupt_concurrent_store_writes(tmp_path, monkeypat
 
 @pytest.fixture
 def file_store(monkeypatch, tmp_path):
-    """A real Store on a tmp SQLite file (not the in-memory `db` fixture) —
+    """A real Store on a tmp SQLite file (not the in-memory `db` fixture) -
     the dirty-read test below needs a second real connection to the same
     file, which an in-memory database cannot provide."""
     monkeypatch.setenv("MEMORY_QUALITY_GATE_ENABLED", "false")
@@ -507,23 +507,27 @@ def file_store(monkeypatch, tmp_path):
         pass
 
 
-def test_contradiction_detector_stage_does_not_dirty_read_uncommitted_row(file_store):
+def test_contradiction_detector_stage_does_not_dirty_read_uncommitted_row(file_store, monkeypatch):
     """`_run_contradiction_detector` must read through the worker's OWN
-    connection (`db=db`), not `store.db` — the connection the main thread
+    connection (`db=db`), not `store.db` - the connection the main thread
     may hold an uncommitted transaction open on.
 
     Reproduces the race by hand: seed a committed candidate, open a second
     connection to the same file (standing in for `_WorkerThread._open_db`),
-    leave a second knowledge row uncommitted on `store.db`, then read the
-    candidate pool from a worker thread through the second connection. It
-    must see only the committed row.
+    leave a second knowledge row uncommitted on `store.db`, then drive
+    `_run_contradiction_detector` itself from a worker thread through the
+    second connection. Its candidate pool must contain only the committed row.
     """
+    import contradiction_detector as cd
+
+    monkeypatch.setenv("MEMORY_CONTRADICTION_DETECT_ENABLED", "true")
+
     rng = np.random.default_rng(7)
     now = "2026-04-27T00:00:00Z"
 
     file_store.db.execute(
         "INSERT INTO knowledge (id, session_id, type, content, project, status, created_at) "
-        "VALUES (1, 's', 'fact', 'committed row', 'p', 'active', ?)",
+        "VALUES (1, 's', 'decision', 'committed row', 'p', 'active', ?)",
         (now,),
     )
     file_store._upsert_embedding(1, rng.standard_normal(32).astype(np.float32).tolist(), "test-model")
@@ -534,20 +538,32 @@ def test_contradiction_detector_stage_does_not_dirty_read_uncommitted_row(file_s
 
     file_store.db.execute(
         "INSERT INTO knowledge (id, session_id, type, content, project, status, created_at) "
-        "VALUES (2, 's', 'fact', 'uncommitted row', 'p', 'active', ?)",
+        "VALUES (2, 's', 'decision', 'uncommitted row', 'p', 'active', ?)",
         (now,),
     )
     file_store._upsert_embedding(2, rng.standard_normal(32).astype(np.float32).tolist(), "test-model")
-    # Deliberately not committed — mirrors a save mid-flight on the main
+    # Deliberately not committed - mirrors a save mid-flight on the main
     # thread's connection while the worker ticks.
 
     query = rng.standard_normal(32).astype(np.float32).tolist()
-    results: list = []
+    monkeypatch.setattr(file_store, "embed", lambda texts: [query])
+
+    seen_pool: list = []
+
+    def fake_detect(content, *, ktype, project, candidate_pool, fetch_candidates, llm_fn):
+        seen_pool.extend(candidate_pool)
+        return []
+
+    monkeypatch.setattr(cd, "detect_contradictions", fake_detect)
+
+    task = ew.EnrichmentTask(
+        id=1, knowledge_id=99, session_id="s", project="p", ktype="decision",
+        content_snapshot="query text", tags_snapshot=[], importance="medium",
+        skip_quality=False, attempts=0,
+    )
 
     def read_from_worker_thread():
-        results.extend(
-            file_store._binary_search(query, n_candidates=5, project="p", db=worker_conn)
-        )
+        ew._run_contradiction_detector(worker_conn, task, store=file_store)
 
     t = threading.Thread(target=read_from_worker_thread)
     t.start()
@@ -556,5 +572,5 @@ def test_contradiction_detector_stage_does_not_dirty_read_uncommitted_row(file_s
     file_store.db.rollback()
     worker_conn.close()
 
-    seen = {kid for kid, _score in results}
+    seen = {kid for kid, _score in seen_pool}
     assert seen == {1}, f"dirty read: worker connection saw uncommitted row(s) {seen}"

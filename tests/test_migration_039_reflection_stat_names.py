@@ -92,3 +92,24 @@ def test_migration_is_idempotent_against_an_already_migrated_database():
 def test_migration_is_a_no_op_before_reflection_reports_exists():
     conn = sqlite3.connect(":memory:")
     apply_reflection_report_column_migrations(conn)  # must not raise
+
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "reflection_reports" not in tables
+
+
+def _sql_only(path: Path) -> str:
+    lines = []
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("--"):
+            lines.append(stripped)
+    return "\n".join(lines)
+
+
+def test_035_and_039_carry_no_sql():
+    """The renumber's replay safety rests on 035/039 staying comment-only
+    historical markers (see base_schema.apply_reflection_report_column_migrations'
+    docstring): a database that already ran them under their old numbers
+    (029/033) must not run their DDL again under the new ones."""
+    assert _sql_only(ROOT / "migrations" / "035_reflection_phase_errors.sql") == ""
+    assert _sql_only(ROOT / "migrations" / "039_reflection_report_stat_names.sql") == ""

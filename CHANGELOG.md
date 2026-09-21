@@ -6,11 +6,11 @@ and versions use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed — the enrichment worker corrupted transactions it did not own
+### Fixed - the enrichment worker corrupted transactions it did not own
 - `_WorkerThread` drained the queue through `store.db`, the same
   `sqlite3.Connection` every MCP handler writes through. Python's sqlite3
   keeps the implicit-BEGIN state on the Connection rather than on the thread,
-  so a tick landing inside a handler's transaction broke it — logged as
+  so a tick landing inside a handler's transaction broke it - logged as
   `[enrich-worker] tick error: cannot start a transaction within a
   transaction`, and, in the opposite direction, as a failed reflection phase
   (`graph_importance` lost the race most often, being the widest writer at
@@ -24,10 +24,10 @@ and versions use [Semantic Versioning](https://semver.org/).
   a row. Against the previous code it fails 3 runs out of 3, twice with the
   production error string and once with `bad parameter or other API misuse`.
 
-### Added — truncated `self_rules_context` now carries the rules it cut
+### Added - truncated `self_rules_context` now carries the rules it cut
 - When `MEMORY_RULES_LIMIT` (or a per-call `limit`) truncates the result,
-  `get_rules_for_context` adds `rules_index` — `{id, priority, category,
-  head}` for every omitted rule, in the same ordering — plus a `hint`
+  `get_rules_for_context` adds `rules_index` - `{id, priority, category,
+  head}` for every omitted rule, in the same ordering - plus a `hint`
   pointing at the new fetch action. Both keys are absent when nothing was
   cut, so the untruncated response shape is unchanged. Previously the
   remainder was reachable only by running a `sqlite3` query by hand, which
@@ -35,9 +35,9 @@ and versions use [Semantic Versioning](https://semver.org/).
 - `self_rules` gains `action="get"` with `ids` (max 50 per call): returns the
   full rows for those ids, bumps their `fire_count`/`last_fired`, skips ids
   that are not active rules, and reports `returned_ids`. Index entries
-  themselves never fire — only rules whose full text reached the agent.
+  themselves never fire - only rules whose full text reached the agent.
 
-### Fixed — `self_rules_context` silently dropped active rules
+### Fixed - `self_rules_context` silently dropped active rules
 - `get_rules_for_context` had a hardcoded `LIMIT 20`, so projects with more
   than 20 active rules silently lost the rest. Removed the SQL limit; added
   an optional `limit` parameter and a `MEMORY_RULES_LIMIT` env var (default:
@@ -50,7 +50,7 @@ and versions use [Semantic Versioning](https://semver.org/).
   below the cap could never load. Order is now: fetch (unlimited) → phase
   filter → `limit` → `fire_count` increment (touches only returned rules).
 
-### Fixed — follow-up review findings on the above
+### Fixed - follow-up review findings on the above
 - `MEMORY_RULES_LIMIT=<non-integer>` used to crash the server at import
   (`int()` on an unparsable value). Parsing is now isolated in
   `_read_rules_limit()`, which logs a warning and falls back to no cap
@@ -59,7 +59,7 @@ and versions use [Semantic Versioning](https://semver.org/).
   ...}` before querying, mirroring the existing bad-`phase` guard.
 - The per-row `fire_count`/`last_fired` UPDATE loop is now a single batched
   `UPDATE ... WHERE id IN (...)` over the returned rule ids (only fires when
-  rows were actually returned) — only returned rules get their telemetry
+  rows were actually returned) - only returned rules get their telemetry
   bumped, and those columns feed `self_patterns`' `rule_effectiveness`
   report and stale-rule query, so a narrow `MEMORY_RULES_LIMIT` also narrows
   that telemetry.
@@ -71,7 +71,7 @@ and versions use [Semantic Versioning](https://semver.org/).
   (`_RULE_SCORE_SQL`), shared by `get_rules_for_context` and
   `manage_rule(action="list")` so both order consistently.
 - `manage_rule(action="list")` (used by `self_rules(action='list')`) had the
-  same silent-drop defect via a hardcoded `LIMIT 30` — 55 active rules would
+  same silent-drop defect via a hardcoded `LIMIT 30` - 55 active rules would
   show 30 with no signal. Removed the SQL limit; `list` now takes the same
   optional `limit` (rejecting negative values with the same `{"error": ...}`
   shape) and falls back to `RULES_CONTEXT_LIMIT`/`MEMORY_RULES_LIMIT`. The
@@ -79,33 +79,47 @@ and versions use [Semantic Versioning](https://semver.org/).
   the existing `total` (count actually returned). The `self_rules` tool
   schema gained a matching `limit` input.
 
-### Fixed — unified SQLite schema source, fact-merge visibility
+### Fixed - unified SQLite schema source, fact-merge visibility
 - The core schema moved out of `Store._schema()`'s inline DDL into
   `src/sql/base_schema.sql`, read by both production and the test suite via
-  `src/base_schema.py` — a hand-rolled test fixture schema is how
+  `src/base_schema.py` - a hand-rolled test fixture schema is how
   `fact_merger` previously shipped writing to a `knowledge.updated_at` column
   that didn't exist in production, with a fully green suite.
 - `base_schema.apply_core_column_migrations` is now the single list of
   PRAGMA-guarded `ALTER TABLE` statements for older databases; both
   `Store._migrate()` and the test fixtures call it, so a column can no
   longer exist in one and not the other.
-- Migration `028_agent_lineage.sql` no longer fails on every startup — it
+- Migration `028_agent_lineage.sql` no longer fails on every startup - it
   used to re-`ALTER TABLE` columns `apply_core_column_migrations` had
   already added, raising `duplicate column name` and never recording itself
   as applied.
-- Migration `029_reflection_phase_errors.sql` adds
-  `reflection_reports.phase_errors`, so a reflection phase that fails (or is
+- `reflection_reports.phase_errors` is added by
+  `base_schema.apply_reflection_report_column_migrations` (PRAGMA-guarded,
+  not a bare `ALTER TABLE`), so a reflection phase that fails (or is
   deferred/skipped) is now visible in the saved report instead of only
-  reaching stderr.
+  reaching stderr. The migration that originally carried this DDL,
+  `035_reflection_phase_errors.sql` (numbered `029` before the v14.2.0 merge
+  claimed `029`-`034` for its own migrations and this one was renumbered to
+  `035`), is now a comment-only historical marker - see its header comment.
+- The fork's other four migrations were renumbered alongside it for the same
+  reason: `030`-`033` became `036`-`039`. `036_backfill_session_rows.sql`,
+  `037_backfill_orphan_session_rows.sql` and `038_resolve_learned_errors.sql`
+  are unchanged data repairs under their new numbers.
+  `039_reflection_report_stat_names.sql` renames
+  `reflection_reports.new_nodes` / `patterns_found` / `skills_refined` to
+  `edges_strengthened` / `clusters_found` / `skills_proposed` and drops
+  `rules_proposed`, which every insert hardcoded to 0; like `035`, its DDL
+  now lives in `apply_reflection_report_column_migrations` and the file
+  itself is comment-only.
 - `fact_merger`'s merged records now carry `session_id='fact-merge'` and
   `source='merged'` instead of a raw insert that violated `knowledge`'s
   `NOT NULL` `session_id`; the origin session row is seeded once in the base
   schema rather than written per merge.
 
-### Fixed — `ContentValidator`'s absolute-path check never matched real paths
+### Fixed - `ContentValidator`'s absolute-path check never matched real paths
 - The old path regex consumed exactly one character after the leading slash,
   so it only ever matched single-char path segments (e.g. `/x/`) and never
-  real absolute paths — the guard was silently inert. The new pattern
+  real absolute paths - the guard was silently inert. The new pattern
   matches any-depth absolute/tilde paths, gates single-segment relative
   paths on a recognized code/doc extension (so `/compact`, `python/3.12`,
   `v1.2/2.0` and similar prose aren't mistaken for paths), and normalizes
@@ -118,18 +132,18 @@ and versions use [Semantic Versioning](https://semver.org/).
   both now opt in explicitly at the call site; `summary`/`keywords`/
   `questions` views remain unvalidated and unaffected.
 
-### Added — `MEMORY_FACT_MERGE_ENABLED` gate for the fact_merge reflection phase
+### Added - `MEMORY_FACT_MERGE_ENABLED` gate for the fact_merge reflection phase
 - `fact_merge` (semantic clustering + LLM synthesis of related facts) is now
   gated by `config.is_fact_merge_enabled()` / `MEMORY_FACT_MERGE_ENABLED`,
   default `false`. Cosine similarity alone can't distinguish "the same claim
-  twice" from "the same subject at two different points in time" — unattended
+  twice" from "the same subject at two different points in time" - unattended
   merging isn't safe yet, so it's opt-in until that's addressed.
 - `_run_fact_merger` returns `{"clusters_found": 0, "merged": 0, "rejected":
   0, "disabled": True}` when the gate is off, without importing/constructing
   `FactMerger`. `"disabled"` is deliberately not one of the marker keys
   `phase_errors()` treats as a failure (`error`/`deferred`/`skipped_reason`/
   non-numeric `skipped`), so a disabled phase doesn't show up as a fake error
-  in every saved reflection report — documented directly in `phase_errors()`'s
+  in every saved reflection report - documented directly in `phase_errors()`'s
   docstring.
 - Wired `MEMORY_FACT_MERGE_ENABLED=false` into every path that runs the
   reflection phase without inheriting a shell environment:
@@ -138,7 +152,7 @@ and versions use [Semantic Versioning](https://semver.org/).
   `docker-compose.yml`. Documented in `.env.example` and the README env table
   next to `MEMORY_ENRICHMENT_ENABLED`.
 
-### Fixed — `install.sh` test coverage could silently upgrade the dev venv's `mcp` package
+### Fixed - `install.sh` test coverage could silently upgrade the dev venv's `mcp` package
 - `test_launchagents_substitute_install_dir_and_memory_dir` ran real
   `install.sh` with `INSTALL_TEST_MODE=skip-heavy`, a value the script never
   actually checked (only the literal `"1"` skipped anything), so it silently
@@ -148,7 +162,7 @@ and versions use [Semantic Versioning](https://semver.org/).
   Ollama probe, `claude mcp add-json` CLI call, and
   `dashboard-service.sh print-management` all running for real. Replaced it
   with `INSTALL_FORCE_LAUNCHAGENTS=1`, a narrow opt-in checked alongside
-  `INSTALL_TEST_MODE=1` at the LaunchAgents step only — the test now sets
+  `INSTALL_TEST_MODE=1` at the LaunchAgents step only - the test now sets
   both env vars, so every other heavy step stays skipped and only the
   LaunchAgent install branch re-enables.
 - `INSTALL_SKIP_PIP=1`'s ensurepip pre-flight was gated on `INSTALL_TEST_MODE`
@@ -157,16 +171,16 @@ and versions use [Semantic Versioning](https://semver.org/).
   venv/pip work. Now gated on the same switch (`SKIP_PIP`) as the work it
   protects.
 - `INSTALL_SKIP_PIP=1` also unconditionally pointed `PY_PATH` at the system
-  `python3`, even when an existing `.venv` was present — and `PY_PATH` isn't
+  `python3`, even when an existing `.venv` was present - and `PY_PATH` isn't
   test-only, it gets written into the IDE's MCP config. Now prefers the
   existing venv's interpreter when one exists.
 - The same test also asserted the generated plist never contains the literal
   string `claude-memory-server`, which fails for anyone whose clone legitimately
-  carries that directory name — the `sed` substitution was working correctly.
+  carries that directory name - the `sed` substitution was working correctly.
   Rewrote the assertion to check the actual intent: no `__INSTALL_DIR__` /
   `__MEMORY_DIR__` / `__HOME__` placeholder tokens survive, and the
   substituted values equal the `INSTALL_DIR` / `MEMORY_DIR` / `HOME` the
-  installer was actually given — guarded against silently checking nothing
+  installer was actually given - guarded against silently checking nothing
   by asserting at least one placeholder was actually present in each plist's
   source template.
 - Pinned `mcp[cli]>=1.0.0,<2` in `requirements.txt` and `pyproject.toml`:
@@ -174,7 +188,7 @@ and versions use [Semantic Versioning](https://semver.org/).
   decorator API, which `mcp` 2.0 removed; the unbounded `>=1.0.0` constraint
   let a routine `pip install --upgrade` silently break the server.
   `setup.sh`'s Manual Setup path had its own unbounded `mcp[cli]>=1.0.0`
-  pin, reproducing the same breakage — it now installs from
+  pin, reproducing the same breakage - it now installs from
   `requirements.txt` instead of hand-rolling its dependency list, so there is
   a single source of truth for the pin.
 

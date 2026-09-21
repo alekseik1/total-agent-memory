@@ -316,6 +316,19 @@ def test_uninstall_preserves_memory_db(sandbox_home: Path, tmp_path: Path):
 
 # ---------- LaunchAgent plist installation (real run, not test mode) ----------
 
+# Pinned per-template placeholder set: the loop below only verifies a
+# placeholder that is present in the template, so a template that silently
+# lost one of its own placeholders (a future edit dropping __MEMORY_DIR__
+# from reflection.plist, say) would otherwise make that check vacuous
+# without the test noticing.
+EXPECTED_TEMPLATE_PLACEHOLDERS = {
+    "com.claude.memory.check-updates.plist": {"__INSTALL_DIR__"},
+    "com.claude.memory.orphan-backfill.plist": {"__INSTALL_DIR__", "__MEMORY_DIR__"},
+    "com.claude.memory.reflection-full.plist": {"__INSTALL_DIR__", "__MEMORY_DIR__"},
+    "com.claude.memory.reflection.plist": {"__INSTALL_DIR__", "__MEMORY_DIR__"},
+    "com.total-agent-memory.dashboard.plist": {"__INSTALL_DIR__", "__MEMORY_DIR__"},
+}
+
 
 def test_launchagents_substitute_install_dir_and_memory_dir(
     sandbox_home: Path, tmp_path: Path
@@ -391,9 +404,12 @@ def test_launchagents_substitute_install_dir_and_memory_dir(
                     f"{plist.name}: {placeholder} not substituted with {value!r}\n{body}"
                 )
                 checked_placeholders.append(placeholder)
-        assert checked_placeholders, (
-            f"{plist.name}: none of {sorted(placeholder_values)} appear in "
-            f"the source template — the substitution check verified nothing"
+        expected = EXPECTED_TEMPLATE_PLACEHOLDERS.get(plist.name)
+        assert expected is not None, f"{plist.name}: no expected-placeholder baseline for this template"
+        assert set(checked_placeholders) == expected, (
+            f"{plist.name}: template carries {set(checked_placeholders)}, expected {expected} - "
+            "a placeholder was silently added to or dropped from the source template, "
+            "which would make the substitution check above verify nothing for it"
         )
 
 

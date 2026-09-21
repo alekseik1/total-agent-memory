@@ -195,7 +195,7 @@ def test_save_report_without_phase_errors_column_still_inserts_row(monkeypatch):
         "SELECT id FROM reflection_reports WHERE id=?", ("rep1",)
     ).fetchone()
     assert row is not None
-    assert any("029" in w and "boom" in w for w in warnings)
+    assert any("phase_errors" in w and "boom" in w for w in warnings)
 
 
 @pytest.mark.parametrize(

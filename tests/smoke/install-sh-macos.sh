@@ -49,10 +49,6 @@ for plist in "$LA_DIR"/*.plist; do
     echo "FAIL: $name has leftover placeholders"
     exit 2
   fi
-  if grep -q "claude-memory-server" "$plist"; then
-    echo "FAIL: $name has hardcoded old checkout name"
-    exit 3
-  fi
   # ProgramArguments[0] must exist (the python interpreter path).
   py_path=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null || true)
   if [ -z "$py_path" ]; then

@@ -801,17 +801,18 @@ class ReflectionAgent:
             _now(),
         ]
 
-        # Only appended when migration 029 has run: a database that predates the
-        # column must still get its report saved, not lose the whole row. When
-        # the column is missing AND there were real phase errors, log them —
-        # otherwise a pre-029 database drops them with no trace at all, the
-        # exact failure mode 029 exists to end.
+        # Only appended when base_schema.apply_reflection_report_column_migrations
+        # has added the column: a database that predates it must still get its
+        # report saved, not lose the whole row. When the column is missing AND
+        # there were real phase errors, log them - otherwise a pre-migration
+        # database drops them with no trace at all, the exact failure mode the
+        # column exists to end.
         errors = phase_errors(report)
         if self._has_phase_errors_column():
             columns.append("phase_errors")
             values.append(json.dumps(errors))
         elif errors:
-            LOG(f"phase_errors dropped (migration 029 not applied): {errors}")
+            LOG(f"phase_errors dropped (reflection_reports.phase_errors column not present): {errors}")
 
         try:
             self.db.execute(

@@ -3,16 +3,16 @@
 Complements `reflection.digest.merge_duplicates` (which handles near-duplicates
 at Jaccard >=0.85). This module finds clusters of related records — cosine
 similarity in the high-similarity band defined by DEFAULT_MIN_SIMILARITY and
-DEFAULT_MAX_SIMILARITY below — and asks an LLM to synthesize them into a
+DEFAULT_MAX_SIMILARITY below - and asks an LLM to synthesize them into a
 single consolidated fact. Validator guards against LLM information loss.
 
 Only records whose type is in MERGEABLE_TYPES are candidates. The merged
 record the INSERT produces is always written as type='fact', so merging a
 `solution`/`decision`/`lesson` row would silently relabel it. Those types are
 episodic work-log entries (what was done, when, in what order) rather than
-timeless claims: two similar entries are usually two distinct events — a
+timeless claims: two similar entries are usually two distinct events - a
 sequence of steps, two separate edits to the same thing, or a decision that
-was reversed and re-reversed — and merging them would destroy the temporal
+was reversed and re-reversed - and merging them would destroy the temporal
 order that contradiction_detector and the temporal KG rely on. `fact` and
 `convention` records carry no such sequence, so they are the only safe
 candidates.
@@ -54,14 +54,14 @@ MergedHookFn = Callable[[int, str], None]
 VectorsFn = Callable[[list[int]], dict[int, Sequence[float]]]
 
 # Origin marker for synthesized records: no real session produced them. The
-# matching `sessions` row is seeded once in src/sql/base_schema.sql — which
+# matching `sessions` row is seeded once in src/sql/base_schema.sql - which
 # session a synthesized record belongs to is composition, not something this
 # class (contract: "db: SQLite connection") should decide per merge.
 MERGE_SESSION_ID = "fact-merge"
 
 # Only these types are timeless claims that can legitimately be restated as
 # one synthesized sentence. `solution`/`decision`/`lesson` rows are episodic
-# work-log entries — see the module docstring for why merging those is unsafe.
+# work-log entries - see the module docstring for why merging those is unsafe.
 MERGEABLE_TYPES = ("fact", "convention")
 
 # Defaults for find_clusters' merge band. Referenced (not restated) by the
@@ -196,16 +196,16 @@ class FactMerger:
         by_dim: dict[int, list[int]] = {}
         for kid, vec in vectors.items():
             # `if vec:` raises on a numpy array with >1 element ("truth value
-            # of an array is ambiguous") — a plain length check works for
+            # of an array is ambiguous") - a plain length check works for
             # both a list and an ndarray.
             if len(vec):
                 by_dim.setdefault(len(vec), []).append(kid)
 
         missing = len(ids) - sum(len(g) for g in by_dim.values())
         if missing:
-            LOG(f"{missing}/{len(ids)} candidates have no embedding — not compared")
+            LOG(f"{missing}/{len(ids)} candidates have no embedding - not compared")
         if len(by_dim) > 1:
-            LOG(f"embedding dims present: {sorted(by_dim)} — compared within each")
+            LOG(f"embedding dims present: {sorted(by_dim)} - compared within each")
 
         pairs = []
         for dim, group in sorted(by_dim.items()):
@@ -229,7 +229,7 @@ class FactMerger:
         Chunks the matmul `chunk_size` rows at a time so peak memory is
         O(n * chunk_size) instead of O(n^2). A single `matrix @ matrix.T` plus
         `np.triu_indices(n)` holds two n^2/2 int64 index arrays and a fancy-index
-        copy of the full similarity matrix — ~800MB at 10k candidates and ~3GB
+        copy of the full similarity matrix - ~800MB at 10k candidates and ~3GB
         at 20k, a MemoryError risk in a background daemon. Chunking keeps every
         intermediate array bounded by `chunk_size * n` regardless of `n`.
         """
@@ -309,7 +309,7 @@ class FactMerger:
             }
 
         # Insert merged record. session_id is NOT NULL with no default, so the
-        # merge has to name itself as the origin — there is no user session
+        # merge has to name itself as the origin - there is no user session
         # behind a record the reflection agent synthesized.
         first = rows[0]
         merged_id = self.db.execute(

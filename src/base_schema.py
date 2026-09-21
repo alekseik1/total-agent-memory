@@ -31,7 +31,7 @@ def apply_full_schema(db: sqlite3.Connection) -> None:
 
     Mirrors ``Store.__init__``: base DDL, then the shared column migrations,
     then the self-improvement tables, then every ``migrations/*.sql`` in
-    sorted order.
+    sorted order, then the reflection-report column migrations.
 
     Exists for tests. A fixture that hand-rolls its own ``knowledge`` table is
     how `fact_merger` shipped writing to a column production does not have with
@@ -59,9 +59,11 @@ def apply_core_column_migrations(db: sqlite3.Connection, log=lambda _msg: None) 
     PRAGMA-guarded so running both against the same column is safe. The rule
     this protects: no column may be added by a bare `ALTER TABLE` in a
     numbered `migrations/*.sql` file if it also lives in the base DDL, because
-    `_apply_sql_migrations` retries any migration that raises - so a column
-    present in both the base DDL and a migration file makes that migration
-    fail, and retry, on every single startup, forever.
+    a column present in both makes that migration's `ALTER TABLE` raise
+    `duplicate column name` - for a migration numbered below
+    `TRANSACTIONAL_SCHEMA_VERSION` that fails and retries on every single
+    startup forever; at or above it, `MigrationRunner` has no such tolerance
+    and raises `MigrationFailed` uncaught, crashing `Store.__init__` instead.
     """
     cols = {r[1] for r in db.execute("PRAGMA table_info(knowledge)").fetchall()}
     if "recall_count" not in cols:
@@ -114,8 +116,10 @@ def apply_reflection_report_column_migrations(db: sqlite3.Connection, log=lambda
     `Store._apply_sql_migrations()` has had a chance to run migration 001. It
     must instead run after `_apply_sql_migrations`'s loop, once the table is
     guaranteed to exist (the guard below also makes it a no-op against a
-    database where migration 001 has not run at all, e.g. mid-loop on a
-    from-scratch install via `apply_full_schema`).
+    database where `migrations/` is absent, e.g. a non-editable/wheel
+    install that never bundled migration 001, or where migration 001 itself
+    failed and was left unrecorded - both callers invoke this function after
+    their loop, never mid-loop).
 
     This logic used to be bare `ALTER TABLE` statements in
     `migrations/035_reflection_phase_errors.sql` and
@@ -124,28 +128,44 @@ def apply_reflection_report_column_migrations(db: sqlite3.Connection, log=lambda
     applied them under the old numbers runs them again under the new ones,
     and `ADD COLUMN` / `RENAME COLUMN` / `DROP COLUMN` are not safe to
     repeat in SQLite - see the comment atop each of those files.
+
+    Runs inside `BEGIN IMMEDIATE` so the write lock is taken before the
+    `PRAGMA table_info` read below: two `Store.__init__` calls against the
+    same file (a concurrent MCP session plus the launchd reflection runner,
+    see the migration rule in project memory) can otherwise both read the
+    pre-migration column set, and the second one's `ALTER TABLE` then raises
+    `duplicate column name` / `no such column` - the PRAGMA guard alone only
+    protects sequential replay, not a concurrent first run. With the lock
+    taken first, the second caller blocks until the first commits, then
+    re-reads the now-migrated schema and is a no-op.
     """
     tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     if "reflection_reports" not in tables:
         return
 
-    cols = {r[1] for r in db.execute("PRAGMA table_info(reflection_reports)").fetchall()}
-    if "phase_errors" not in cols:
-        db.execute("ALTER TABLE reflection_reports ADD COLUMN phase_errors JSON")
-        log("Migration: added phase_errors to reflection_reports table")
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(reflection_reports)").fetchall()}
+        if "phase_errors" not in cols:
+            db.execute("ALTER TABLE reflection_reports ADD COLUMN phase_errors JSON")
+            log("Migration: added phase_errors to reflection_reports table")
 
-    if "new_nodes" in cols:
-        db.execute("ALTER TABLE reflection_reports RENAME COLUMN new_nodes TO edges_strengthened")
-        log("Migration: renamed reflection_reports.new_nodes to edges_strengthened")
-    if "patterns_found" in cols:
-        db.execute("ALTER TABLE reflection_reports RENAME COLUMN patterns_found TO clusters_found")
-        log("Migration: renamed reflection_reports.patterns_found to clusters_found")
-    if "skills_refined" in cols:
-        db.execute("ALTER TABLE reflection_reports RENAME COLUMN skills_refined TO skills_proposed")
-        log("Migration: renamed reflection_reports.skills_refined to skills_proposed")
-    if "rules_proposed" in cols:
-        db.execute("ALTER TABLE reflection_reports DROP COLUMN rules_proposed")
-        log("Migration: dropped reflection_reports.rules_proposed")
+        if "new_nodes" in cols:
+            db.execute("ALTER TABLE reflection_reports RENAME COLUMN new_nodes TO edges_strengthened")
+            log("Migration: renamed reflection_reports.new_nodes to edges_strengthened")
+        if "patterns_found" in cols:
+            db.execute("ALTER TABLE reflection_reports RENAME COLUMN patterns_found TO clusters_found")
+            log("Migration: renamed reflection_reports.patterns_found to clusters_found")
+        if "skills_refined" in cols:
+            db.execute("ALTER TABLE reflection_reports RENAME COLUMN skills_refined TO skills_proposed")
+            log("Migration: renamed reflection_reports.skills_refined to skills_proposed")
+        if "rules_proposed" in cols:
+            db.execute("ALTER TABLE reflection_reports DROP COLUMN rules_proposed")
+            log("Migration: dropped reflection_reports.rules_proposed")
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
 def apply_self_improvement_tables(db: sqlite3.Connection) -> None:
@@ -156,7 +176,7 @@ def apply_self_improvement_tables(db: sqlite3.Connection) -> None:
     ``apply_core_column_migrations`` is shared: these tables live outside
     `src/sql/base_schema.sql` (they predate it and are created lazily), so a
     fixture that skips this step doesn't have the `errors` table at all - and
-    any `migrations/*.sql` file that touches `errors` (e.g. 032) breaks every
+    any `migrations/*.sql` file that touches `errors` (e.g. 038) breaks every
     test built on `apply_full_schema` the moment it does. All statements are
     `IF NOT EXISTS`, so calling this unconditionally is safe.
     """

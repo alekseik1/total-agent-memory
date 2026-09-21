@@ -156,7 +156,7 @@ DB_JOURNAL_SIZE_LIMIT_BYTES = 48 * 1024 * 1024
 # 8-10 concurrent MCP sessions plus the dashboard service contend for the
 # single writer lock; 5000ms was too tight and surfaced as "database is
 # locked" from memory_save. 15000ms absorbs realistic contention without
-# reading as a hang to the caller — do not raise further.
+# reading as a hang to the caller - do not raise further.
 DB_BUSY_TIMEOUT_MS = 15000
 # Short timeout for the opportunistic startup checkpoint attempt only: fail
 # fast if another reader holds a snapshot rather than stalling startup.
@@ -170,7 +170,7 @@ def _read_rules_limit(env=None):
         value = int(raw)
     except ValueError:
         sys.stderr.write(
-            f"[memory-mcp] Invalid MEMORY_RULES_LIMIT={raw!r} — ignoring, no cap applied\n"
+            f"[memory-mcp] Invalid MEMORY_RULES_LIMIT={raw!r} - ignoring, no cap applied\n"
         )
         return None
     return value if value >= 0 else None
@@ -180,13 +180,13 @@ RULES_CONTEXT_LIMIT = _read_rules_limit()  # None = no cap
 
 # Rule ranking does NOT tie-break on success_rate/rated-ness. Measured on the
 # live store: 75 active rules, 24653 fires, 1519 ratings, of which only 6 are
-# failures — 61 rules score exactly 1.0, and unrated rules default to a 0.5
+# failures - 61 rules score exactly 1.0, and unrated rules default to a 0.5
 # stand-in, so the "score" mostly just encodes whether a rule happened to get
 # rated, not any real quality signal. Priority 9 is oversubscribed (40 rules
 # for the 14 slots a limit=22 slice leaves after priority 10), so this
 # tie-break decides real delivery: sorting on it let two unrated, heavily
 # fired rules (200+ fires each) lose to rated peers with indistinguishable
-# scores. `created_at DESC` is used instead — deterministic, no pseudo-signal.
+# scores. `created_at DESC` is used instead - deterministic, no pseudo-signal.
 
 # v10 — importance multipliers applied to the final recall score so a
 # `critical` decision outranks ten `medium` observations at the same RRF
@@ -688,7 +688,7 @@ class Store:
         that ran are not the same thing. Labelling rows with the configured
         name wrote 30 rows reading `nomic-embed-text` (768-dim) that hold
         384-dim SentenceTransformer vectors, made on days the Ollama tunnel
-        was down — and `embed_set` cached them under that name too, so the
+        was down - and `embed_set` cached them under that name too, so the
         cache's `expected_model` guard matched and later served vectors from
         the wrong space as if they were the right ones. Callers that record or
         cache an identity must take it from here, never from configuration.
@@ -1020,6 +1020,7 @@ class Store:
             return self._binary_search_via_connection(
                 db, query_embedding, n_candidates=n_candidates, project=project,
                 n_results=n_results, embedding_spaces=embedding_spaces,
+                embedding_model=embedding_model, kind=kind, branch=branch,
             )
 
         scope = VectorScope(
@@ -1033,25 +1034,37 @@ class Store:
         )
 
     def _binary_search_via_connection(self, conn, query_embedding, *, n_candidates=50,
-                                       project=None, n_results=10, embedding_spaces=None):
+                                       project=None, n_results=10, embedding_spaces=None,
+                                       embedding_model=None, kind="all", branch=None):
         """Uncached Hamming pre-filter + cosine re-rank through an explicit Connection.
 
         Only used by `_binary_search` when a caller supplies `db` - see that
         docstring. Duplicates the pre-v14 `_binary_search` body rather than
         threading a Connection override through `self._vector_search`'s pool
         cache, which is keyed to a single Connection and not safe to share
-        across threads.
+        across threads. Filters mirror `VectorScope.sql()` exactly (including
+        the `embed_dim` filter) so this path can't silently return results
+        for the wrong vector width or ignore a filter the cached path honours.
         """
         import numpy as np
 
-        conds = ["k.status='active'"]
-        params: list = []
+        conds = ["k.status='active'", "e.embed_dim=?"]
+        params: list = [len(query_embedding)]
         if project:
             conds.append("k.project=?")
             params.append(project)
+        if embedding_model:
+            conds.append("e.embed_model=?")
+            params.append(embedding_model)
+        if kind != "all":
+            conds.append("k.type=?")
+            params.append(kind)
+        if branch:
+            conds.append("(k.branch=? OR k.branch='')")
+            params.append(branch)
         if embedding_spaces:
             ph = ",".join("?" * len(embedding_spaces))
-            conds.append(f"e.embedding_space IN ({ph})")
+            conds.append(f"COALESCE(e.embedding_space,'text') IN ({ph})")
             params.extend(embedding_spaces)
         sql = (
             "SELECT e.knowledge_id, e.binary_vector "
@@ -1217,6 +1230,32 @@ class Store:
             );
             """
         )
+        self.db.commit()
+
+        # v14.2.0 renumbered the fork's own 029-033 migrations to 035-039
+        # because upstream claimed those five keys for its own migrations
+        # (029_atomic_facts .. 033_evidence_passages). A database that ran
+        # the fork's OLD migrations under 029-033 still carries tracker rows
+        # under those keys, which would make upstream's real 029-033 look
+        # already-applied and get silently skipped below, then crash
+        # 034_canonical_timestamps ("no such trigger: atomic_source_update").
+        # Delete those rows before the `applied` set is computed - matched by
+        # description, not by version alone, so a database that never ran the
+        # fork's old migrations is untouched. Losing these rows is safe:
+        # 035/039 are now PRAGMA-guarded no-ops (see their file comments) and
+        # 036-038 are idempotent UPDATE/INSERT-WHERE-NOT-EXISTS.
+        renumbered_fork_migrations = {
+            "029": "reflection phase errors",
+            "030": "backfill session rows",
+            "031": "backfill orphan session rows",
+            "032": "resolve learned errors",
+            "033": "reflection report stat names",
+        }
+        for old_version, old_description in renumbered_fork_migrations.items():
+            self.db.execute(
+                "DELETE FROM migrations WHERE version=? AND description=?",
+                (old_version, old_description),
+            )
         self.db.commit()
 
         applied = {
@@ -2665,7 +2704,7 @@ class Store:
             ]
             result["hint"] = (
                 f"{len(omitted)} more matching rules were cut by the limit and are listed "
-                "in `rules_index` (id/priority/category/head only). They still apply — "
+                "in `rules_index` (id/priority/category/head only). They still apply - "
                 "fetch their full text with self_rules(action='get', ids=[...])."
             )
         if phase is not None:
@@ -4488,9 +4527,9 @@ async def _tool_catalogue():
                         "Actions: list, get (full text by ids), fire (record relevance), "
                         "rate (success=true/false), suspend, activate, retire, add_manual. "
                         "Auto-suspend: success_rate < 0.2 after 10+ RATINGS (success_count+fail_count), "
-                        "checked only when action='rate' runs — an unrated rule is never suspended, "
+                        "checked only when action='rate' runs - an unrated rule is never suspended, "
                         "however often it fires. "
-                        "For list: no result cap by default — all matching active rules are "
+                        "For list: no result cap by default - all matching active rules are "
                         "returned unless `limit` is passed or the MEMORY_RULES_LIMIT env var is set. "
                         "For get: pass `ids` (max 50) to retrieve the full rows behind the "
                         "`rules_index` entries self_rules_context returns when its limit truncates; "
@@ -4565,14 +4604,14 @@ async def _tool_catalogue():
                         "Call at SESSION START to load rules. Returns rules filtered by project and scope. "
                         "v8.0: pass `phase` to lazy-load rules relevant to current task phase — core "
                         "rules (no phase tag) + rules tagged phase:<X>. Cuts prompt tokens ~70%. "
-                        "No result cap by default — all matching active rules are returned unless "
+                        "No result cap by default - all matching active rules are returned unless "
                         "`limit` is passed or the MEMORY_RULES_LIMIT env var is set. "
                         "Only rules actually returned get fire_count/last_fired bumped, which "
-                        "feeds self_patterns rule_effectiveness — narrowing this limit also "
+                        "feeds self_patterns rule_effectiveness - narrowing this limit also "
                         "narrows that telemetry. "
                         "When the limit truncates, the response carries `rules_index` "
                         "(id/priority/category/head for every omitted rule, same ordering) and "
-                        "a `hint`: those rules still bind you — fetch their full text with "
+                        "a `hint`: those rules still bind you - fetch their full text with "
                         "self_rules(action='get', ids=[...]). Both keys are absent when nothing "
                         "was cut. "
                         "After task completion, rate rules: self_rules(action='rate', id=X, success=true/false).",
@@ -4979,7 +5018,7 @@ async def _tool_catalogue():
                         "description": "Omit it: this server's own session is used. "
                                        "Pass one only to end a session this process "
                                        "does not own (a hook naming the Claude Code "
-                                       "session, a subagent) — a session row is "
+                                       "session, a subagent) - a session row is "
                                        "created for it if none exists.",
                     },
                     "summary": {"type": "string"},
@@ -5144,7 +5183,7 @@ async def _tool_catalogue():
                         "type": "boolean",
                         "default": False,
                         "description": "Only rows whose stored embed_model is not the "
-                                       "active one — what a store left mixed by a backend "
+                                       "active one - what a store left mixed by a backend "
                                        "switch or a silent fallback needs. Rows with no "
                                        "embedding at all are not touched.",
                     },
@@ -6508,7 +6547,7 @@ async def _do(name, a):
         from session_continuity import SessionContinuity
         sc = SessionContinuity(store.db)
         # No tool hands the live SID to a caller, so one that has to supply
-        # `session_id` invents it — 231 of 256 stored summaries name a session
+        # `session_id` invents it - 231 of 256 stored summaries name a session
         # that never existed. Defaulting to this process's own session is the
         # only value a caller could not have known to pass.
         return J(sc.session_end(
@@ -6793,7 +6832,7 @@ async def _do(name, a):
         cap = a.get("limit")
         # `embedding_space` describes the CONTENT (text vs code), not the model
         # that encoded it, so it cannot select rows left behind by a backend
-        # switch — those are all `text` too. `stale_only` selects exactly the
+        # switch - those are all `text` too. `stale_only` selects exactly the
         # rows whose stored model is no longer the active one, which is what a
         # drifted store needs re-encoded.
         stale_only = bool(a.get("stale_only", False))
@@ -6817,7 +6856,7 @@ async def _do(name, a):
             sql += f" AND COALESCE(e.embedding_space,'text') IN ({ph})"
             params.extend(spaces)
         if stale_only:
-            # A row with no embedding at all is not stale, it is absent — a
+            # A row with no embedding at all is not stale, it is absent - a
             # different job, and one this would silently take on.
             sql += " AND e.knowledge_id IS NOT NULL AND e.embed_model <> ?"
             params.append(active_model)
@@ -7388,7 +7427,7 @@ def _detect_project():
     spawned in, or the working directory's name outside a repository.
 
     The server process is started by the client inside the project directory,
-    which is why `_detect_git_branch` above works — the same cwd names the
+    which is why `_detect_git_branch` above works - the same cwd names the
     project. Without this every session row was written as 'general', so
     `memory_timeline` and any per-project session analytics saw one bucket.
 
@@ -7423,8 +7462,8 @@ def _session_id():
     one human session shares an identity: knowledge saved through the tools,
     and the summary the SessionEnd hook writes (which names the Claude Code
     session, since that is all a hook knows). They used to be two ids for the
-    same session — the server minted `mcp_<ts>_<pid>` and never looked at the
-    environment it was handed — so the two halves could not be joined, and
+    same session - the server minted `mcp_<ts>_<pid>` and never looked at the
+    environment it was handed - so the two halves could not be joined, and
     `sessions` grew a row per identity space rather than per session.
 
     Falls back to the minted form for hosts that publish nothing (Codex,
