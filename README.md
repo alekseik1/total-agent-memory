@@ -6,7 +6,7 @@
 > Persistent, local memory for AI coding agents: Claude Code, Codex CLI, Cursor, any MCP client.
 > Temporal knowledge graph · procedural memory · AST codebase ingest · cross-project analogy · 3D WebGL visualization.
 
-[![Version](https://img.shields.io/badge/version-14.0.0-8ad.svg)](https://pypi.org/project/total-agent-memory/)
+[![Version](https://img.shields.io/badge/version-14.1.0-8ad.svg)](https://pypi.org/project/total-agent-memory/)
 [![Tests](https://img.shields.io/badge/tests-2162%20passing-4a9.svg)](docs/benchmarks/release-final-v14-20260915/RESULTS.md)
 [![IDEs](https://img.shields.io/badge/IDEs-9%20supported-4a9.svg)]()
 [![LongMemEval R@5](https://img.shields.io/badge/LongMemEval%20R@5-95.1%25-4a9.svg)](evals/longmemeval-2026-08-27-v13-store.json)
@@ -22,6 +22,17 @@
 [![Donate](https://img.shields.io/badge/PayPal-Donate-00457C.svg?logo=paypal&logoColor=white)](https://PayPal.Me/vbcherepanov)
 
 **Why this, not mem0 / Letta / Zep / Supermemory / Cognee?** → [docs/vs-competitors.md](docs/vs-competitors.md)
+
+---
+
+## Version 14.1.0 — what is new
+
+**Release date: 2026-09-21.**
+
+| Change | How you use it |
+|---|---|
+| **Negative retrieval in `memory_answer`** | Before reading, the grounded reader runs a second, contradiction-seeking search: a small model inverts the question, and each (supporting, opposing) pair — at most 5 × 5 — is scored in one batched call. Score ≥ 0.60 answers *Not enough information* without picking a side; 0.30–0.60 answers with a caveat; below 0.30 the answer is unchanged. The verdict is returned under `negative`. `MEMORY_NEGATIVE_RETRIEVAL=false` turns it off. |
+| **`memory_answer` on Anthropic and Ollama** | Both providers now return schema-constrained output (forced tool call / JSON-schema `format`). Before this, Claude Haiku wrapped JSON in a markdown fence and `memory_answer` failed with *Reader returned invalid grounded evidence*. |
 
 ---
 
@@ -64,14 +75,14 @@ Install the candidate wheel in a dedicated environment. Linux/macOS:
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./dist/total_agent_memory-14.0.0-py3-none-any.whl
+python -m pip install ./dist/total_agent_memory-14.1.0-py3-none-any.whl
 ```
 
 Windows PowerShell, using the environment directly without changing the execution policy:
 
 ```powershell
 py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install .\dist\total_agent_memory-14.0.0-py3-none-any.whl
+.\.venv\Scripts\python.exe -m pip install .\dist\total_agent_memory-14.1.0-py3-none-any.whl
 $env:PATH = "$PWD\.venv\Scripts;$env:PATH"
 ```
 
@@ -167,6 +178,7 @@ Optional remote LLM providers receive the content used in those tasks. Keep Olla
 
 ## Table of contents
 
+- [Version 14.1.0 — what is new](#version-1410--what-is-new)
 - [Version 14.0.0 — what is new](#version-1400--what-is-new)
 - [Getting started with v14](#getting-started-with-v14)
 - [The problem it solves](#the-problem-it-solves)
@@ -625,7 +637,7 @@ These are the published distribution channels. For the unpublished v14 candidate
 | **uvx** (Python via uv) | `uvx total-agent-memory` | One-off run with no install. Best for trying without commitment. |
 | **pipx** (Python isolated) | `pipx install total-agent-memory` | Installs the `total-agent-memory`, `tam`, `tam-lookup`, `lookup-memory` binaries on PATH in an isolated venv. |
 | **brew** (macOS / Linuxbrew) | `brew install vbcherepanov/tap/total-memory` | Bottle-style install with `tam` and legacy `claude-total-memory` symlinks. |
-| **Docker** (multi-arch) | `docker run -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:13.0.4` | Containerized (linux/amd64 + linux/arm64). Dashboard on `:37737`. |
+| **Docker** (multi-arch) | `docker run -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:14.1.0` | Containerized (linux/amd64 + linux/arm64). Dashboard on `:37737`. |
 | **Claude Code plugin** | `/plugin marketplace add vbcherepanov/total-agent-memory`<br>`/plugin install total-agent-memory@vbcherepanov` | Installs the MCP server, the `memory-protocol` skill and all seven capture hooks in one step, from inside Claude Code. The bootstrap reuses an existing install if it finds one, so nothing is downloaded twice. |
 | **Manual clone** | `git clone https://github.com/vbcherepanov/total-agent-memory ~/total-agent-memory && cd ~/total-agent-memory && ./install.sh --ide claude-code` | Full control. Lets you hack on the server, run benchmarks, and pick which background services to enable. Detailed walkthrough below. |
 
@@ -1266,6 +1278,7 @@ Environment variables (all optional):
 | `MEMORY_MODE` | `fast` | `ultrafast\|fast\|balanced\|deep`. Selects hot-path profile. See [Performance tuning](#performance-tuning). |
 | `MEMORY_USE_LLM_IN_HOT_PATH` | `false` | Master switch for sync LLM stages in `save_knowledge` / `Recall.search`. `MEMORY_MODE=deep` flips this to `true`. |
 | `MEMORY_ALLOW_OLLAMA_IN_HOT_PATH` | `false` | Re-enables the silent FastEmbed → Ollama fallback ladder when FastEmbed is unavailable. |
+| `MEMORY_NEGATIVE_RETRIEVAL` | `true` | `memory_answer` runs the contradiction-seeking second search (one inversion call + one batched scoring call over at most 5×5 pairs). `false` skips it. |
 | `MEMORY_RERANK_ENABLED` | `false` | Honour caller's `rerank=true`. When `false`, CrossEncoder rerank is hard-disabled even if a tool call requests it. |
 | `MEMORY_ENRICHMENT_ENABLED` | `false` | Run the async enrichment worker. Default-ON in `balanced` / `deep`. |
 | `MEMORY_TEXT_EMBED_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Model for `embedding_space=text`. |

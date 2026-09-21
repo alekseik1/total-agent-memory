@@ -355,3 +355,46 @@ def test_provider_unavailable_when_no_api_key(monkeypatch):
     p = llm_provider.make_provider("openai")
     assert isinstance(p, llm_provider.OpenAIProvider)
     assert p.available() is False
+
+
+def test_anthropic_structured_forces_schema_tool(monkeypatch):
+    import llm_provider
+
+    sink: dict = {}
+    payload = {"content": [{"type": "text", "text": "ignored"},
+                           {"type": "tool_use", "name": "respond", "input": {"supported": True, "reason": "ok"}}]}
+    monkeypatch.setattr(llm_provider.urllib.request, "urlopen", _capture_urlopen(payload, sink))
+    provider = llm_provider.AnthropicProvider(api_key="sk", api_base="https://a/v1", model="m")
+    schema = {"type": "object", "properties": {"supported": {"type": "boolean"}}}
+
+    assert json.loads(provider.complete_structured("q", schema, max_tokens=99)) == {"supported": True, "reason": "ok"}
+    assert isinstance(provider, llm_provider.StructuredLLMProvider)
+    assert sink["body"]["tools"][0]["input_schema"] == schema
+    assert sink["body"]["tool_choice"] == {"type": "tool", "name": "respond", "disable_parallel_tool_use": True}
+    assert sink["body"]["max_tokens"] == 99 and sink["body"]["temperature"] == 0.0
+
+
+def test_anthropic_structured_without_tool_input_raises(monkeypatch):
+    import llm_provider
+
+    monkeypatch.setattr(llm_provider.urllib.request, "urlopen",
+                        _capture_urlopen({"content": [{"type": "text", "text": "```json\n{}\n```"}]}, {}))
+    provider = llm_provider.AnthropicProvider(api_key="sk", api_base="https://a/v1", model="m")
+    with pytest.raises(RuntimeError, match="no tool input"):
+        provider.complete_structured("q", {"type": "object"})
+    with pytest.raises(RuntimeError, match="missing api_key"):
+        llm_provider.AnthropicProvider(api_key=None, api_base="https://a/v1").complete_structured("q", {})
+
+
+def test_ollama_structured_passes_schema_as_format(monkeypatch):
+    import llm_provider
+
+    sink: dict = {}
+    monkeypatch.setattr(llm_provider.urllib.request, "urlopen", _capture_urlopen({"response": ' {"a": 1} '}, sink))
+    provider = llm_provider.OllamaProvider(api_base="http://x:1", model="qwen")
+    schema = {"type": "object", "properties": {"a": {"type": "integer"}}}
+    assert provider.complete_structured("q", schema, max_tokens=12) == '{"a": 1}'
+    assert sink["body"]["format"] == schema and sink["body"]["options"]["num_predict"] == 12
+    monkeypatch.setattr(llm_provider.urllib.request, "urlopen", _capture_urlopen({"response": "  "}, {}))
+    with pytest.raises(RuntimeError, match="empty structured"):
+        provider.complete_structured("q", schema)
