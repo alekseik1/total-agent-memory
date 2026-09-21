@@ -354,6 +354,9 @@ def test_launchagents_substitute_install_dir_and_memory_dir(
     )
     assert result.returncode == 0, result.stderr
 
+    assert "SKIP: venv creation and pip install" in result.stdout, (
+        "venv/pip install must be skipped under INSTALL_TEST_MODE=1"
+    )
     assert "SKIP (test mode): embedding model pre-download" in result.stdout, (
         "model pre-download must be skipped, not run against a warm cache"
     )

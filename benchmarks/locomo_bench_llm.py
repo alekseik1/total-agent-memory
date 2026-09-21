@@ -54,10 +54,10 @@ DEFAULT_GEN_MODEL = "gpt-4o-mini"
 DEFAULT_JUDGE_MODEL = "gpt-4o-mini"
 
 CATEGORY_NAMES = {
-    1: "single-hop",
+    1: "multi-hop",
     2: "temporal",
-    3: "multi-hop",
-    4: "open-domain",
+    3: "open-domain",
+    4: "single-hop",
     5: "adversarial",
 }
 
@@ -67,6 +67,7 @@ CATEGORY_NAMES = {
 # ──────────────────────────────────────────────────────────────────────────
 
 def setup_env(db_path: Path, disable_llm_extraction: bool) -> None:
+    os.environ["TAM_MEMORY_DIR"] = str(db_path)
     os.environ["CLAUDE_MEMORY_DIR"] = str(db_path)
     if disable_llm_extraction:
         os.environ["MEMORY_LLM_ENABLED"] = "false"
@@ -233,9 +234,9 @@ Do NOT invent facts outside the provided sources. Be concise — one short phras
 # LoCoMo-specific per-category prompts. LoCoMo gold answers have distinct
 # surface forms per category; matching the surface form lifts judge acceptance.
 # Official LoCoMo category mapping (confirmed via memobase benchmark):
-#   1 = single_hop, 2 = temporal, 3 = multi_hop, 4 = open_domain, 5 = adversarial
+#   1 = multi_hop, 2 = temporal, 3 = open_domain, 4 = single_hop, 5 = adversarial
 CATEGORY_PROMPTS: dict[int, str] = {
-    1: """You answer direct factual questions about a two-person conversation.
+    4: """You answer direct factual questions about a two-person conversation.
 
 Strategy for SINGLE-HOP questions:
 1. If STRUCTURED FACTS has a triple matching the subject + relation of the question, answer with the object VERBATIM — no extra words.
@@ -275,7 +276,7 @@ Q: "How long has Caroline had her current group of friends for?" → "4 years"
 Q: "How long ago was Caroline's 18th birthday?" → "10 years ago"
 Q: "When did Melanie paint a sunrise?" → "2022"
 """,
-    3: """You answer MULTI-HOP questions that require combining facts from different turns.
+    1: """You answer MULTI-HOP questions that require combining facts from different turns.
 
 Think step by step internally (but only output the final answer):
   Step 1 — List the 2-4 most relevant facts from STRUCTURED FACTS / RELATED FACTS GRAPH / TEMPORAL FACTS / EXCERPTS that touch the question's entities.
@@ -297,7 +298,7 @@ Q: "Would Caroline likely have Dr. Seuss books on her bookshelf?" → "Yes, sinc
 Q: "Would Melanie be more interested in going to a national park or a theme park?" → "National park; she likes the outdoors"
 Q: "Would Caroline pursue writing as a career option?" → "LIkely no; though she likes reading, she wants to be a counselor"
 """,
-    4: """You answer open-domain questions about the people in the conversation — their lives, relationships, opinions, taste.
+    3: """You answer open-domain questions about the people in the conversation — their lives, relationships, opinions, taste.
 
 Strategy for OPEN-DOMAIN:
 1. SESSION SUMMARY carries the big picture — start there.
@@ -449,6 +450,8 @@ def process_qa(client, server_mod, store, recall, qa: dict, project: str,
                aux_model: str = "gpt-4o-mini",
                entity_boost: bool = False,
                subject_aware: bool = False) -> dict:
+    if per_cat_prompts and not oracle_routing:
+        raise ValueError("Category prompts require explicit oracle routing")
     question = qa.get("question", "")
     gold = str(qa.get("answer", "")).strip()
     cat = qa.get("category", 0)
@@ -457,10 +460,10 @@ def process_qa(client, server_mod, store, recall, qa: dict, project: str,
     # L6 per-category top_k: open-domain needs richer context, single-hop
     # tighter (sharper signal), adversarial small to reduce confab surface.
     cat_top_k = top_k
-    cat_guess = qa.get("category", 0)
-    if cat_guess == 4:       # open-domain
+    cat_guess = qa.get("category", 0) if oracle_routing else 0
+    if cat_guess == 3:       # open-domain
         cat_top_k = max(top_k, 16)
-    elif cat_guess == 1:     # single-hop
+    elif cat_guess == 4:     # single-hop
         cat_top_k = min(top_k, 8)
     elif cat_guess == 5:     # adversarial
         cat_top_k = min(top_k, 6)
@@ -602,7 +605,7 @@ def process_qa(client, server_mod, store, recall, qa: dict, project: str,
                     tags = []
             return "synthesized_fact" in tags or (e.get("context") or "").startswith("distilled_from=")
 
-        if cat == 1:  # single-hop → prefer synth_facts, but keep raw as backup
+        if cat == 4:  # single-hop → prefer synth_facts, but keep raw as backup
             synth = [e for e in entries if _is_synth(e)]
             raws = [e for e in entries if not _is_synth(e)]
             if len(synth) >= 5:
@@ -758,6 +761,8 @@ def process_qa(client, server_mod, store, recall, qa: dict, project: str,
 
     # Choose system prompt — generic vs LoCoMo per-category.
     system_prompt = ANSWER_SYSTEM
+    if per_cat_prompts and not oracle_routing:
+        raise ValueError("Category prompts require explicit oracle routing")
     if per_cat_prompts:
         cat_now = qa.get("category", 0)
         system_prompt = CATEGORY_PROMPTS.get(cat_now, ANSWER_SYSTEM)

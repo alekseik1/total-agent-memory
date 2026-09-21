@@ -1,17 +1,4 @@
-name: smoke
-
-# Install-matrix smoke tests — every PR + every push to main.
-#
-# Tests each user-facing install path against a clean environment and
-# asserts that the dashboard answers HTTP 200 (the single user-visible
-# acceptance criterion).
-#
-# - docker:  fresh volume + docker run + curl /api/stats
-# - install.sh (Linux): bash install.sh inside a python:3.12-slim
-#   container; verifies systemd unit files are written with substituted
-#   paths (no leftover placeholders).
-# - install.sh (macOS): runs on macos-latest runner; checks plist
-#   substitution + no port-37737 conflict.
+name: release-install-matrix
 
 on:
   push:
@@ -19,46 +6,172 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  docker-single-image:
-    runs-on: ubuntu-latest
+  package:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: docker pull → dashboard answers 200
-        run: bash tests/smoke/install-docker-pull.sh
+      - name: Build candidate artifacts in Docker
+        run: |
+          docker build -f docker/Dockerfile.dev -t tam-release-dev .
+          docker run --rm -v "$PWD:/workspace" tam-release-dev python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate-package
+          path: dist/*
+          if-no-files-found: error
 
-  install-sh-linux:
-    # Native ubuntu runner — its checkout uses local git, avoiding the
-    # REST-API code path that triggers GitHub's actions-abuse detection
-    # on containerised jobs.
-    runs-on: ubuntu-latest
+  native:
+    needs: package
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-15-intel, macos-15]
+        python: ['3.11', '3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+    env:
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.tam-models
+      TAM_MEMORY_DIR: ${{ github.workspace }}/.tam-test-memory
+      MEMORY_LLM_ENABLED: 'false'
+      MEMORY_MODE: fast
+      MEMORY_EMBED_THREADS: '1'
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: bash install.sh on bare ubuntu → unit files staged
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-package
+          path: dist
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.FASTEMBED_CACHE_PATH }}
+          key: tam-minilm-v14-${{ runner.os }}-${{ runner.arch }}
+      - name: Install exact candidate wheel
+        run: |
+          python -m pip install dist/*.whl pytest
+          python -m pip check
+      - name: Installed package, local and remote MCP, scopes, restart and restore
+        run: python tests/smoke/installed_runtime.py
+      - name: Native server regressions
+        run: python -m pytest tests/test_team_memory.py tests/test_team_lifecycle.py tests/test_team_worker_reuse.py tests/test_windows_installer_runtime.py tests/test_store_windows_encoding.py tests/test_cpu_budget.py tests/test_grounded_answer.py -q --junitxml=native-results.xml
+      - name: Full source installation on Unix
+        if: runner.os != 'Windows'
+        run: bash install.sh --ide cursor
+      - name: Source-installed entry points on Unix
+        if: runner.os != 'Windows'
+        run: |
+          export PATH="$PWD/.venv/bin:$PATH"
+          .venv/bin/python tests/smoke/installed_runtime.py
+      - name: Full source installation on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & .\install.ps1 -Ide claude-code
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$PWD\.venv\Scripts;$env:PATH"
+          & .\.venv\Scripts\python.exe tests/smoke/installed_runtime.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Platform service configuration
+        if: runner.os != 'Windows'
         env:
           INSTALL_TEST_MODE: skip-heavy
-          TAM_MEMORY_DIR: ${{ github.workspace }}/.tam
-        run: |
-          # --ide claude-code is the only IDE that triggers the Step 5
-          # systemd-units branch — cursor/cline/etc. wire MCP only.
-          bash install.sh --ide claude-code 2>&1 | tail -25 || true
-          for u in claude-memory-dashboard.service claude-memory-reflection.service claude-memory-reflection.path; do
-            f="$HOME/.config/systemd/user/$u"
-            test -f "$f" || { echo "FAIL: $u not staged"; exit 1; }
-            grep -q '@INSTALL_DIR@\|@MEMORY_DIR@\|__HOME__' "$f" \
-              && { echo "FAIL: $u has leftover placeholders"; cat "$f"; exit 2; }
-          done
-          echo "✓ all unit files staged with substituted paths"
+        run: bash install.sh --ide claude-code
+      - name: Installed background dashboard reports candidate release
+        run: python tests/smoke/check_dashboard.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-${{ matrix.os }}-py${{ matrix.python }}
+          path: native-results.xml
 
-  install-sh-macos:
-    runs-on: macos-latest
+  compose:
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Build candidate image
+        run: docker build -t tam-compose-candidate:14.2.0 .
+      - name: Compose cold start, real MCP, restart and persistence
+        env:
+          TAM_TEAM_IMAGE: tam-compose-candidate:14.2.0
+        run: bash tests/smoke/compose-candidate.sh
+
+  browser:
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          python-version: '3.12'
-      - name: install.sh smoke (sandbox HOME)
-        run: bash tests/smoke/install-sh-macos.sh
+          name: candidate-package
+          path: dist
+      - name: Build browser test environment
+        run: |
+          docker build -f docker/Dockerfile.dev -t tam-release-dev .
+          docker build -f docker/Dockerfile.browser --build-arg DEVELOPMENT_IMAGE=tam-release-dev -t tam-release-browser .
+      - name: Chromium, Firefox and WebKit against real server
+        run: |
+          docker run --rm --init --shm-size=1g -v "$PWD:/workspace" -w /workspace tam-release-browser sh -c \
+            'python -m pip install --no-deps dist/*.whl && python -m pytest tests/browser -q --junitxml=browser-results.xml'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-results
+          path: browser-results.xml
+
+  source-archive:
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.tam-models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-package
+          path: dist
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.FASTEMBED_CACHE_PATH }}
+          key: tam-models-source-v14-${{ runner.os }}-${{ hashFiles('src/config.py') }}
+      - name: Test the unpacked source distribution
+        run: |
+          docker build -f docker/Dockerfile.dev -t tam-release-dev .
+          docker run --rm -v "$PWD:/workspace" -w /workspace -e FASTEMBED_CACHE_PATH=/workspace/.tam-models tam-release-dev sh -c \
+            'set -eu; mkdir -p /tmp/source-candidate; tar -xzf dist/*.tar.gz --strip-components=1 -C /tmp/source-candidate; cd /tmp/source-candidate; python tests/smoke/prewarm_models.py; python -m pytest tests -q --junitxml=/workspace/source-results.xml'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-results
+          path: source-results.xml
+
+  release-platform-gate:
+    if: always()
+    needs: [package, native, compose, browser, source-archive]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every platform
+        env:
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          COMPOSE_RESULT: ${{ needs.compose.result }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
+          SOURCE_RESULT: ${{ needs.source-archive.result }}
+        run: |
+          test "$PACKAGE_RESULT" = success
+          test "$NATIVE_RESULT" = success
+          test "$COMPOSE_RESULT" = success
+          test "$BROWSER_RESULT" = success
+          test "$SOURCE_RESULT" = success

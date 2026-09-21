@@ -424,7 +424,7 @@ class GraphQuery:
                  ON kn1.knowledge_id = kn2.knowledge_id
                  AND kn1.node_id < kn2.node_id
                JOIN knowledge k ON kn1.knowledge_id = k.id
-               WHERE k.created_at >= datetime('now', ?)
+               WHERE k.created_at >= strftime('%Y-%m-%dT%H:%M:%f000Z', 'now', ?)
                  AND k.status = 'active'
                GROUP BY kn1.node_id, kn2.node_id
                HAVING cnt >= ?

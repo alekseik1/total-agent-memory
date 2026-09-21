@@ -35,6 +35,7 @@ def _env(tmp_path: Path) -> dict[str, str]:
         TAM_MEMORY_DIR=str(tmp_path),
         CLAUDE_MEMORY_DIR=str(tmp_path),
         MEMORY_MODE="fast",
+        MCP_TRANSPORT="stdio",
         MEMORY_ASYNC_ENRICHMENT="false",
     )
     return env

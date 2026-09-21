@@ -28,15 +28,19 @@ marked `failed` and stay out of the active queue until manually retried.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from memory_core.leases import LeaseHeartbeat, LeaseLost, assert_owned, enqueue_rebuilds
+from memory_core.telemetry import counters, op_timer
 from paths import memory_dir
 
 LOG = lambda msg: sys.stderr.write(f"[enrich-worker] {msg}\n")
@@ -119,6 +123,8 @@ class EnrichmentTask:
     importance: str
     skip_quality: bool
     attempts: int
+    lease_token: str = ""
+    atomic_only: bool = False
 
 
 def enqueue(
@@ -175,11 +181,11 @@ def reclaim_stale(db) -> int:
     )
     cur = db.execute(
         """UPDATE enrichment_queue
-              SET status='pending',
+              SET status='pending', lease_token=NULL, heartbeat_at=NULL,
                   last_error='reclaimed: previous worker did not finish in time'
             WHERE status='processing'
               AND started_at IS NOT NULL
-              AND started_at < ?""",
+              AND COALESCE(heartbeat_at, started_at) < ?""",
         (cutoff_iso,),
     )
     db.commit()
@@ -194,10 +200,11 @@ def _claim_pending(db, limit: int) -> list[EnrichmentTask]:
     one daemon thread per Store).
     """
     now = _now()
+    token = uuid.uuid4().hex
     cur = db.execute(
         """UPDATE enrichment_queue
               SET status='processing',
-                  started_at=?,
+                  started_at=?, heartbeat_at=?, lease_token=?,
                   attempts = attempts + 1
             WHERE id IN (
                 SELECT id FROM enrichment_queue
@@ -207,8 +214,8 @@ def _claim_pending(db, limit: int) -> list[EnrichmentTask]:
             )
         RETURNING id, knowledge_id, session_id, project, ktype,
                   content_snapshot, tags_snapshot, importance, skip_quality,
-                  attempts""",
-        (now, limit),
+                  attempts, lease_token, atomic_only""",
+        (now, now, token, limit),
     )
     rows = cur.fetchall()
     db.commit()
@@ -216,7 +223,8 @@ def _claim_pending(db, limit: int) -> list[EnrichmentTask]:
     for row in rows:
         try:
             tags = json.loads(row[6]) if row[6] else []
-        except Exception:
+        except (json.JSONDecodeError, TypeError) as error:
+            LOG(f"Invalid queue tags for task {row[0]}: {error}")
             tags = []
         out.append(EnrichmentTask(
             id=row[0],
@@ -229,25 +237,32 @@ def _claim_pending(db, limit: int) -> list[EnrichmentTask]:
             importance=row[7] or "medium",
             skip_quality=bool(row[8]),
             attempts=row[9] or 0,
+            lease_token=row[10],
+            atomic_only=bool(row[11]),
         ))
     return out
 
 
-def _mark_done(db, task_id: int) -> None:
-    db.execute(
-        "UPDATE enrichment_queue SET status='done', finished_at=?, last_error=NULL WHERE id=?",
-        (_now(), task_id),
+def _mark_done(db, task: EnrichmentTask) -> bool:
+    cursor = db.execute(
+        "UPDATE enrichment_queue SET status='done', finished_at=?, last_error=NULL, "
+        "lease_token=NULL WHERE id=? AND lease_token=? AND status='processing'",
+        (_now(), task.id, task.lease_token),
     )
     db.commit()
+    return cursor.rowcount == 1
 
 
-def _mark_failed_or_retry(db, task_id: int, attempts: int, error: str) -> None:
-    next_status = "failed" if attempts >= _max_attempts() else "pending"
-    db.execute(
-        "UPDATE enrichment_queue SET status=?, last_error=?, finished_at=? WHERE id=?",
-        (next_status, error[:500], _now() if next_status == "failed" else None, task_id),
+def _mark_failed_or_retry(db, task: EnrichmentTask, error: str) -> bool:
+    next_status = "failed" if task.attempts >= _max_attempts() else "pending"
+    cursor = db.execute(
+        "UPDATE enrichment_queue SET status=?, last_error=?, finished_at=?, lease_token=NULL "
+        "WHERE id=? AND lease_token=? AND status='processing'",
+        (next_status, error[:500], _now() if next_status == "failed" else None,
+         task.id, task.lease_token),
     )
     db.commit()
+    return cursor.rowcount == 1
 
 
 # ──────────────────────────────────────────────
@@ -263,7 +278,7 @@ def _run_quality_gate(db, task: EnrichmentTask, store=None) -> None:
     if task.skip_quality:
         return
     try:
-        from quality_gate import score_quality, log_decision
+        from quality_gate import log_decision, score_quality
     except Exception as e:
         LOG(f"quality_gate import failed: {e}")
         return
@@ -322,11 +337,19 @@ def _run_contradiction_detector(db, task: EnrichmentTask, store=None) -> None:
     """Re-run the contradiction sweep against existing same-type records."""
     try:
         from contradiction_detector import (
-            should_run as _cd_should_run,
-            detect_contradictions as _cd_detect,
-            production_candidates_query as _cd_fetch,
-            production_llm_call as _cd_llm,
             apply_and_log as _cd_apply,
+        )
+        from contradiction_detector import (
+            detect_contradictions as _cd_detect,
+        )
+        from contradiction_detector import (
+            production_candidates_query as _cd_fetch,
+        )
+        from contradiction_detector import (
+            production_llm_call as _cd_llm,
+        )
+        from contradiction_detector import (
+            should_run as _cd_should_run,
         )
     except Exception as e:
         LOG(f"contradiction_detector import failed: {e}")
@@ -395,10 +418,38 @@ def _run_wiki_refresh(db, task: EnrichmentTask, store=None) -> None:
 # Stages run in deterministic order. quality_gate first so a 'drop' is
 # visible to a follow-up read before contradiction_detector spends LLM
 # budget on a record we are about to soft-drop anyway.
+def _run_atomic_facts(db, task: EnrichmentTask, store=None) -> None:
+    if os.environ.get("MEMORY_ATOMIC_FACTS_ENABLED", "false").lower() not in ("true", "1", "yes"):
+        return
+    import config
+    from ai_layer.atomic_fact_extractor import FactExtractor
+    from llm_provider import make_provider
+    from memory_core.atomic_facts import FactRepository
+
+    FactExtractor(FactRepository(db), make_provider(config.get_phase_provider("enrich")),
+                  config.get_phase_model("enrich"),
+                  before_commit=(lambda: assert_owned(db, task.id, task.lease_token))
+                  if getattr(task, "lease_token", "") else None).extract(task.knowledge_id)
+
+
+def _run_passage_index(db, task: EnrichmentTask, store=None) -> None:
+    if os.environ.get('MEMORY_PASSAGE_INDEX_ENABLED', 'false').lower() not in ('true', '1', 'yes'):
+        return
+    from memory_core.embeddings import EmbeddingProvider
+    from memory_core.passage_index import PASSAGE_CHARS, PassageIndex
+    row = db.execute("SELECT * FROM knowledge WHERE id=? AND status='active'", (task.knowledge_id,)).fetchone()
+    if row is None or len(row['content']) <= PASSAGE_CHARS:
+        return
+    provider = store.evidence_embedder if store is not None else EmbeddingProvider()
+    PassageIndex(db, provider.embed_texts, provider.active_model()).ensure([dict(row)])
+
+
 _STAGES: list[tuple[str, Callable[..., None]]] = [
     ("quality_gate", _run_quality_gate),
     ("entity_dedup", _run_entity_dedup_audit),
     ("contradiction", _run_contradiction_detector),
+    ("atomic_facts", _run_atomic_facts),
+    ("passage_index", _run_passage_index),
     ("episodic", _run_episodic_event),
     ("wiki", _run_wiki_refresh),
 ]
@@ -411,9 +462,15 @@ def process_task(db, task: EnrichmentTask, *, store=None) -> tuple[bool, str | N
     queue row can be retried; one bad stage does not nuke the others.
     """
     errors: list[str] = []
-    for label, runner in _STAGES:
+    stages = [("atomic_facts", _run_atomic_facts)] if task.atomic_only else _STAGES
+    for label, runner in stages:
         try:
-            runner(db, task, store=store)
+            if task.lease_token:
+                assert_owned(db, task.id, task.lease_token)
+            with op_timer(f"enrichment_{label}_ms"):
+                runner(db, task, store=store)
+        except LeaseLost:
+            raise
         except Exception as e:
             LOG(f"stage {label!r} failed for kid={task.knowledge_id}: {e}")
             errors.append(f"{label}: {e}")
@@ -429,6 +486,8 @@ def run_pending(db, *, max_rows: int | None = None, store=None) -> dict[str, int
     """
     # Reclaim rows whose previous worker died mid-stage. Cheap: indexed
     # UPDATE that touches only stale 'processing' rows.
+    if os.environ.get("MEMORY_ATOMIC_FACTS_ENABLED", "false").lower() in ("true", "1", "yes"):
+        enqueue_rebuilds(db, max_rows if max_rows is not None else _batch_size(), _now)
     reclaimed = reclaim_stale(db)
     limit = max_rows if max_rows is not None else _batch_size()
     tasks = _claim_pending(db, limit)
@@ -436,17 +495,24 @@ def run_pending(db, *, max_rows: int | None = None, store=None) -> dict[str, int
         "claimed": len(tasks), "done": 0, "retried": 0,
         "failed": 0, "reclaimed": reclaimed,
     }
-    for task in tasks:
-        ok, err = process_task(db, task, store=store)
-        if ok:
-            _mark_done(db, task.id)
-            counts["done"] += 1
-        else:
-            _mark_failed_or_retry(db, task.id, task.attempts, err or "unknown")
-            if task.attempts >= _max_attempts():
-                counts["failed"] += 1
-            else:
-                counts["retried"] += 1
+    with LeaseHeartbeat(db, [(task.id, task.lease_token) for task in tasks],
+                        _stale_after_sec() / 3, logging.getLogger(__name__)):
+        for task in tasks:
+            try:
+                ok, err = process_task(db, task, store=store)
+                if ok:
+                    updated = _mark_done(db, task)
+                    if updated:
+                        counts["done"] += 1
+                else:
+                    updated = _mark_failed_or_retry(db, task, err or "unknown")
+                    if updated:
+                        counts["failed" if task.attempts >= _max_attempts() else "retried"] += 1
+                if not updated:
+                    counters.bump("enrichment_lease_lost")
+            except LeaseLost as error:
+                logging.getLogger(__name__).warning("Enrichment ownership changed", extra={
+                    "task_id": task.id, "error": str(error)})
     return counts
 
 
@@ -463,10 +529,10 @@ class _WorkerThread(threading.Thread):
     def __init__(self, store):
         super().__init__(daemon=True, name="enrich-worker")
         self._store = store
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def _path_from_connection(self) -> str | None:
         """The file behind `store.db`, or None when there is none to reopen."""
@@ -516,12 +582,12 @@ class _WorkerThread(threading.Thread):
             return
         LOG(f"started (tick={tick}s, batch={_batch_size()})")
         try:
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 try:
                     run_pending(db, store=self._store)
                 except Exception as e:
                     LOG(f"tick error: {e}")
-                self._stop.wait(tick)
+                self._stop_event.wait(tick)
         finally:
             if owned:
                 try:

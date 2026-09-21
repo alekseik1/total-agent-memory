@@ -22,7 +22,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
+
+SourceFormat = Literal['auto', 'conversation']
 
 
 # ─── result type ─────────────────────────────────────────────────────
@@ -112,6 +114,8 @@ _RE_LOG_TIMESTAMP = re.compile(
 _RE_JSON_OBJ = re.compile(r"^\s*[{\[]")
 _RE_YAML_DOC = re.compile(r"^---\s*$", re.MULTILINE)
 _RE_YAML_KV = re.compile(r"(?m)^[A-Za-z_][\w-]*:\s")
+_RE_DIALOGUE_ROLE = re.compile(r"(?mi)^(user|assistant|system|human|ai):[ \t]+\S")
+MIN_DIALOGUE_TURNS = 3
 _RE_TOML_TABLE = re.compile(r"(?m)^\[\w[\w.-]*\]\s*$")
 _RE_INI_SECTION = re.compile(r"(?m)^\[[^\]]+\]\s*$")
 _RE_ENV_LINE = re.compile(r"(?m)^[A-Z_][A-Z0-9_]*\s*=")
@@ -312,9 +316,14 @@ def classify(
     content: str,
     *,
     file_path: str | None = None,
+    source_format: SourceFormat = 'auto',
 ) -> ClassificationResult:
     """Classify `content` into a content_type + optional language."""
     reasons: list[str] = []
+    if source_format not in ('auto', 'conversation'):
+        raise ValueError('Unsupported source format')
+    if source_format == 'conversation':
+        return ClassificationResult(type='text', confidence=1.0, reasons=['explicit conversation source'])
 
     # 1. Extension wins (highest signal).
     ext_type, ext_lang = _check_extension(file_path)
@@ -330,6 +339,15 @@ def classify(
         )
 
     sample = content[:8192]  # cap regex work for huge inputs
+
+    roles = _RE_DIALOGUE_ROLE.findall(sample)
+    distinct_roles = {role.casefold() for role in roles}
+    if (len(roles) >= MIN_DIALOGUE_TURNS and 1 < len(distinct_roles) < len(roles)
+            and not _RE_YAML_DOC.match(sample.lstrip())):
+        return ClassificationResult(
+            type="text", language=None, confidence=0.9,
+            reasons=["multiple conversation turns with distinct roles"],
+        )
 
     # 2. Stacktrace before log — stacktrace is a stronger signal.
     if _looks_like_stacktrace(sample):

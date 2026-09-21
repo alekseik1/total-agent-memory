@@ -20,23 +20,24 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Sequence
+from functools import lru_cache
 from pathlib import Path
-from typing import Sequence
 
 _SRC = str(Path(__file__).resolve().parent.parent)
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-import config as _cfg  # noqa: E402
-
-from memory_core.embedding_spaces import (  # noqa: E402
+import config as _cfg
+from memory_core.embedding_spaces import (
     DEFAULT_SPACE,
     is_space_supported,
     model_for_space,
 )
 
-
 _HOT_PATH_OLLAMA_ENV = "MEMORY_ALLOW_OLLAMA_IN_HOT_PATH"
+QUERY_CACHE_SIZE = 128
+MAX_CACHED_QUERY_CHARS = 4096
 
 
 def _allow_ollama_in_hot_path() -> bool:
@@ -83,7 +84,8 @@ class EmbeddingProvider:
     """
 
     def __init__(self) -> None:
-        self._providers: dict[str, object] = {}
+        self._providers: dict[tuple[str, str], object] = {}
+        self._cached_query = lru_cache(maxsize=QUERY_CACHE_SIZE)(self._encode_query)
 
     # ─── public ─────────────────────────────────────────────────────
 
@@ -104,8 +106,14 @@ class EmbeddingProvider:
         *,
         space: str = DEFAULT_SPACE,
     ) -> list[float]:
+        encoder = self._cached_query if len(query) <= MAX_CACHED_QUERY_CHARS else self._encode_query
+        return list(encoder(query, space, self.active_model(space)))
+
+    def _encode_query(self, query: str, space: str, model: str) -> tuple[float, ...]:
+        if model != self.active_model(space):
+            raise RuntimeError('Embedding model changed during query encoding')
         out = self.embed_texts([query], space=space)
-        return out[0] if out else []
+        return tuple(out[0]) if out else ()
 
     def active_model(self, space: str = DEFAULT_SPACE) -> str:
         space_norm = space if is_space_supported(space) else DEFAULT_SPACE
@@ -135,11 +143,11 @@ class EmbeddingProvider:
 
     def _provider_for(self, space: str):
         space_norm = space if is_space_supported(space) else DEFAULT_SPACE
-        cached = self._providers.get(space_norm)
+        model = model_for_space(space_norm)
+        key = (space_norm, model)
+        cached = self._providers.get(key)
         if cached is not None:
             return cached
-
-        model = model_for_space(space_norm)
 
         # Preferred: FastEmbed (local, no HTTP, fits the hot path).
         provider = _build_fastembed(model)
@@ -166,7 +174,7 @@ class EmbeddingProvider:
                     "(fastembed missing AND choose_embed fallback unusable)."
                 )
 
-        self._providers[space_norm] = provider
+        self._providers[key] = provider
         return provider
 
 

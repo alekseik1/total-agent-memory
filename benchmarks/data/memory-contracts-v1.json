@@ -1,0 +1,37 @@
+{
+  "provenance": "Synthetic contract validation authored during implementation. Not independent held-out QA; do not tune on this set and claim generalization.",
+  "records": [
+    {"id": 1, "content": "Ирина рекомендовала Павлу книгу «Северный маяк».", "project": "atlas", "session_id": "books", "created_at": "2026-01-03"},
+    {"id": 2, "content": "Павел прочитал рекомендованную Ириной книгу и подарил её брату.", "project": "atlas", "session_id": "books", "created_at": "2026-01-04"},
+    {"id": 3, "content": "Ирина рекомендовала Павлу книгу «Другой берег».", "project": "secret", "session_id": "books", "created_at": "2026-01-03"},
+    {"id": 4, "content": "Встреча с поставщиком состоялась вчера, 9 февраля 2026 года.", "project": "atlas", "session_id": "events", "created_at": "2026-02-10"},
+    {"id": 5, "content": "Следующая встреча с поставщиком только запланирована на 20 февраля 2026 года.", "project": "atlas", "session_id": "events", "created_at": "2026-02-11"},
+    {"id": 6, "content": "Павел не покупал велосипед. Он взял велосипед напрокат.", "project": "atlas", "session_id": "purchase", "created_at": "2026-03-01"},
+    {"id": 7, "content": "Павел купил шлем и фонарь.", "project": "atlas", "session_id": "purchase", "created_at": "2026-03-02"},
+    {"id": 8, "content": "Очередь заданий проекта atlas использует Redis.", "project": "atlas", "session_id": "infra", "created_at": "2026-01-01", "status": "superseded"},
+    {"id": 9, "content": "С 1 апреля очередь заданий проекта atlas переведена на RabbitMQ; прежнее решение отменено.", "project": "atlas", "session_id": "infra", "created_at": "2026-04-01"},
+    {"id": 10, "content": "В экспериментальной ветке очередь заданий использует Kafka.", "project": "atlas", "session_id": "infra", "created_at": "2026-04-02", "branch": "experiment"},
+    {"id": 11, "content": "Nora adopted a cat named Fern.", "project": "garden", "session_id": "pets", "created_at": "2026-01-01"},
+    {"id": 12, "content": "Nora later adopted another cat named Ash.", "project": "garden", "session_id": "pets", "created_at": "2026-02-01"},
+    {"id": 13, "content": "Nora has a dog named Willow.", "project": "garden", "session_id": "pets", "created_at": "2026-02-02"},
+    {"id": 14, "content": "Nora's conference trip was cancelled; she did not attend.", "project": "garden", "session_id": "travel", "created_at": "2026-03-01"},
+    {"id": 15, "content": "Nora plans to attend a different conference in May.", "project": "garden", "session_id": "travel", "created_at": "2026-03-02"},
+    {"id": 16, "content": "The garden database owner is Ellis.", "project": "garden", "session_id": "owners", "created_at": "2026-04-01"},
+    {"id": 17, "content": "Ellis selected PostgreSQL for the garden database.", "project": "garden", "session_id": "owners", "created_at": "2026-04-01"},
+    {"id": 18, "content": "The garden database password is not stored in memory.", "project": "garden", "session_id": "owners", "created_at": "2026-04-02"}
+  ],
+  "cases": [
+    {"id": "ru-chain", "query": "Какую книгу Павел прочитал по рекомендации Ирины?", "project": "atlas", "category": "multi_hop", "evidence": [[1, 2]], "reference": "Северный маяк", "answerable": true},
+    {"id": "ru-date", "query": "Когда состоялась встреча с поставщиком?", "project": "atlas", "category": "temporal", "evidence": [[4]], "reference": "9 февраля 2026 года", "answerable": true},
+    {"id": "ru-plan", "query": "На какую дату запланирована следующая встреча с поставщиком?", "project": "atlas", "category": "temporal", "evidence": [[5]], "reference": "20 февраля 2026 года", "answerable": true},
+    {"id": "ru-negation", "query": "Павел покупал велосипед?", "project": "atlas", "category": "negation", "evidence": [[6]], "reference": "Нет, взял напрокат", "answerable": true},
+    {"id": "ru-purchases", "query": "Что Павел купил для велосипеда?", "project": "atlas", "category": "enumeration", "evidence": [[6, 7]], "reference": "Шлем и фонарь; велосипед не покупал", "answerable": true},
+    {"id": "ru-current", "query": "Какую очередь заданий использует проект atlas?", "project": "atlas", "branch": "main", "category": "supersession", "evidence": [[9]], "reference": "RabbitMQ", "answerable": true},
+    {"id": "ru-private", "query": "Какую книгу рекомендовала Ирина?", "project": "secret", "category": "isolation", "evidence": [[3]], "reference": "Другой берег", "answerable": true},
+    {"id": "en-pets", "query": "What pets does Nora have?", "project": "garden", "category": "enumeration", "evidence": [[11, 12, 13]], "reference": "Cats Fern and Ash, dog Willow", "answerable": true},
+    {"id": "en-cancel", "query": "Did Nora attend the cancelled conference?", "project": "garden", "category": "negation", "evidence": [[14]], "reference": "No", "answerable": true},
+    {"id": "en-plan", "query": "When does Nora plan to attend another conference?", "project": "garden", "category": "temporal", "evidence": [[15]], "reference": "May", "answerable": true},
+    {"id": "en-owner", "query": "Which database did the garden database owner select?", "project": "garden", "category": "multi_hop", "evidence": [[16, 17]], "reference": "Ellis selected PostgreSQL", "answerable": true},
+    {"id": "en-unknown", "query": "What is the garden database password?", "project": "garden", "category": "unanswerable", "evidence": [], "reference": "Not enough information", "answerable": false}
+  ]
+}

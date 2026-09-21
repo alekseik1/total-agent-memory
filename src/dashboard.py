@@ -28,6 +28,7 @@ from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from paths import memory_dir
+from version import RELEASE_DATE, VERSION
 
 DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "37737"))
 MEMORY_DIR = memory_dir()
@@ -81,7 +82,7 @@ def api_stats(db: sqlite3.Connection) -> dict:
 
     stale = db.execute("""
         SELECT COUNT(*) FROM knowledge
-        WHERE status='active' AND last_confirmed < datetime('now', '-90 days')
+        WHERE status='active' AND last_confirmed < strftime('%Y-%m-%dT%H:%M:%f000Z', 'now', '-90 days')
     """).fetchone()[0]
 
     never_recalled = db.execute("""
@@ -973,7 +974,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Claude Total Memory</title>
+<title>total-agent-memory</title>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -1495,7 +1496,8 @@ td.date-col { white-space: nowrap; color: var(--text-dim); font-size: 13px; }
 <div class="container">
     <header>
         <div>
-            <h1><span>Claude</span> Total Memory</h1>
+            <h1>total-agent-memory</h1>
+            <div class="subtitle">Version __TAM_VERSION__ &middot; Released __TAM_RELEASE_DATE__</div>
             <div class="subtitle" style="display:flex;align-items:center;gap:10px;">
                 <span>Read-only dashboard &mdash; memory.db</span>
                 <span id="header-feed-status" title="Live feed status (SSE)"
@@ -3686,7 +3688,7 @@ GRAPH_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Knowledge Graph — Claude Memory</title>
+<title>Knowledge Graph — total-agent-memory</title>
 <script src="https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -4003,7 +4005,7 @@ _KNOWLEDGE_VIEW_HTML = r"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Knowledge __KID__ — Claude Memory</title>
+<title>Knowledge __KID__ — total-agent-memory</title>
 <style>
   body { margin:0; background:#0a0a14; color:#ddd;
          font-family:-apple-system,Segoe UI,sans-serif; }
@@ -4079,7 +4081,7 @@ _SESSION_VIEW_HTML = r"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Session __SID__ — Claude Memory</title>
+<title>Session __SID__ — total-agent-memory</title>
 <style>
   body { margin:0; background:#0a0a14; color:#ddd;
          font-family:-apple-system,Segoe UI,sans-serif; }
@@ -4163,6 +4165,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _send_html(self, html: str, status: int = 200) -> None:
         """Send an HTML response, injecting v6 panels when the marker is present."""
+        html = html.replace("__TAM_VERSION__", VERSION).replace("__TAM_RELEASE_DATE__", RELEASE_DATE)
         if "<!-- V6_PANELS_HERE -->" in html:
             try:
                 from dashboard_v6 import V6_PANELS_HTML
@@ -4287,6 +4290,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
         params = parse_qs(parsed.query)
+
+        if path == "/api/release":
+            self._send_json({"name": "total-agent-memory", "version": VERSION, "release_date": RELEASE_DATE})
+            return
 
         # Helper to get single param values
         def p(key: str, default: str = "") -> str:

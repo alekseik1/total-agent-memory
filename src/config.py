@@ -43,6 +43,24 @@ from pathlib import Path
 # Settings
 # ──────────────────────────────────────────────
 
+DEFAULT_EMBED_THREADS = 1
+DEFAULT_TORCH_THREADS = 1
+DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b"
+
+
+def get_embed_threads() -> int:
+    value = int(os.environ.get("MEMORY_EMBED_THREADS", str(DEFAULT_EMBED_THREADS)))
+    if value < 1:
+        raise ValueError("MEMORY_EMBED_THREADS must be a positive integer")
+    return value
+
+
+def get_torch_threads() -> int:
+    value = int(os.environ.get("MEMORY_TORCH_THREADS", str(DEFAULT_TORCH_THREADS)))
+    if value < 1:
+        raise ValueError("MEMORY_TORCH_THREADS must be a positive integer")
+    return value
+
 
 def get_ollama_url() -> str:
     return os.environ.get("OLLAMA_URL", "http://localhost:11434")
@@ -50,7 +68,7 @@ def get_ollama_url() -> str:
 
 def get_llm_model() -> str:
     """Configured LLM model name. Default = a model that is usually present."""
-    return os.environ.get("MEMORY_LLM_MODEL", "qwen2.5-coder:7b")
+    return os.environ.get("MEMORY_LLM_MODEL") or DEFAULT_OLLAMA_MODEL
 
 
 def get_llm_mode() -> str:
@@ -385,13 +403,13 @@ def get_status() -> dict:
 #   EMBED: fastembed | openai | cohere
 
 
-_SUPPORTED_LLM_PROVIDERS = ("ollama", "openai", "anthropic", "auto")
+_SUPPORTED_LLM_PROVIDERS = ("ollama", "openai", "openai-compatible", "anthropic", "auto")
 _SUPPORTED_EMBED_PROVIDERS = ("fastembed", "openai", "cohere")
-_SUPPORTED_PHASES = ("triple", "enrich", "repr")
+_SUPPORTED_PHASES = ("triple", "enrich", "repr", "reason")
 
 # Default model name per provider when MEMORY_LLM_MODEL isn't set.
 _DEFAULT_LLM_MODEL_BY_PROVIDER = {
-    "ollama": "qwen2.5-coder:7b",
+    "ollama": DEFAULT_OLLAMA_MODEL,
     "openai": "gpt-4o-mini",
     "anthropic": "claude-haiku-4-5",
 }
@@ -499,6 +517,8 @@ def get_llm_model_for_provider(provider: str | None = None) -> str:
     override = os.environ.get("MEMORY_LLM_MODEL")
     if override:
         return override
+    if p == "openai-compatible":
+        raise ValueError("MEMORY_LLM_MODEL is required for openai-compatible")
     return _DEFAULT_LLM_MODEL_BY_PROVIDER.get(p, get_llm_model())
 
 
@@ -736,6 +756,25 @@ def use_llm_in_hot_path() -> bool:
 def allow_ollama_in_hot_path() -> bool:
     raw = (os.environ.get("MEMORY_ALLOW_OLLAMA_IN_HOT_PATH", "false") or "false").strip().lower()
     return raw in ("1", "true", "yes", "on")
+
+
+def is_negative_retrieval_enabled() -> bool:
+    """Contradiction-seeking second pass in memory_answer (on by default)."""
+    return _get_bool_env("MEMORY_NEGATIVE_RETRIEVAL", default=True)
+
+
+CONTRADICTION_POLICIES = ("resolve", "abstain")
+
+
+def get_contradiction_policy() -> str:
+    """What memory_answer does on a hard contradiction.
+
+    ``resolve`` (default) hands both sides, with their recording dates, to the
+    reader, which answers with the current value. ``abstain`` refuses without
+    reading. Unknown values fall back to ``resolve``.
+    """
+    raw = os.environ.get("MEMORY_CONTRADICTION_POLICY", "").strip().lower()
+    return raw if raw in CONTRADICTION_POLICIES else CONTRADICTION_POLICIES[0]
 
 
 def is_rerank_enabled() -> bool:

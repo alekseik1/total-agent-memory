@@ -17,8 +17,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from ai_layer import iterative_retriever as ir  # noqa: E402
-
+from ai_layer import iterative_retriever as ir
 
 # ──────────────────────────────────────────────────────────────────────
 # Test doubles
@@ -173,7 +172,7 @@ def test_decomposes_multihop(fake_rewrite):
     assert result.iterations_used >= 2
     assert result.terminated_reason == "converged"
     issued = [c["query"] for c in search.calls]
-    assert "What did Alice tell Bob" in issued
+    assert "What did Alice tell Bob about Charlie's project?" in issued
     assert "Charlie's project details" in issued
 
 
@@ -245,7 +244,7 @@ def test_dedup_evidence(fake_rewrite):
     )
 
     result = ir.iterative_retrieve(
-        "anything",
+        "q1",
         search_fn=search,
         max_iters=4,
         k_per_iter=5,
@@ -308,10 +307,10 @@ def test_decomposer_empty_falls_back_to_canonical(fake_rewrite):
     )
 
     assert len(search.calls) == 1
-    assert search.calls[0]["query"] == "canonical-form"
+    assert search.calls[0]["query"] == "raw user question"
     assert result.iterations_used == 1
     assert result.terminated_reason == "converged"
-    assert result.sub_queries == ["canonical-form"]
+    assert result.sub_queries == ["raw user question"]
     assert result.provenance["rewrite"]["used_decomposition"] is False
 
 
@@ -332,7 +331,7 @@ def test_provenance_contains_per_iter_timing(fake_rewrite):
     assert "iters" in result.provenance
     assert len(result.provenance["iters"]) == 1
     iter0 = result.provenance["iters"][0]
-    assert iter0["sub_query"] == "seed"
+    assert iter0["sub_query"] == "q"
     assert iter0["hits_returned"] >= 0
     assert iter0["planner_done"] is True
     assert iter0["elapsed_ms"] >= 0
@@ -353,15 +352,15 @@ def test_invalid_arguments(fake_rewrite):
         ir.iterative_retrieve("q", search_fn=search, k_per_iter=0, llm_client=llm)
 
 
-def test_planner_violates_contract_treated_as_done(fake_rewrite):
-    """next_query=null with done=false is coerced to done=true (safe stop)."""
+def test_planner_violates_contract_retried(fake_rewrite):
+    """Invalid decisions must be retried, not counted as convergence."""
     fake_rewrite(canonical="seed", decomposed=["seed"])
     search = FakeSearch()
     llm = FakeLLMClient(
         [
             _planner_json("contradictory", None, False),
-            # Should NOT be consumed.
-            _planner_json("never", "x", False),
+            # A valid retry can end the search.
+            _planner_json("supported", None, True),
         ]
     )
 
@@ -375,4 +374,4 @@ def test_planner_violates_contract_treated_as_done(fake_rewrite):
 
     assert result.terminated_reason == "converged"
     assert result.iterations_used == 1
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2

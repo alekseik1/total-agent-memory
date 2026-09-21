@@ -36,7 +36,7 @@ echo "→ running install.sh in sandbox (skip pip/model)"
 HOME="$SANDBOX" \
 INSTALL_TEST_MODE=skip-heavy \
 TAM_MEMORY_DIR="$SANDBOX/.tam" \
-bash "$REPO_ROOT/install.sh" --ide claude-code 2>&1 | tail -5 || true
+bash "$REPO_ROOT/install.sh" --ide claude-code 2>&1 | tail -5
 
 LA_DIR="$SANDBOX/Library/LaunchAgents"
 [ -d "$LA_DIR" ] || { echo "FAIL: $LA_DIR not created"; exit 4; }

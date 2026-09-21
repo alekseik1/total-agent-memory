@@ -15,11 +15,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
-
-import sys
 
 _SRC = str(Path(__file__).resolve().parent)
 if _SRC not in sys.path:
@@ -42,17 +41,14 @@ def handle_recall_iterative(
         return {"error": "query is required"}
 
     project = args.get("project")
-    max_iters = int(args.get("max_iters") or 4)
-    k_per_iter = int(args.get("k_per_iter") or 5)
-    llm_model = args.get("llm_model") or "haiku"
+    max_iters = args.get("max_iters", 4)
+    k_per_iter = args.get("k_per_iter", 10)
+    llm_model = args.get("llm_model") or "configured"
 
     def _adapter(q: str, k: int = 10, project: str | None = None) -> list[dict]:
         result = search_fn(q, project, "all", k)
-        if isinstance(result, list):
-            return result
-        if isinstance(result, dict) and "results" in result:
-            return result["results"]
-        return []
+        from memory_core.retrieval import flatten_results
+        return flatten_results(result)
 
     res = iterative_retrieve(
         query,
@@ -70,7 +66,7 @@ def handle_recall_iterative(
         "sub_queries": list(res.sub_queries),
         "partial_answers": list(res.partial_answers),
         "evidence_count": len(res.final_evidence),
-        "evidence": res.final_evidence[:20],
+        "evidence": res.final_evidence,
         "provenance": res.provenance,
     }
 
@@ -99,12 +95,12 @@ def handle_temporal_query(args: dict) -> dict:
 
     if op == "duration_between":
         from memory_core.temporal.arithmetic import (
-            duration_between,
             days_between,
-            weeks_between,
-            months_between,
-            years_between,
+            duration_between,
             format_human,
+            months_between,
+            weeks_between,
+            years_between,
         )
         a = _dt.fromisoformat(args["a"])
         b = _dt.fromisoformat(args["b"])

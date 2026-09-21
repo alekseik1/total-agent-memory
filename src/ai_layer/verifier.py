@@ -246,6 +246,8 @@ class _NLIModel:
 
     def __init__(self) -> None:
         # Imported here so module import stays cheap.
+        from cpu_budget import configure_torch_threads
+        configure_torch_threads()
         import torch  # noqa: WPS433
         from transformers import (  # noqa: WPS433
             AutoModelForSequenceClassification,
@@ -258,7 +260,7 @@ class _NLIModel:
         self._model.eval()
 
         self._device = self._pick_device(torch)
-        self._model.to(self._device)
+        self._model.to(device=self._device, dtype=torch.float32)
 
         # Resolve label index per class from id2label so we are not coupled to
         # any specific label ordering inside the checkpoint.

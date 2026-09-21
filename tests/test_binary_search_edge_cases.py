@@ -113,3 +113,107 @@ def test_binary_search_empty_pool_returns_empty(store):
     rng = np.random.default_rng(3)
     query = _rand_vec(rng)
     assert store._binary_search(query.tolist(), n_candidates=3, project="p") == []
+
+
+def test_exact_small_pool_recovers_best_cosine_despite_sign_difference(store):
+    _seed_embeddings(store, {
+        1: np.array([0.01, 1.0], dtype=np.float32),
+        2: np.array([1.0, -0.01], dtype=np.float32),
+    })
+    query = [1.0, 0.01]
+    approximate = store._binary_search(query, n_candidates=1, n_results=1, project="p")
+    exact = store._binary_search(
+        query, n_candidates=1, n_results=1, project="p", exact_small_pool=True,
+    )
+    assert approximate[0][0] == 1
+    assert exact[0][0] == 2
+    assert exact[0][1] > approximate[0][1]
+
+
+def test_large_pool_still_uses_bounded_candidates(store, monkeypatch):
+    import memory_core.vector_math as vectors
+
+    monkeypatch.setattr(vectors, "EXACT_VECTOR_SCAN_LIMIT", 2)
+    rng = np.random.default_rng(5)
+    _seed_embeddings(store, {kid: _rand_vec(rng) for kid in range(1, 5)})
+    result = store._binary_search(
+        _rand_vec(rng).tolist(), n_candidates=1, project="p", exact_small_pool=True,
+    )
+    assert len(result) == 1
+
+
+@pytest.mark.parametrize("scope", [{"kind": "solution"}, {"branch": "feature"}])
+def test_search_spaces_filters_before_selecting_top_result(store, monkeypatch, scope):
+    _seed_embeddings(store, {
+        1: np.array([1.0, 0.0], dtype=np.float32),
+        2: np.array([0.8, 0.2], dtype=np.float32),
+    })
+    store.db.execute("UPDATE knowledge SET branch='other' WHERE id=1")
+    store.db.execute("UPDATE knowledge SET type='solution' WHERE id=2")
+    store.db.commit()
+    monkeypatch.setattr(store, "_active_embed_model_name", lambda: "test-model")
+    monkeypatch.setattr(store, "embed", lambda texts: [[1.0, 0.0]])
+    result = store._search_spaces("query", project="p", limit=1, **scope)
+    assert [identity for identity, _ in result] == [2]
+
+
+def test_sqlite_adapter_consumes_real_store_tuples_and_filters_first(store):
+    from memory_core.vector_store import SQLiteBinaryVectorStore
+
+    _seed_embeddings(store, {kid: np.array([1.0, 0.0], dtype=np.float32) for kid in range(1, 61)})
+    _seed_embeddings(store, {61: np.array([0.8, 0.2], dtype=np.float32)})
+    store.db.execute("UPDATE embeddings SET embedding_space='code' WHERE knowledge_id=61")
+    store.db.commit()
+    adapter = SQLiteBinaryVectorStore(store)
+    assert adapter.search([1.0, 0.0], top_k=1, project="p")[0] == ("1", 1.0)
+    assert adapter.search([1.0, 0.0], top_k=1, project="p", embedding_space=" CODE ")[0][0] == "61"
+    assert adapter.search([1.0, 0.0], top_k=0) == []
+    assert adapter.search([], top_k=1) == []
+
+
+@pytest.mark.parametrize("mode,provider_calls", [("fastembed", 0), ("openai", 2)])
+def test_shared_local_model_encodes_query_once_across_spaces(store, monkeypatch, mode, provider_calls):
+    from types import SimpleNamespace
+
+    _seed_embeddings(store, {kid: np.array([1.0, 0.0], dtype=np.float32) for kid in (1, 2, 3)})
+    store.db.execute("UPDATE embeddings SET embedding_space='config' WHERE knowledge_id=1")
+    store.db.execute("UPDATE embeddings SET embedding_space='log' WHERE knowledge_id=3")
+    store.db.commit()
+    calls = {"store": 0, "provider": 0}
+
+    def encode(texts):
+        calls["store"] += 1
+        return [[1.0, 0.0]]
+
+    def encode_space(query, *, space):
+        calls["provider"] += 1
+        return [1.0, 0.0]
+
+    store._embed_mode = mode
+    monkeypatch.setattr(store, "_active_embed_model_name", lambda: "test-model")
+    monkeypatch.setattr(store, "embed", encode)
+    store._v11_embed_provider = SimpleNamespace(active_model=lambda space: "test-model", embed_query=encode_space)
+    assert {identity for identity, _ in store._search_spaces("query", project="p")} == {1, 2, 3}
+    assert not store._semantic_diagnostics
+    assert calls == {"store": 1, "provider": provider_calls}
+
+
+def test_different_space_model_keeps_its_own_query_encoder(store, monkeypatch):
+    from types import SimpleNamespace
+
+    _seed_embeddings(store, {1: np.array([1.0, 0.0], dtype=np.float32), 2: np.array([0.0, 1.0], dtype=np.float32)})
+    store.db.execute("UPDATE embeddings SET embedding_space='code',embed_model='code-model' WHERE knowledge_id=2")
+    store.db.commit()
+    calls = []
+
+    def encode_code(query, *, space):
+        calls.append(space)
+        return [0.0, 1.0]
+
+    store._embed_mode = "fastembed"
+    monkeypatch.setattr(store, "_active_embed_model_name", lambda: "test-model")
+    monkeypatch.setattr(store, "embed", lambda texts: [[1.0, 0.0]])
+    store._v11_embed_provider = SimpleNamespace(active_model=lambda space: "code-model", embed_query=encode_code)
+    assert {identity for identity, _ in store._search_spaces("query", project="p")} == {1, 2}
+    assert calls == ["code"]
+    assert not store._semantic_diagnostics

@@ -120,13 +120,14 @@ Dataset: [`xiaowu0162/longmemeval-cleaned`](https://huggingface.co/datasets/xiao
 Weakest spot is preference tracking (80%) — and BEAM's `preference_following`
 (0.28 R@5) says the same thing from another angle: preferences get stated once,
 in passing, and never restated.
-Temporal reasoning at 92.9% confirms the bi-temporal KG (`kg_at`) is pulling its weight.
-**+9.7 pp over Supermemory's published 85.4%** on the same dataset.
+These are historical retrieval measurements, not answer accuracy. They do not
+establish superiority over another product or isolate the contribution of the
+temporal graph. That requires a shared end-to-end protocol and ablation runs.
 
-> **How to read this.** `recall_any@5` = at least one required evidence fragment in top-5.
-> `recall_all@5` = every required fragment in top-5. Supermemory's 85.4% is their
-> headline number against the full LongMemEval corpus. Our 96.2% is the comparable headline
-> (any match); 84.5% is the strict "all fragments" version, still at parity with their overall.
+`recall_any@5` means at least one required evidence fragment appears in the top five;
+`recall_all@5` requires every fragment. Neither can be subtracted from a competitor's
+answer accuracy. The former +9.7 percentage-point comparison was invalid and has
+been withdrawn. Version 14 has not been evaluated on this corpus yet.
 
 > **Two caveats we would rather state than have you find.**
 >
