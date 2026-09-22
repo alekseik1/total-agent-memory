@@ -1311,10 +1311,6 @@ class Store:
             "reflection report stat names",
         ]
         _repair_bases = ("029", "035")
-        assert "900" not in _repair_bases, (
-            "900 is the fork's current base - adding it to _repair_bases "
-            "would delete and replay this generation's own rows on every startup"
-        )
         renumbered_fork_migrations = [
             (f"{int(base) + offset:03d}", description)
             for base in _repair_bases
