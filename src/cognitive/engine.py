@@ -705,6 +705,44 @@ class CognitiveEngine:
 
         return [dict(r) for r in rows]
 
+    def _solutions_matching(self, concepts: list[str], project: str | None) -> list:
+        """Active solutions whose content has a word starting with one of `concepts`.
+
+        Uses the full-text index: a `LIKE '%concept%'` scan reads every
+        solution in the store, which took 850 ms at 1M records. Falls back to
+        that scan on databases without `knowledge_fts`.
+        """
+        project_filter = " AND k.project = ?" if project else ""
+        project_params = [project] if project else []
+        terms = " OR ".join('"' + c.replace('"', '""') + '"*' for c in concepts)
+        match = f"content : ({terms})"
+        if project:
+            from memory_core.fts_schema import project_token
+            match += f" AND fts_project : {project_token(project)}"
+        try:
+            return self.db.execute(
+                f"""WITH f AS MATERIALIZED (
+                        SELECT rowid AS id FROM knowledge_fts WHERE knowledge_fts MATCH ?
+                    )
+                    SELECT k.id, k.content, k.project, k.tags, k.confidence
+                    FROM f JOIN knowledge k ON k.id = f.id
+                    WHERE k.type = 'solution' AND k.status = 'active'{project_filter}
+                    ORDER BY k.confidence DESC, k.recall_count DESC
+                    LIMIT 10""",
+                [match, *project_params],
+            ).fetchall()
+        except sqlite3.OperationalError:
+            like_clauses = " OR ".join("k.content LIKE ?" for _ in concepts)
+            return self.db.execute(
+                f"""SELECT k.id, k.content, k.project, k.tags, k.confidence
+                    FROM knowledge k
+                    WHERE k.type = 'solution' AND k.status = 'active'
+                      AND ({like_clauses}){project_filter}
+                    ORDER BY k.confidence DESC, k.recall_count DESC
+                    LIMIT 10""",
+                [f"%{c}%" for c in concepts] + project_params,
+            ).fetchall()
+
     def _find_solutions(
         self,
         concepts: list[str],
@@ -718,24 +756,7 @@ class CognitiveEngine:
             return solutions
 
         # From knowledge table
-        like_clauses = " OR ".join(["content LIKE ?" for _ in concepts[:5]])
-        params: list = [f"%{c}%" for c in concepts[:5]]
-
-        project_filter = ""
-        if project:
-            project_filter = " AND project = ?"
-            params.append(project)
-
-        rows = self.db.execute(
-            f"""SELECT id, content, project, tags, confidence
-                FROM knowledge
-                WHERE type = 'solution' AND status = 'active'
-                  AND ({like_clauses})
-                  {project_filter}
-                ORDER BY confidence DESC, recall_count DESC
-                LIMIT 10""",
-            params,
-        ).fetchall()
+        rows = self._solutions_matching(concepts[:5], project)
 
         solutions.extend(dict(r) for r in rows)
 

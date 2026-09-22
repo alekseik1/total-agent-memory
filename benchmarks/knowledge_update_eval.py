@@ -42,6 +42,9 @@ NOISE_PER_LANGUAGE = 300
 NOISE_SEED = 20260921
 TOP_K = 5
 REFUSAL_PREFIX = 'Not enough information'
+# Per-question deltas of process counters: time in the contradiction pass and who paid for it.
+SPEND_COUNTERS = ('grounded_negative_ms', 'negative_scorer_llm_calls', 'negative_scorer_jev_calls',
+                  'jev_request_ms', 'jev_input_tokens', 'jev_output_tokens', 'llm_calls')
 
 NOISE_NAMES = {
     'ru': ['Антон', 'Борис', 'Галина', 'Денис', 'Евгения', 'Жанна', 'Зоя', 'Кирилл', 'Лариса', 'Максим',
@@ -76,6 +79,12 @@ def configure_environment(db_dir: str) -> None:
             if not service_env.get(name):
                 raise SystemExit(f'{name} is not set and not found in {SERVICE_PLIST}')
             os.environ[name] = service_env[name]
+    if os.environ.get('MEMORY_CONTRADICTION_SCORER') == 'jev' and not os.environ.get('TYPESAFE_API_KEY'):
+        for line in (JUDGE_DIR / '.env').read_text().splitlines():
+            if line.startswith('TYPESAFE_API_KEY='):
+                os.environ['TYPESAFE_API_KEY'] = line.split('=', 1)[1].strip().strip('"\'')
+        if not os.environ.get('TYPESAFE_API_KEY'):
+            raise SystemExit(f'MEMORY_CONTRADICTION_SCORER=jev needs TYPESAFE_API_KEY (env or {JUDGE_DIR / ".env"})')
     os.environ['TAM_MEMORY_DIR'] = db_dir
     os.environ['CLAUDE_MEMORY_DIR'] = db_dir
     os.environ['MEMORY_LLM_ENABLED'] = 'false'
@@ -108,13 +117,20 @@ class Harness:
 
     def answer(self, query: str, project: str) -> dict:
         from answer_endpoint import answer_response
+        from memory_core.telemetry import counters
 
+        before = counters.snapshot()
         started = time.perf_counter()
+
+        def spent() -> dict:
+            after = counters.snapshot()
+            return {name: round(after.get(name, 0.0) - before.get(name, 0.0), 3) for name in SPEND_COUNTERS}
+
         try:
             result = answer_response(self.store, self.recall, {'query': query, 'project': project})
         except Exception as error:  # noqa: BLE001 — every failure is recorded per question, never hidden
             return {'answer': None, 'error': f'{type(error).__name__}: {error}',
-                    'elapsed_ms': (time.perf_counter() - started) * 1000}
+                    'elapsed_ms': (time.perf_counter() - started) * 1000, **spent()}
         negative = result.negative
         verification = result.verification
         return {'answer': result.answer, 'error': None, 'status': result.draft.status,
@@ -123,7 +139,7 @@ class Harness:
                 'verification_reason': verification.reason if verification else None,
                 'negative_decision': negative.decision if negative else None,
                 'evidence_ids': [hit['id'] for hit in result.evidence],
-                'elapsed_ms': (time.perf_counter() - started) * 1000}
+                'elapsed_ms': (time.perf_counter() - started) * 1000, **spent()}
 
 
 class Judge:
@@ -270,7 +286,14 @@ def summarize(results: list[dict]) -> dict:
         groups.setdefault(f'{row["lang"]}:{row["kind"]}', []).append(row)
         groups.setdefault(f'kind:{row["kind"]}', []).append(row)
         groups.setdefault(f'lang:{row["lang"]}', []).append(row)
-    return {'overall': block(results), 'groups': {key: block(rows) for key, rows in sorted(groups.items())},
+    def median(key: str) -> float | None:
+        values = sorted(row[key] for row in results if key in row)
+        return values[len(values) // 2] if values else None
+
+    spend = {f'median_{key}': median(key) for key in ('grounded_negative_ms', 'jev_request_ms')}
+    spend.update({f'total_{key}': round(sum(row.get(key, 0.0) for row in results), 3) for key in SPEND_COUNTERS})
+    return {'overall': block(results), 'spend': spend,
+            'groups': {key: block(rows) for key, rows in sorted(groups.items())},
             'judge_cost_usd': round(sum(row['judge_cost_usd'] for row in results), 6),
             'median_answer_ms': sorted(row['elapsed_ms'] for row in results)[len(results) // 2] if results else None}
 

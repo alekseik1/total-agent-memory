@@ -121,3 +121,7 @@ docs/benchmarks/platform-v14-20260915/*
 !docs/benchmarks/release-final-v14-20260915/
 docs/benchmarks/release-final-v14-20260915/*
 !docs/benchmarks/release-final-v14-20260915/RESULTS.md
+!docs/benchmarks/scale-v14/
+!docs/benchmarks/scale-v14/raw/
+!docs/benchmarks/memoryagentbench/
+!docs/benchmarks/memoryagentbench/raw/

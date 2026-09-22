@@ -14,12 +14,16 @@ if os.path.exists(_server_path):
     _mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(_mod)
     main = _mod.main
+    run = _mod.run
 else:
     async def main():
         print("Error: server.py not found", file=sys.stderr)
         sys.exit(1)
 
+    def run():
+        asyncio.run(main())
+
 
 def main_sync():
     """Synchronous entry point for console_scripts."""
-    asyncio.run(main())
+    run()

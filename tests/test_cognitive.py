@@ -84,3 +84,53 @@ class TestCognitiveEngine:
 
         ctx = engine.build_context("authentication setup")
         assert isinstance(ctx["skills"], list)
+
+
+class TestSolutionLookup:
+    """available_solutions uses the FTS index, not a LIKE scan of every solution."""
+
+    @pytest.fixture
+    def engine(self, db):
+        from cognitive.engine import CognitiveEngine
+
+        rows = [
+            ("solution", "Fix authentication timeout by raising the pool size", "api", 0.9),
+            ("solution", "Rotate JWT signing keys weekly", "web", 0.8),
+            ("solution", "Authentication cache warmed at boot", "web", 0.5),
+            ("fact", "Authentication uses Keycloak", "api", 1.0),
+        ]
+        for ktype, content, project, confidence in rows:
+            db.execute(
+                "INSERT INTO knowledge (type, content, project, confidence, status) VALUES (?, ?, ?, ?, 'active')",
+                (ktype, content, project, confidence),
+            )
+        db.execute("INSERT INTO knowledge (type, content, project, status) VALUES ('solution', 'authentication retired', 'api', 'superseded')")
+        db.commit()
+        return CognitiveEngine(db)
+
+    def test_matches_word_prefix_across_projects(self, engine):
+        found = [r["content"] for r in engine._solutions_matching(["authentic"], None)]
+        assert found == [
+            "Fix authentication timeout by raising the pool size",
+            "Authentication cache warmed at boot",
+        ]
+
+    def test_project_filter(self, engine):
+        found = [r["content"] for r in engine._solutions_matching(["authentic", "jwt"], "web")]
+        assert found == ["Rotate JWT signing keys weekly", "Authentication cache warmed at boot"]
+
+    def test_uses_fts(self, engine, db):
+        statements = []
+        db.set_trace_callback(statements.append)
+        engine._solutions_matching(["authentic"], None)
+        db.set_trace_callback(None)
+        assert any("knowledge_fts MATCH" in s for s in statements)
+        assert not any("LIKE" in s for s in statements)
+
+    def test_falls_back_without_fts(self, engine, db):
+        db.execute("DROP TABLE knowledge_fts")
+        found = [r["content"] for r in engine._solutions_matching(["authentic"], "api")]
+        assert found == ["Fix authentication timeout by raising the pool size"]
+
+    def test_quotes_in_concepts(self, engine):
+        assert engine._solutions_matching(['auth"entic'], None) == []

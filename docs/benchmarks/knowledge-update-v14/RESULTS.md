@@ -67,6 +67,40 @@ Intermediate versions, in the order they were built:
 - Control: 4 wrong answers against 1 in 14.1.0, because fewer refusals mean some answers
   are now wrong instead of withheld. Net correct is +5.
 
+## Jev as the contradiction scorer (14.3.0)
+
+`MEMORY_CONTRADICTION_SCORER=jev` sends every (supporting, opposing) pair of the negative
+pass as one `noul` question, all in a single request to TypeSafe's System One API
+(`jev-latest`, resolved to `jev-1.13.0`). The reader and the verifier stay on Claude
+Haiku 4.5. Both arms ran the same code (v5 directories) on the same questions; only the
+scorer differs.
+
+| Suite | Haiku scorer | Jev scorer | wins / losses | p |
+|---|---|---|---|---|
+| LongMemEval knowledge-update | 36 / 78 | 35 / 78 | +1 / −2 | 1.0 |
+| Synthetic ru + en | 21 / 30 | 21 / 30 | +1 / −1 | 1.0 |
+| Control (5 other categories) | 16 / 50 | 15 / 50 | +3 / −4 | 1.0 |
+
+Accuracy is unchanged within noise. What changes is the cost of the pass:
+
+| Median per question | Haiku scorer | Jev scorer |
+|---|---|---|
+| Negative pass (inversion + search + scoring), knowledge-update | 3.1 s | 1.9 s |
+| Whole `memory_answer`, knowledge-update | 8.7 s | 7.7 s |
+| Whole `memory_answer`, control | 10.0 s | 7.7 s |
+
+Jev billed 911,226 input tokens for all 78 knowledge-update questions: $0.038 at
+$0.042 per million (output tokens are free). Haiku 4.5 input costs $1 per million, 24×
+more per token; its token count for the same step was not recorded, so no dollar
+comparison is claimed for it. Jev declared a hard contradiction less often (6 vs 24 times
+on knowledge-update) without losing accuracy. In a direct probe it scored a conflict about
+another person ("Fedor loves maroon / white", question about Masha) at 0.15, a later
+recollection of the past at 0.12, and real updates at 0.87.
+
+If the Jev call fails, the negative pass reports *no contradiction* and the answer
+proceeds; a missing or malformed `TYPESAFE_API_KEY` fails at startup of the call without
+echoing the key.
+
 ## Reproduce
 
 ```
@@ -78,4 +112,8 @@ python benchmarks/knowledge_update_eval.py --suite longmemeval --out <dir>/contr
   --types multi-session,temporal-reasoning,single-session-user,single-session-assistant,single-session-preference --per-type 10
 ```
 
-Per-question answers, verifier reasons and judge ledgers are in the version directories.
+For the scorer comparison, prefix both commands with `MEMORY_CONTRADICTION_SCORER=jev`
+(the harness reads `TYPESAFE_API_KEY` from the environment).
+
+Per-question answers, verifier reasons, per-question contradiction-pass timings and judge
+ledgers are in the version directories.

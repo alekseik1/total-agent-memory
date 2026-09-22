@@ -48,12 +48,6 @@ class SpreadingActivation:
 
         depth = max(1, min(depth, len(self.HOP_DECAY) - 1))
 
-        # Build adjacency list once for the entire spread operation
-        adjacency = self._build_adjacency()
-        if not adjacency:
-            LOG("spread: empty graph, no edges found")
-            return {}
-
         # activation_level[node_id] = max activation seen
         activation_level: dict[str, float] = {}
         # path_count[node_id] = number of distinct paths reaching this node
@@ -70,11 +64,11 @@ class SpreadingActivation:
         for hop in range(1, depth + 1):
             decay = self.HOP_DECAY[hop]
             next_frontier: set[str] = set()
+            active = [n for n in current_frontier if activation_level.get(n, 0.0) >= self.ACTIVATION_THRESHOLD]
+            adjacency = self._neighbors(active)
 
-            for node_id in current_frontier:
-                parent_activation = activation_level.get(node_id, 0.0)
-                if parent_activation < self.ACTIVATION_THRESHOLD:
-                    continue
+            for node_id in active:
+                parent_activation = activation_level[node_id]
 
                 # Spread to all neighbors
                 neighbors = adjacency.get(node_id, [])
@@ -124,7 +118,9 @@ class SpreadingActivation:
         """Find graph node IDs matching concept names (case-insensitive).
 
         Searches graph_nodes by exact name match (case-insensitive) first,
-        then falls back to LIKE prefix match for partial names.
+        then falls back to a prefix match for partial names. Both use the
+        indexed `name_norm` column; its value is `lower(trim(name))`, set by
+        the migration 026 triggers, so the query applies the same function.
 
         Args:
             concept_names: List of concept name strings to search for.
@@ -141,7 +137,7 @@ class SpreadingActivation:
         for name in concept_names:
             # Exact match first (case-insensitive)
             row = self.db.execute(
-                "SELECT id FROM graph_nodes WHERE LOWER(name) = LOWER(?) AND status = 'active'",
+                "SELECT id FROM graph_nodes WHERE name_norm = lower(trim(?)) AND status = 'active'",
                 (name,),
             ).fetchone()
 
@@ -152,10 +148,13 @@ class SpreadingActivation:
                     seen.add(nid)
                 continue
 
-            # Fallback: prefix LIKE match
+            # Fallback: prefix match, as an index range on name_norm. The
+            # unary + keeps the planner off the status index, which it
+            # otherwise prefers and which scans every active node.
             rows = self.db.execute(
-                "SELECT id FROM graph_nodes WHERE LOWER(name) LIKE LOWER(?) AND status = 'active' LIMIT 3",
-                (f"{name}%",),
+                "SELECT id FROM graph_nodes WHERE name_norm >= lower(trim(?1)) "
+                "AND name_norm < lower(trim(?1)) || char(1114111) AND +status = 'active' LIMIT 3",
+                (name,),
             ).fetchall()
 
             for r in rows:
@@ -187,58 +186,51 @@ class SpreadingActivation:
         if not activation_map:
             return []
 
-        # Batch query: get all knowledge links for activated nodes at once
-        node_ids = list(activation_map.keys())
-        placeholders = ",".join("?" * len(node_ids))
-
+        # Sum in SQL: hub nodes (a tag or project) link thousands of records,
+        # and shipping every link to Python took seconds on a real store.
+        # A missing or zero strength counts as 1.0.
+        values = ",".join("(?,?)" for _ in activation_map)
+        params: list = [x for item in activation_map.items() for x in item]
         rows = self.db.execute(
-            f"""SELECT kn.knowledge_id, kn.node_id, kn.strength
-                FROM knowledge_nodes kn
-                JOIN knowledge k ON kn.knowledge_id = k.id
-                WHERE kn.node_id IN ({placeholders})
-                  AND k.status = 'active'""",
-            node_ids,
+            f"""WITH a(node_id, act) AS (VALUES {values})
+                SELECT kn.knowledge_id,
+                       SUM(a.act * CASE WHEN kn.strength IS NULL OR kn.strength = 0
+                                        THEN 1.0 ELSE kn.strength END) AS score
+                FROM a
+                JOIN knowledge_nodes kn ON kn.node_id = a.node_id
+                JOIN knowledge k ON k.id = kn.knowledge_id AND k.status = 'active'
+                GROUP BY kn.knowledge_id
+                ORDER BY score DESC, kn.knowledge_id
+                LIMIT ?""",
+            [*params, top_k],
         ).fetchall()
-
-        # Sum activation * strength for each knowledge record
-        memory_scores: dict[int, float] = defaultdict(float)
-        for row in rows:
-            kid = row[0]
-            nid = row[1]
-            strength = row[2] if row[2] else 1.0
-            activation = activation_map.get(nid, 0.0)
-            memory_scores[kid] += activation * strength
-
-        # Sort by score descending, take top_k
-        ranked = sorted(memory_scores.items(), key=lambda x: x[1], reverse=True)
-        result = [(kid, round(score, 4)) for kid, score in ranked[:top_k]]
+        result = [(row[0], round(row[1], 4)) for row in rows]
 
         LOG(f"get_activated_memories: {len(activation_map)} nodes -> {len(result)} memories")
         return result
 
-    def _build_adjacency(self) -> dict[str, list[tuple[str, float]]]:
-        """Build bidirectional adjacency list from all graph edges.
+    def _neighbors(self, node_ids: list[str]) -> dict[str, list[tuple[str, float]]]:
+        """Edges touching `node_ids`, both directions, with normalised weights.
 
-        Loads all edges in a single query and builds an in-memory adjacency
-        list for fast traversal. Each entry maps node_id to a list of
-        (neighbor_id, normalized_weight) tuples.
+        Reads only the frontier's edges through the source/target indexes;
+        loading every edge of the graph on each recall took 300 ms on a real
+        store and grows with every save.
 
         Returns:
             Dict mapping node_id to list of (neighbor_id, weight) tuples.
-            Edges are bidirectional (both directions added).
         """
         adjacency: dict[str, list[tuple[str, float]]] = defaultdict(list)
-
+        if not node_ids:
+            return adjacency
+        placeholders = ",".join("?" * len(node_ids))
         rows = self.db.execute(
-            "SELECT source_id, target_id, weight FROM graph_edges"
+            f"""SELECT source_id, target_id, weight FROM graph_edges WHERE source_id IN ({placeholders})
+                UNION ALL
+                SELECT target_id, source_id, weight FROM graph_edges WHERE target_id IN ({placeholders})""",
+            [*node_ids, *node_ids],
         ).fetchall()
-
-        for row in rows:
-            src, tgt, weight = row[0], row[1], row[2] if row[2] else 1.0
+        for node, neighbor, weight in rows:
+            weight = weight if weight else 1.0
             # Normalize weight to [0, 1] range (edges can have weight up to 10.0)
-            norm_weight = min(weight / 10.0, 1.0) if weight > 1.0 else weight
-            adjacency[src].append((tgt, norm_weight))
-            adjacency[tgt].append((src, norm_weight))
-
-        LOG(f"_build_adjacency: {len(rows)} edges, {len(adjacency)} nodes")
+            adjacency[node].append((neighbor, min(weight / 10.0, 1.0) if weight > 1.0 else weight))
         return adjacency

@@ -764,6 +764,32 @@ def is_negative_retrieval_enabled() -> bool:
 
 
 CONTRADICTION_POLICIES = ("resolve", "abstain")
+CONTRADICTION_SCORERS = ("llm", "jev")
+TYPESAFE_DEFAULT_BASE_URL = "https://api.typesafe.ai"
+TYPESAFE_DEFAULT_MODEL = "jev-latest"
+
+
+def get_contradiction_scorer() -> str:
+    """Who scores contradiction pairs in memory_answer.
+
+    ``llm`` (default) uses the reasoning provider. ``jev`` uses TypeSafe's
+    System One model and needs ``TYPESAFE_API_KEY``. Unknown values fall back
+    to ``llm``.
+    """
+    raw = os.environ.get("MEMORY_CONTRADICTION_SCORER", "").strip().lower()
+    return raw if raw in CONTRADICTION_SCORERS else CONTRADICTION_SCORERS[0]
+
+
+def get_typesafe_api_key() -> str | None:
+    return os.environ.get("TYPESAFE_API_KEY") or None
+
+
+def get_typesafe_base_url() -> str:
+    return (os.environ.get("TYPESAFE_BASE_URL") or TYPESAFE_DEFAULT_BASE_URL).strip()
+
+
+def get_typesafe_model() -> str:
+    return (os.environ.get("TYPESAFE_DEFAULT_MODEL") or TYPESAFE_DEFAULT_MODEL).strip()
 
 
 def get_contradiction_policy() -> str:
