@@ -1276,26 +1276,51 @@ class Store:
         )
         self.db.commit()
 
-        # v14.2.0 renumbered the fork's own 029-033 migrations to 035-039
-        # because upstream claimed those five keys for its own migrations
-        # (029_atomic_facts .. 033_evidence_passages). A database that ran
-        # the fork's OLD migrations under 029-033 still carries tracker rows
-        # under those keys, which would make upstream's real 029-033 look
-        # already-applied and get silently skipped below, then crash
-        # 034_canonical_timestamps ("no such trigger: atomic_source_update").
-        # Delete those rows before the `applied` set is computed - matched by
-        # description, not by version alone, so a database that never ran the
-        # fork's old migrations is untouched. Losing these rows is safe:
-        # 035/039 are now PRAGMA-guarded no-ops (see their file comments) and
-        # 036-038 are idempotent UPDATE/INSERT-WHERE-NOT-EXISTS.
-        renumbered_fork_migrations = {
-            "029": "reflection phase errors",
-            "030": "backfill session rows",
-            "031": "backfill orphan session rows",
-            "032": "resolve learned errors",
-            "033": "reflection report stat names",
-        }
-        for old_version, old_description in renumbered_fork_migrations.items():
+        # The fork's own five migrations have collided with an upstream
+        # release's numbering twice (029-033 -> 035-039 -> 036-040) and now
+        # live at 900-904, a reserved range upstream will never claim - see
+        # CHANGELOG for the full history. A database that ran the fork's
+        # migrations under either past numbering still carries tracker rows
+        # under those old keys, which would make upstream's real 029-033 or
+        # 035 look already-applied and get silently skipped below. For
+        # 029-033 that crashes migration 034 (`no such trigger:
+        # atomic_source_update`); for 035 (`migrations/035_fts_project_token.sql`,
+        # in this tree today) nothing crashes at migration time -
+        # `knowledge.fts_project` never gets created and `scoped_match()`
+        # (memory_core/fts_schema.py) degrades silently, breaking
+        # project-scoped recall at query time instead. Delete those rows
+        # before the `applied` set is computed - matched by (version,
+        # description) pairs, not by version alone, so a database that never
+        # ran the fork's old migrations is untouched, and upstream's own
+        # "035" row (now present, under upstream's own description) is never
+        # deleted. Losing these rows is safe: 900/904 are PRAGMA-guarded
+        # no-ops (see their file comments) and 901-903 are idempotent
+        # UPDATE/INSERT-WHERE-NOT-EXISTS. Only two stale generations can
+        # exist on a real database (029-033, pre-v14.2.0; 035-039, the
+        # numbering live today) - 036-040 never shipped, it only ever
+        # existed on this unreleased branch, so it is deliberately not
+        # listed below; do not add it. The bases below must only ever be
+        # numbering the fork has moved AWAY from - "900" (the range the fork
+        # occupies today) must never be added, or every startup would delete
+        # and replay this generation's own tracker rows forever.
+        _fork_migration_slugs = [
+            "reflection phase errors",
+            "backfill session rows",
+            "backfill orphan session rows",
+            "resolve learned errors",
+            "reflection report stat names",
+        ]
+        _repair_bases = ("029", "035")
+        assert "900" not in _repair_bases, (
+            "900 is the fork's current base - adding it to _repair_bases "
+            "would delete and replay this generation's own rows on every startup"
+        )
+        renumbered_fork_migrations = [
+            (f"{int(base) + offset:03d}", description)
+            for base in _repair_bases
+            for offset, description in enumerate(_fork_migration_slugs)
+        ]
+        for old_version, old_description in renumbered_fork_migrations:
             self.db.execute(
                 "DELETE FROM migrations WHERE version=? AND description=?",
                 (old_version, old_description),
@@ -1317,10 +1342,27 @@ class Store:
             from memory_core.schema_migration import (
                 TRANSACTIONAL_SCHEMA_VERSION,
                 Migration,
+                MigrationFailed,
                 MigrationRunner,
             )
             if int(version) >= TRANSACTIONAL_SCHEMA_VERSION:
-                MigrationRunner(self.db).apply(Migration(version, description, script))
+                try:
+                    MigrationRunner(self.db).apply(Migration(version, description, script))
+                except MigrationFailed:
+                    # A concurrent Store.__init__ (another MCP session, the
+                    # launchd reflection runner) can win the same migration
+                    # between our `applied` read above and this apply(): its
+                    # BEGIN IMMEDIATE blocks us until it commits, then our own
+                    # INSERT INTO migrations raises a duplicate-primary-key
+                    # MigrationFailed. That is a lost race, not a real
+                    # failure - only re-raise if the version is genuinely
+                    # still unrecorded.
+                    if not self.db.execute(
+                        "SELECT 1 FROM migrations WHERE version=?", (version,)
+                    ).fetchone():
+                        raise
+                    LOG(f"Migration {version} already applied by a concurrent process")
+                    continue
                 LOG(f"Applied migration {version}: {description}")
                 continue
             try:
