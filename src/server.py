@@ -795,8 +795,6 @@ class Store:
             on this second call than it just did on the first, mixing two
             backends' vectors under the one identity this call reports.
             """
-            if provider in ("openai", "cohere"):
-                return self._provider_embed(batch)
             if provider == "fastembed":
                 return self._fastembed_embed(batch)
             if provider == "ollama":
