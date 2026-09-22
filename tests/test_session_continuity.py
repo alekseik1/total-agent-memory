@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+import session_continuity
 from session_continuity import SessionContinuity
 from base_schema import apply_full_schema
 
@@ -283,3 +284,201 @@ def test_an_existing_row_is_not_replaced_by_the_insert(sc, sc_db):
         "SELECT started_at FROM sessions WHERE id='sess_real'"
     ).fetchone()
     assert row["started_at"] == "2026-08-30T06:00:00Z"
+
+
+# ──────────────────────────────────────────────
+# dedup_action: outside the window, or before the session ever closed, every
+# call inserts a fresh row. Inside the window, the action depends on the
+# CALLING side's declared `producer` ("hook" or "tool", default) and on
+# whether the existing row was already consumed - never on who wrote it,
+# since that identity is never stored (see dedup_action's docstring). All
+# tests here control the clock via session_continuity._now (real-time
+# resolution is 1s, too coarse to prove a 300s window deterministically).
+# ──────────────────────────────────────────────
+
+def _at(monkeypatch, ts: str) -> None:
+    monkeypatch.setattr(session_continuity, "_now", lambda: ts)
+
+
+def _summaries(sc_db, session_id: str) -> list[str]:
+    rows = sc_db.execute(
+        "SELECT summary FROM session_summaries WHERE session_id = ? "
+        "ORDER BY rowid", (session_id,),
+    ).fetchall()
+    return [dict(r)["summary"] for r in rows]
+
+
+def test_a_later_close_outside_the_window_still_moves_ended_at_forward(sc, sc_db, monkeypatch):
+    """The hook fires legitimately on /clear and /compact as well as exit,
+    so a session can close more than once - the second close, outside the
+    dedup window, must still move `ended_at` forward and add its own row."""
+    _open_session(sc_db, "sess_twice")
+
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    r1 = sc.session_end("sess_twice", "first close", project="real-proj")
+    _at(monkeypatch, "2026-09-21T10:10:00Z")  # +600s, outside the 300s window
+    r2 = sc.session_end("sess_twice", "second close", project="real-proj")
+
+    row = sc_db.execute("SELECT ended_at FROM sessions WHERE id='sess_twice'").fetchone()
+    print(f"ended_at after second close: {row['ended_at']} (r1={r1['ended_at']}, r2={r2['ended_at']})")
+    assert row["ended_at"] == r2["ended_at"]
+    assert row["ended_at"] != r1["ended_at"]
+    assert "deduped" not in r2
+    assert _summaries(sc_db, "sess_twice") == ["first close", "second close"]
+
+
+def test_a_session_never_closed_before_is_never_deduped(sc, sc_db):
+    """A session_summaries row can predate any close for this id (e.g. an
+    id collision, or a row written by some other path) - dedup_action must
+    not treat that as a reason to skip or overwrite on the real first close,
+    or a later real summary could lose to whatever wrote the earlier row."""
+    _open_session(sc_db, "sess_never_closed")
+    sc_db.execute(
+        "INSERT INTO session_summaries (id, session_id, project, summary, "
+        "ended_at, consumed, created_at) VALUES "
+        "('s1', 'sess_never_closed', 'p', 'earlier', ?, 0, ?)",
+        (session_continuity._now(), session_continuity._now()),
+    )
+    sc_db.commit()
+
+    r = sc.session_end("sess_never_closed", "the real one", project="p")
+
+    assert "deduped" not in r
+    assert _summaries(sc_db, "sess_never_closed") == ["earlier", "the real one"]
+
+
+def test_hook_then_tool_the_real_summary_survives(sc, sc_db, monkeypatch):
+    """The gap this round closes: a hook floor write lands first and closes
+    the session itself, then a real summary arrives within the window - the
+    floor must not own the slot (auto_session_end.py's module docstring:
+    its own text is "a floor, not a substitute for a real session_end
+    call")."""
+    _open_session(sc_db, "sess_ht")
+
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    r1 = sc.session_end("sess_ht", "floor text", project="p", producer="hook")
+    _at(monkeypatch, "2026-09-21T10:00:30Z")  # +30s, inside the window
+    r2 = sc.session_end("sess_ht", "the real summary", project="p", producer="tool")
+
+    assert "deduped" not in r1
+    assert "deduped" not in r2
+    assert r2["id"] == r1["id"]
+    assert _summaries(sc_db, "sess_ht") == ["the real summary"]
+
+
+def test_tool_then_hook_the_real_summary_survives(sc, sc_db, monkeypatch):
+    """A hook fire chasing a real summary (e.g. /clear right after the agent
+    already called session_end itself) must not overwrite it with a floor."""
+    _open_session(sc_db, "sess_th")
+
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    r1 = sc.session_end("sess_th", "the real summary", project="p", producer="tool")
+    _at(monkeypatch, "2026-09-21T10:00:30Z")
+    r2 = sc.session_end("sess_th", "floor text", project="p", producer="hook")
+
+    assert "deduped" not in r1
+    assert r2.get("deduped") is True
+    assert _summaries(sc_db, "sess_th") == ["the real summary"]
+
+
+def test_hook_then_hook_the_first_floor_survives_but_still_closes(sc, sc_db, monkeypatch):
+    """/clear and /compact can both fire the hook seconds apart - the second
+    floor write must not replace the first (nothing to gain, and overwriting
+    would reset `consumed` on a row session_init may already have
+    delivered), but the session row must still close on both calls."""
+    _open_session(sc_db, "sess_hh")
+
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    r1 = sc.session_end("sess_hh", "first floor", project="p", producer="hook")
+    _at(monkeypatch, "2026-09-21T10:00:30Z")
+    r2 = sc.session_end("sess_hh", "second floor", project="p", producer="hook")
+
+    assert "deduped" not in r1
+    assert r2.get("deduped") is True
+    assert set(r2.keys()) - {"deduped"} == set(r1.keys())
+    assert _summaries(sc_db, "sess_hh") == ["first floor"]
+    row = sc_db.execute("SELECT ended_at FROM sessions WHERE id='sess_hh'").fetchone()
+    assert row["ended_at"] == r2["ended_at"]  # the close still ran, timestamp moved
+    assert row["ended_at"] != r1["ended_at"]
+
+
+def test_tool_then_tool_the_second_summary_overwrites_the_first(sc, sc_db, monkeypatch):
+    """Two real session_end calls seconds apart collapse to one row - the
+    row's own producer is never stored, so a tool call can't tell an
+    earlier real summary from a floor and always overwrites (same tradeoff
+    the old skip-based dedup already made for this pair, just now keeping
+    the newer content instead of the older)."""
+    _open_session(sc_db, "sess_tt")
+
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    r1 = sc.session_end("sess_tt", "first", project="p")
+    _at(monkeypatch, "2026-09-21T10:00:30Z")
+    r2 = sc.session_end("sess_tt", "second", project="p")
+
+    assert "deduped" not in r1
+    assert "deduped" not in r2
+    assert r2["id"] == r1["id"]
+    assert _summaries(sc_db, "sess_tt") == ["second"]
+    row = sc_db.execute("SELECT ended_at FROM sessions WHERE id='sess_tt'").fetchone()
+    assert row["ended_at"] == r2["ended_at"]
+    assert row["ended_at"] != r1["ended_at"]
+
+
+def test_session_end_for_a_different_project_does_not_collapse_into_the_first(sc, sc_db, monkeypatch):
+    """Two ends under one session_id for two different projects inside the
+    window are two different events, not a retry of the same close - the
+    second must get its own row, not repurpose the first project's."""
+    _open_session(sc_db, "sess_multiproj")
+
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    r1 = sc.session_end("sess_multiproj", "proj a summary", project="proj-a")
+    _at(monkeypatch, "2026-09-21T10:00:30Z")  # inside the window
+    r2 = sc.session_end("sess_multiproj", "proj b summary", project="proj-b")
+
+    assert "deduped" not in r1
+    assert "deduped" not in r2
+    assert r2["id"] != r1["id"]
+    rows = sc_db.execute(
+        "SELECT project, summary FROM session_summaries WHERE session_id = ? "
+        "ORDER BY rowid", ("sess_multiproj",),
+    ).fetchall()
+    assert [dict(r) for r in rows] == [
+        {"project": "proj-a", "summary": "proj a summary"},
+        {"project": "proj-b", "summary": "proj b summary"},
+    ]
+
+
+def test_tool_overwrite_skips_a_row_already_consumed(sc, sc_db, monkeypatch):
+    """A row session_init already delivered ends its burst - a further tool
+    call inside the window must not resurrect it (reset consumed=0) and risk
+    the same summary being served to a second session; it starts a new row
+    instead."""
+    _open_session(sc_db, "sess_consumed")
+
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    r1 = sc.session_end("sess_consumed", "first", project="p")
+    delivered = sc.session_init(project="p")  # marks r1's row consumed
+    assert delivered["id"] == r1["id"]
+
+    _at(monkeypatch, "2026-09-21T10:00:30Z")  # inside the window
+    r2 = sc.session_end("sess_consumed", "second", project="p")
+
+    assert "deduped" not in r2
+    assert r2["id"] != r1["id"]
+    assert _summaries(sc_db, "sess_consumed") == ["first", "second"]
+    row1 = sc_db.execute(
+        "SELECT consumed FROM session_summaries WHERE id = ?", (r1["id"],)
+    ).fetchone()
+    assert row1["consumed"] == 1  # never reset by the second call
+
+
+def test_validation_runs_before_dedup_is_even_checked(sc, sc_db, monkeypatch):
+    """The dedup return must not jump the summary-required check - a
+    skipped-looking call with a bad argument still raises."""
+    _open_session(sc_db, "sess_bad_arg")
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    sc.session_end("sess_bad_arg", "first", project="p", producer="hook")
+    _at(monkeypatch, "2026-09-21T10:00:05Z")  # inside the window: would skip
+
+    with pytest.raises(ValueError):
+        sc.session_end("sess_bad_arg", "", project="p", producer="hook")

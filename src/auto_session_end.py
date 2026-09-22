@@ -10,8 +10,13 @@ regardless, so automatic end-of-session capture has been a no-op and every
 stored summary came from someone calling the MCP tool by hand.
 
 The session id is the one the hook knows - the Claude Code session (the
-transcript's basename). That is not the id the MCP server issues for itself,
-so `SessionContinuity.session_end` creates the session row for it.
+transcript's basename). On Claude Code that is the same id the MCP server
+uses for itself: the server reads `CLAUDE_CODE_SESSION_ID` from its own
+environment and adopts it as its session id whenever the host publishes
+one, instead of minting `mcp_<ts>_<pid>`. On Codex, Cursor and Docker no
+such variable is published, so the ids differ, and there is no equivalent
+hook at all - `SessionContinuity.session_end` creates the session row for
+it either way.
 
 The summary written here is deterministic, built from what the hook extracted.
 It is a floor, not a substitute for a real `session_end` call: an agent that
@@ -22,33 +27,12 @@ import argparse
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from paths import memory_dir
 from session_continuity import SessionContinuity
 
 DB_PATH = os.path.join(str(memory_dir()), "memory.db")
-
-# The hook fires on /clear and /compact as well as on exit, and those can land
-# seconds apart. Two rows for one session are not wrong - each is a real end -
-# but a burst of near-identical ones is noise.
-_DEDUP_WINDOW_SEC = 300
-
-
-def _recent_duplicate(db: sqlite3.Connection, session_id: str) -> bool:
-    row = db.execute(
-        "SELECT ended_at FROM session_summaries WHERE session_id = ? "
-        "ORDER BY ended_at DESC LIMIT 1",
-        (session_id,),
-    ).fetchone()
-    if not row or not row[0]:
-        return False
-    try:
-        last = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    return (datetime.now(timezone.utc) - last).total_seconds() < _DEDUP_WINDOW_SEC
 
 
 def _llm_available() -> bool:
@@ -96,8 +80,6 @@ def main() -> int:
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA busy_timeout=15000")
     try:
-        if _recent_duplicate(db, a.session_id):
-            return 0
         fallback = build_summary(a.reason, a.user_context, a.assistant_context)
         # With an LLM reachable, let it write the summary from the session's
         # own artifacts - the handful of messages the hook could extract is a
@@ -107,13 +89,25 @@ def main() -> int:
         # compression it is meant to back up. It is written afterwards instead,
         # whenever compression did not actually produce anything.
         compress = _llm_available()
+        # Always call session_end, even for a session that already has a
+        # recent summary: it decides for itself whether the write is a
+        # duplicate, but it must still close the `sessions` row every time -
+        # returning early here would leave that row open forever whenever a
+        # duplicate was detected. producer="hook" on both branches, compressed
+        # or not: even an LLM-written summary here only compresses what this
+        # script itself extracted, so it must never displace a real
+        # session_end call's summary (see dedup_action in session_continuity.py).
         result = SessionContinuity(db).session_end(
             a.session_id,
             None if compress else fallback,
             project=a.project,
             branch=a.branch or None,
+            producer="hook",
             auto_compress=compress,
         )
+        if result.get("deduped"):
+            print(f"session summary deduped for {a.project} ({a.session_id})")
+            return 0
         if compress and not result.get("compressed_used"):
             db.execute(
                 "UPDATE session_summaries SET summary = ? WHERE id = ?",
