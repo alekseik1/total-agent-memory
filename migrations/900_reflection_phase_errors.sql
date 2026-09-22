@@ -1,4 +1,4 @@
--- 035_reflection_phase_errors.sql
+-- 900_reflection_phase_errors.sql
 -- Make failing reflection phases visible.
 --
 -- run_full() runs six phases and each one catches its own exceptions, returning
@@ -11,12 +11,11 @@
 -- One JSON blob of {phase: message} per report, so a failing phase is queryable
 -- instead of archaeological.
 --
--- Historical marker only: this migration originally numbered 029, before the
--- v14.2.0 merge claimed 029-034 for its own migrations and this file was
--- renumbered to 035. A database that already applied it as 029 would run it
--- again under this new version key, and `ALTER TABLE ADD COLUMN` is not safe
--- to repeat: SQLite has no `ADD COLUMN IF NOT EXISTS`, and migrations with a
--- version >= TRANSACTIONAL_SCHEMA_VERSION run through
+-- Historical marker only: renumbered twice and moved to the reserved 900s
+-- range; see CHANGELOG. A database that already applied it under an old
+-- version key would run it again under this one, and `ALTER TABLE ADD
+-- COLUMN` is not safe to repeat: SQLite has no `ADD COLUMN IF NOT EXISTS`,
+-- and migrations with a version >= TRANSACTIONAL_SCHEMA_VERSION run through
 -- `memory_core.schema_migration.MigrationRunner`, which has no tolerance for
 -- "duplicate column name" the way the legacy path's
 -- `Store._replay_migration_skipping_existing` does - a bare re-run would
@@ -25,4 +24,4 @@
 -- (PRAGMA-guarded, same pattern as `apply_core_column_migrations`), called
 -- from `Store._apply_sql_migrations` after this loop has ensured
 -- `reflection_reports` exists. This file stays on disk, comment-only, so
--- version 035 remains a recorded row (mirrors 028_agent_lineage.sql).
+-- version 900 remains a recorded row (mirrors 028_agent_lineage.sql).

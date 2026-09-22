@@ -122,11 +122,11 @@ def apply_reflection_report_column_migrations(db: sqlite3.Connection, log=lambda
     their loop, never mid-loop).
 
     This logic used to be bare `ALTER TABLE` statements in
-    `migrations/035_reflection_phase_errors.sql` and
-    `migrations/039_reflection_report_stat_names.sql` (numbered 029 and 033
-    before the v14.2.0 merge renumbered them). A database that already
-    applied them under the old numbers runs them again under the new ones,
-    and `ADD COLUMN` / `RENAME COLUMN` / `DROP COLUMN` are not safe to
+    `migrations/900_reflection_phase_errors.sql` and
+    `migrations/904_reflection_report_stat_names.sql` (renumbered twice and
+    moved to the reserved 900s range; see CHANGELOG). A database that
+    already applied them under an old number runs them again under the new
+    one, and `ADD COLUMN` / `RENAME COLUMN` / `DROP COLUMN` are not safe to
     repeat in SQLite - see the comment atop each of those files.
 
     Runs inside `BEGIN IMMEDIATE` so the write lock is taken before the
@@ -192,7 +192,7 @@ def apply_self_improvement_tables(db: sqlite3.Connection) -> None:
     ``apply_core_column_migrations`` is shared: these tables live outside
     `src/sql/base_schema.sql` (they predate it and are created lazily), so a
     fixture that skips this step doesn't have the `errors` table at all - and
-    any `migrations/*.sql` file that touches `errors` (e.g. 038) breaks every
+    any `migrations/*.sql` file that touches `errors` (e.g. 903) breaks every
     test built on `apply_full_schema` the moment it does. All statements are
     `IF NOT EXISTS`, so calling this unconditionally is safe.
     """

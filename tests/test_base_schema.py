@@ -121,7 +121,7 @@ def test_the_shared_schema_creates_the_self_improvement_tables():
 
     It used to omit errors/insights/rules - they were created only by
     `Store._create_self_improvement_tables`, which the test fixture never
-    called. Nothing noticed until migration 038 became the first migration to
+    called. Nothing noticed until migration 903 became the first migration to
     touch `errors` and broke every fixture built this way. A schema the tests
     use that production does not have (or the reverse) makes green meaningless.
     """

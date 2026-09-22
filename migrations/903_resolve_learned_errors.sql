@@ -1,4 +1,4 @@
--- 038_resolve_learned_errors.sql
+-- 903_resolve_learned_errors.sql
 -- Closes `errors` rows that `ErrorCapture.learn_error` wrote as 'open' even
 -- though they carried a fix.
 --
