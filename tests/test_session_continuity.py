@@ -287,13 +287,9 @@ def test_an_existing_row_is_not_replaced_by_the_insert(sc, sc_db):
 
 
 # ──────────────────────────────────────────────
-# dedup_action: outside the window, or before the session ever closed, every
-# call inserts a fresh row. Inside the window, the action depends on the
-# CALLING side's declared `producer` ("hook" or "tool", default) and on
-# whether the existing row was already consumed - never on who wrote it,
-# since that identity is never stored (see dedup_action's docstring). All
-# tests here control the clock via session_continuity._now (real-time
-# resolution is 1s, too coarse to prove a 300s window deterministically).
+# _dedup_action's docstring has the full policy. All tests here control
+# the clock via session_continuity._now (real-time resolution is 1s, too
+# coarse to prove a 300s window deterministically).
 # ──────────────────────────────────────────────
 
 def _at(monkeypatch, ts: str) -> None:
@@ -320,7 +316,6 @@ def test_a_later_close_outside_the_window_still_moves_ended_at_forward(sc, sc_db
     r2 = sc.session_end("sess_twice", "second close", project="real-proj")
 
     row = sc_db.execute("SELECT ended_at FROM sessions WHERE id='sess_twice'").fetchone()
-    print(f"ended_at after second close: {row['ended_at']} (r1={r1['ended_at']}, r2={r2['ended_at']})")
     assert row["ended_at"] == r2["ended_at"]
     assert row["ended_at"] != r1["ended_at"]
     assert "deduped" not in r2
@@ -329,7 +324,7 @@ def test_a_later_close_outside_the_window_still_moves_ended_at_forward(sc, sc_db
 
 def test_a_session_never_closed_before_is_never_deduped(sc, sc_db):
     """A session_summaries row can predate any close for this id (e.g. an
-    id collision, or a row written by some other path) - dedup_action must
+    id collision, or a row written by some other path) - _dedup_action must
     not treat that as a reason to skip or overwrite on the real first close,
     or a later real summary could lose to whatever wrote the earlier row."""
     _open_session(sc_db, "sess_never_closed")
@@ -350,9 +345,7 @@ def test_a_session_never_closed_before_is_never_deduped(sc, sc_db):
 def test_hook_then_tool_the_real_summary_survives(sc, sc_db, monkeypatch):
     """The gap this round closes: a hook floor write lands first and closes
     the session itself, then a real summary arrives within the window - the
-    floor must not own the slot (auto_session_end.py's module docstring:
-    its own text is "a floor, not a substitute for a real session_end
-    call")."""
+    floor must not own the slot (see _dedup_action's docstring)."""
     _open_session(sc_db, "sess_ht")
 
     _at(monkeypatch, "2026-09-21T10:00:00Z")
@@ -395,7 +388,11 @@ def test_hook_then_hook_the_first_floor_survives_but_still_closes(sc, sc_db, mon
 
     assert "deduped" not in r1
     assert r2.get("deduped") is True
-    assert set(r2.keys()) - {"deduped"} == set(r1.keys())
+    # S1: a skip must not touch the markdown projection either, so r2 lacks
+    # the active_context_* keys r1's real write produced.
+    assert set(r2.keys()) - {"deduped"} == set(r1.keys()) - {
+        "active_context_path", "active_context_error"
+    }
     assert _summaries(sc_db, "sess_hh") == ["first floor"]
     row = sc_db.execute("SELECT ended_at FROM sessions WHERE id='sess_hh'").fetchone()
     assert row["ended_at"] == r2["ended_at"]  # the close still ran, timestamp moved
@@ -482,3 +479,92 @@ def test_validation_runs_before_dedup_is_even_checked(sc, sc_db, monkeypatch):
 
     with pytest.raises(ValueError):
         sc.session_end("sess_bad_arg", "", project="p", producer="hook")
+
+
+# ──────────────────────────────────────────────
+# Scope-audit fix round: S1 (skip must not repaint the live markdown doc),
+# S2 (skip must return an addressable id), S3 (a naive stored timestamp
+# must not crash dedup), S6 (overwrite must not null a field the second
+# call in the burst simply omitted).
+# ──────────────────────────────────────────────
+
+def test_a_skipped_hook_call_does_not_repaint_the_live_document(sc, sc_db, monkeypatch):
+    """A deduped hook floor must not overwrite the markdown projection a
+    real summary already wrote there for this burst."""
+    from active_context import active_context_path
+    from config import get_active_context_vault
+
+    _open_session(sc_db, "sess_md")
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    sc.session_end("sess_md", "the real summary", project="p", producer="tool")
+
+    doc_path = active_context_path("p", vault_root=get_active_context_vault())
+    before = doc_path.read_text()
+
+    _at(monkeypatch, "2026-09-21T10:00:30Z")  # inside the window
+    r = sc.session_end("sess_md", "hook floor text", project="p", producer="hook")
+
+    assert r.get("deduped") is True
+    assert doc_path.read_text() == before
+
+
+def test_a_skipped_call_returns_the_id_of_the_row_left_alone(sc, sc_db, monkeypatch):
+    """A skip must still name the surviving row - mark_unconsumed takes an
+    id, and the caller otherwise has no way to address what's actually
+    there."""
+    _open_session(sc_db, "sess_skip_id")
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    r1 = sc.session_end("sess_skip_id", "real summary", project="p", producer="tool")
+    _at(monkeypatch, "2026-09-21T10:00:30Z")
+    r2 = sc.session_end("sess_skip_id", "hook floor", project="p", producer="hook")
+
+    assert r2.get("deduped") is True
+    assert r2["id"] == r1["id"]
+    assert r2["id"] is not None
+    sc.session_init(project="p")  # marks r1's row consumed
+    assert sc.mark_unconsumed(r2["id"]) is True
+    assert sc.session_init(project="p") is not None
+
+
+def test_a_naive_stored_timestamp_does_not_crash_dedup(sc, sc_db, monkeypatch):
+    """ended_at without a timezone offset parses without raising, so the
+    TypeError from subtracting an aware `now` from it must be caught too,
+    not just the ValueError a malformed string would raise - dedup falls
+    back to "insert" rather than crashing the whole session_end call."""
+    _open_session(sc_db, "sess_naive")
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    sc.session_end("sess_naive", "earlier", project="p")
+    # Simulate a legacy row stored without a timezone offset.
+    sc_db.execute(
+        "UPDATE session_summaries SET ended_at = '2026-09-21T10:00:00' "
+        "WHERE session_id = 'sess_naive'"
+    )
+    sc_db.commit()
+
+    _at(monkeypatch, "2026-09-21T10:00:30Z")  # inside the window
+    r = sc.session_end("sess_naive", "the real one", project="p")
+
+    assert "deduped" not in r
+    assert _summaries(sc_db, "sess_naive") == ["earlier", "the real one"]
+
+
+def test_overwrite_does_not_null_fields_a_second_call_omits(sc, sc_db, monkeypatch):
+    """A second tool call in the same burst that omits branch/started_at
+    must not wipe what the first call already stored for this row."""
+    _open_session(sc_db, "sess_overwrite_fields")
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    r1 = sc.session_end(
+        "sess_overwrite_fields", "first", project="p",
+        branch="feature/x", started_at="2026-09-20T09:00:00Z",
+    )
+    _at(monkeypatch, "2026-09-21T10:00:30Z")  # inside the window
+    r2 = sc.session_end("sess_overwrite_fields", "second", project="p")
+
+    assert r2["id"] == r1["id"]
+    row = sc_db.execute(
+        "SELECT branch, started_at, summary FROM session_summaries WHERE id = ?",
+        (r1["id"],),
+    ).fetchone()
+    assert row["branch"] == "feature/x"
+    assert row["started_at"] == "2026-09-20T09:00:00Z"
+    assert row["summary"] == "second"  # content itself still overwrites

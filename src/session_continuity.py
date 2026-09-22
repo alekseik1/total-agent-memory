@@ -33,73 +33,10 @@ def _new_id() -> str:
 
 
 # A caller can retry/burst session_end for the same session_id seconds apart
-# (the session-end hook fires on /clear, /compact and exit, and can race a
-# real agent-authored call for the same close in either order). A burst
-# before the session has ever closed is never deduped: the first call to
-# close it might be a real, agent-authored summary, and a later floor-text
-# hook fire (see auto_session_end.py's module docstring - that text is "a
-# floor, not a substitute for a real session_end call") must not be allowed
-# to look earlier than it and win by skipping the real one instead. Once the
-# session has closed at least once, a further call within the window is the
-# same burst - what happens to it depends on `producer` (below), never on
-# who wrote the row that's already there: that identity travels only as the
-# current call's argument and is never stored.
+# (the hook fires on /clear, /compact and exit, and can race a real
+# agent-authored call in either order) - see _dedup_action's docstring below
+# for what happens to it.
 _DEDUP_WINDOW_SEC = 300
-
-
-def dedup_action(
-    db: sqlite3.Connection, session_id: str, project: str, producer: str
-) -> tuple[str, str | None]:
-    """Decide what this session_end call does to session_summaries.
-
-    Returns ("insert", None) when there is no burst to join, ("skip", None)
-    when the burst's existing row must be left alone, or ("overwrite", id)
-    when it must be replaced in place - `id` is the row to update.
-
-    A burst is scoped to (session_id, project): two ends under one
-    session_id for two different projects within the window are two
-    different events, not a retry of the same close, so each gets its own
-    row rather than the second repurposing the first's.
-
-    producer="hook" (the session-end hook, see auto_session_end.py) never
-    displaces a row already in the burst: that script calls its own output
-    "a floor, not a substitute for a real session_end call" even on the
-    branch where an LLM wrote it, because the LLM still only compresses what
-    the hook itself extracted - thinner than an agent's own account of its
-    session. Any other producer ("tool" - a real session_end call) overwrites
-    it in place: since the existing row's own producer is never stored,
-    there is no way to tell "this was already a real one" from "this was a
-    floor", so a tool call always wins - UNLESS that row was already
-    consumed (handed to a session by session_init). A consumed row already
-    did its job, so the burst it belonged to is over: this call starts a
-    fresh row instead of resurrecting a delivered one, which would reset
-    `consumed` and let the same summary be served to a second session.
-    """
-    row = db.execute(
-        "SELECT ended_at FROM sessions WHERE id = ?", (session_id,)
-    ).fetchone()
-    if not row or not row[0]:
-        return "insert", None
-    summary_row = db.execute(
-        "SELECT id, ended_at, consumed FROM session_summaries "
-        "WHERE session_id = ? AND project = ? "
-        "ORDER BY ended_at DESC, rowid DESC LIMIT 1",
-        (session_id, project),
-    ).fetchone()
-    if not summary_row or not summary_row[1]:
-        return "insert", None
-    try:
-        last = datetime.fromisoformat(str(summary_row[1]).replace("Z", "+00:00"))
-        now = datetime.fromisoformat(_now().replace("Z", "+00:00"))
-    except ValueError:
-        return "insert", None
-    if (now - last).total_seconds() >= _DEDUP_WINDOW_SEC:
-        return "insert", None
-    if producer == "hook":
-        return "skip", None
-    if summary_row[2]:
-        return "insert", None
-    return "overwrite", summary_row[0]
 
 
 class SessionContinuity:
@@ -107,6 +44,129 @@ class SessionContinuity:
 
     def __init__(self, db: sqlite3.Connection) -> None:
         self.db = db
+
+    def _dedup_action(
+        self, session_id: str, project: str, producer: str
+    ) -> tuple[str, str | None]:
+        """Decide what this session_end call does to session_summaries.
+
+        Returns ("insert", None) when there is no burst to join, ("skip", id)
+        when the burst's existing row must be left alone, or ("overwrite", id)
+        when it must be replaced in place - `id` is the row already there.
+
+        A session that has never closed before is never deduped: the first
+        call to close it might itself be the real, agent-authored summary,
+        and a later floor-text hook fire (see auto_session_end.py's module
+        docstring - that text is "a floor, not a substitute for a real
+        session_end call") must not be allowed to look earlier than it and
+        win by skipping the real one instead.
+
+        Once the session has closed at least once, a further call within the
+        window is the same burst - what happens to it depends on `producer`,
+        never on who wrote the row that's already there: that identity
+        travels only as the current call's argument and is never stored. A
+        burst is scoped to (session_id, project): two ends under one
+        session_id for two different projects within the window are two
+        different events, not a retry of the same close, so each gets its
+        own row rather than the second repurposing the first's.
+
+        producer="hook" (the session-end hook, see auto_session_end.py) never
+        displaces a row already in the burst, unconditionally - the
+        row's `consumed` state plays no part in that branch, since hook
+        never overwrites or inserts differently depending on it. Any other
+        producer ("tool" - a real session_end call) overwrites it in place:
+        since the existing row's own producer is never stored, there is no
+        way to tell "this was already a real one" from "this was a floor",
+        so a tool call always wins - UNLESS that row was already consumed
+        (handed to a session by session_init). A consumed row already did
+        its job, so the burst it belonged to is over: this call starts a
+        fresh row instead of resurrecting a delivered one, which would reset
+        `consumed` and let the same summary be served to a second session.
+
+        Check-then-act: the SELECT below and the caller's subsequent write
+        are not one transaction, and the two producers are separate
+        processes (the MCP server and the hook script) that can race it.
+        Accepted rather than locked: the worst outcome is an extra row in
+        the same burst - a case every action above already tolerates (a
+        pre-close burst, a cross-project burst) - not a lost or corrupted
+        write, since SQLite's own busy_timeout still serializes the actual
+        INSERT/UPDATE statements.
+        """
+        row = self.db.execute(
+            "SELECT ended_at FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not row or not row[0]:
+            return "insert", None
+        summary_row = self.db.execute(
+            "SELECT id, ended_at, consumed FROM session_summaries "
+            "WHERE session_id = ? AND project = ? "
+            "ORDER BY ended_at DESC, rowid DESC LIMIT 1",
+            (session_id, project),
+        ).fetchone()
+        if not summary_row or not summary_row[1]:
+            return "insert", None
+        try:
+            last = datetime.fromisoformat(str(summary_row[1]).replace("Z", "+00:00"))
+            now = datetime.fromisoformat(_now().replace("Z", "+00:00"))
+            elapsed = (now - last).total_seconds()
+        except (ValueError, TypeError):
+            # TypeError covers a naive `last` (no "Z"/offset) subtracted from
+            # an aware `now` - fromisoformat parses a naive string without
+            # raising, only the subtraction itself fails.
+            return "insert", None
+        if elapsed >= _DEDUP_WINDOW_SEC:
+            return "insert", None
+        if producer == "hook":
+            return "skip", summary_row[0]
+        if summary_row[2]:
+            return "insert", None
+        return "overwrite", summary_row[0]
+
+    def close_session_row(
+        self,
+        session_id: str,
+        project: str = "general",
+        branch: str | None = None,
+        started_at: str | None = None,
+        *,
+        now: str | None = None,
+    ) -> str:
+        """Ensure `sessions` has a row for `session_id` and mark it ended.
+
+        Runs on every session_end call, dedup or not - a deduped/skipped
+        summary is a reason to skip a second summary row, not a reason to
+        leave the session looking open. Also called directly by the hook
+        script when nothing was extracted to summarise, so that path still
+        closes the row without going through a session_summaries write at
+        all (session_end requires a summary; this does not). Caller commits.
+
+        A session the server never opened still gets a row here. Ends arrive
+        under identities the MCP process does not own - a hook naming the
+        Claude Code session, a subagent, a caller that made an id up - and
+        without this, `sessions` and `session_summaries` stay two
+        disconnected lists: 231 of 256 summaries had no row to belong to.
+        `started_at` is the caller's if given, else the end time, never a
+        guess at when it began. Project and branch on an existing row are
+        only overwritten while they still hold the 'general'/'' placeholder
+        `Store.session_start` defaults to - a row that already knows better
+        is not downgraded by a caller who omitted the argument.
+        """
+        now = now or _now()
+        self.db.execute(
+            "INSERT OR IGNORE INTO sessions (id, started_at, project, branch) VALUES (?,?,?,?)",
+            (session_id, started_at or now, project, branch or ""),
+        )
+        self.db.execute(
+            """UPDATE sessions
+                  SET ended_at = ?,
+                      project = CASE WHEN COALESCE(project, 'general') = 'general'
+                                     THEN ? ELSE project END,
+                      branch = CASE WHEN COALESCE(branch, '') = ''
+                                    THEN ? ELSE branch END
+                WHERE id = ?""",
+            (now, project, branch or "", session_id),
+        )
+        return now
 
     # ──────────────────────────────────────────────
     # End of session
@@ -140,42 +200,42 @@ class SessionContinuity:
                 project_inferred = True
                 LOG(f"project inferred as '{project}' for session {session_id}")
 
-        # Explicit args always win over LLM output. We compute LLM-derived
-        # fields first so they can fill any gaps, then overlay the explicit
-        # arguments on top.
-        compressed_used = False
-        llm_error: str | None = None
-        if auto_compress:
-            llm_summary, llm_next_steps, llm_pitfalls, llm_error = self._compress_session(
-                session_id=session_id,
-                project=project,
-                transcript=transcript,
-            )
-            if summary is None and llm_summary:
-                summary = llm_summary
-            if next_steps is None and llm_next_steps:
-                next_steps = llm_next_steps
-            if pitfalls is None and llm_pitfalls:
-                pitfalls = llm_pitfalls
-            compressed_used = llm_error is None and (
-                bool(llm_summary) or bool(llm_next_steps) or bool(llm_pitfalls)
-            )
-            # Ensure we always have *some* summary so downstream NOT NULL holds.
-            if summary is None:
-                summary = ""
-        else:
-            if not summary:
-                raise ValueError("summary required")
-
-        # Preserve the original contract (non-empty summary) for non-auto path.
+        # A non-auto call must always name a real summary, whatever dedup
+        # will end up doing with it - checked before dedup is even consulted
+        # so a genuinely bad argument still raises (see _dedup_action's
+        # docstring for why a still-open session is never deduped, and why
+        # the policy branches on `producer`, not on the row that's there).
         if not auto_compress and not summary:
             raise ValueError("summary required")
 
-        # Checked only now, after validation, so a skipped/overwritten call
-        # still raises on a genuinely bad argument (see dedup_action's
-        # docstring for why a still-open session is never deduped, and why
-        # the policy branches on `producer`, not on the row that's there).
-        action, target_id = dedup_action(self.db, session_id, project, producer)
+        action, target_id = self._dedup_action(session_id, project, producer)
+
+        # Explicit args always win over LLM output. We compute LLM-derived
+        # fields first so they can fill any gaps, then overlay the explicit
+        # arguments on top. Skipped entirely when this call's own content is
+        # about to be discarded anyway (action == "skip") - a floor that will
+        # never be written is not worth an LLM call.
+        compressed_used = False
+        llm_error: str | None = None
+        if auto_compress:
+            if action != "skip":
+                llm_summary, llm_next_steps, llm_pitfalls, llm_error = self._compress_session(
+                    session_id=session_id,
+                    project=project,
+                    transcript=transcript,
+                )
+                if summary is None and llm_summary:
+                    summary = llm_summary
+                if next_steps is None and llm_next_steps:
+                    next_steps = llm_next_steps
+                if pitfalls is None and llm_pitfalls:
+                    pitfalls = llm_pitfalls
+                compressed_used = llm_error is None and (
+                    bool(llm_summary) or bool(llm_next_steps) or bool(llm_pitfalls)
+                )
+            # Ensure we always have *some* summary so downstream NOT NULL holds.
+            if summary is None:
+                summary = ""
 
         sid = None
         now = _now()
@@ -198,11 +258,16 @@ class SessionContinuity:
             )
         elif action == "overwrite":
             sid = target_id
+            # branch/started_at use COALESCE(?, existing): a second call in
+            # the burst that omits them (e.g. a hook retry with no --branch)
+            # must not null out what the first call already stored there.
             self.db.execute(
                 """UPDATE session_summaries
-                      SET project = ?, branch = ?, summary = ?, highlights = ?,
-                          pitfalls = ?, next_steps = ?, open_questions = ?,
-                          context_blob = ?, started_at = ?, ended_at = ?, consumed = 0
+                      SET project = ?, branch = COALESCE(?, branch), summary = ?,
+                          highlights = ?, pitfalls = ?, next_steps = ?,
+                          open_questions = ?, context_blob = ?,
+                          started_at = COALESCE(?, started_at), ended_at = ?,
+                          consumed = 0
                     WHERE id = ?""",
                 (
                     project, branch, summary,
@@ -214,37 +279,14 @@ class SessionContinuity:
                     target_id,
                 ),
             )
-        # action == "skip": no summary write - a hook fire never displaces
-        # whatever is already in the burst's row.
-        # A session the server never opened still gets a row. Ends arrive under
-        # identities the MCP process does not own - a hook naming the Claude
-        # Code session, a subagent, a caller that made an id up - and without
-        # this `sessions` and `session_summaries` stay two disconnected lists:
-        # 231 of 256 summaries had no row to belong to. `started_at` is the
-        # caller's if given, else the end time, never a guess at when it began.
-        self.db.execute(
-            "INSERT OR IGNORE INTO sessions (id, started_at, project, branch) VALUES (?,?,?,?)",
-            (session_id, started_at or now, project, branch or ""),
-        )
-        # Close the session row itself, every call, dedup or not. Writing
-        # only `session_summaries` left every row in `sessions` open forever
-        # and stamped 'general' (the default `Store.session_start` uses), so
-        # `memory_timeline` reported sessions that had ended hours ago as
-        # still running, all in one project bucket. Project and branch are
-        # only overwritten while they still hold that placeholder - a row
-        # that already knows better is not downgraded by a caller who
-        # omitted the argument. A deduped call is a reason to skip a second
-        # summary row, not a reason to leave the session looking open.
-        self.db.execute(
-            """UPDATE sessions
-                  SET ended_at = ?,
-                      project = CASE WHEN COALESCE(project, 'general') = 'general'
-                                     THEN ? ELSE project END,
-                      branch = CASE WHEN COALESCE(branch, '') = ''
-                                    THEN ? ELSE branch END
-                WHERE id = ?""",
-            (now, project, branch or "", session_id),
-        )
+        else:
+            # action == "skip": no summary write - a hook fire never
+            # displaces whatever is already in the burst's row. `sid` still
+            # names that row so the caller (and mark_unconsumed) can address
+            # it, even though this call didn't touch it.
+            sid = target_id
+
+        self.close_session_row(session_id, project, branch, started_at, now=now)
         self.db.commit()
 
         result: dict[str, Any] = {
@@ -265,8 +307,11 @@ class SessionContinuity:
             if llm_error:
                 result["auto_compress_error"] = llm_error
 
-        # Markdown live-doc projection (optional, env-gated)
-        if is_active_context_enabled():
+        # Markdown live-doc projection (optional, env-gated). Skipped along
+        # with the summary write itself: a deduped hook floor must not
+        # repaint the live document over whatever a real summary (or an
+        # earlier call in this burst) already wrote there.
+        if action != "skip" and is_active_context_enabled():
             try:
                 path = write_active_context(
                     project,
