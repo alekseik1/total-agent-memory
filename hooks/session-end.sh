@@ -18,7 +18,12 @@ TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 DATE_SHORT=$(date '+%Y%m%d-%H%M%S')
 CWD=$(hook_get 'cwd')
 [ -z "$CWD" ] && CWD="$PWD"
-PROJECT=$(basename "$CWD")
+# hook_project_name resolves a worktree's cwd to the main repo's own name -
+# a bare `basename "$CWD"` names the worktree directory instead, so a
+# session_end call from the tool side (project = git-root basename) and this
+# hook's own session_end (see auto_session_end.py, producer="hook") mint two
+# different dedup keys for the same close and the dedup policy never engages.
+PROJECT=$(hook_project_name)
 
 # Human-readable reason
 case "$REASON" in
