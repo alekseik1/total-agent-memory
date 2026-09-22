@@ -18,7 +18,11 @@ def test_spread_reads_only_frontier_edges(db, activation, graph_store, populated
 
 
 def insert_knowledge(db, kid, status="active"):
-    db.execute("INSERT INTO knowledge (id, type, content, status) VALUES (?, 'fact', ?, ?)", (kid, f"k{kid}", status))
+    db.execute(
+        "INSERT INTO knowledge (id, session_id, type, content, status, created_at) "
+        "VALUES (?, 's1', 'fact', ?, ?, '2026-01-01T00:00:00Z')",
+        (kid, f"k{kid}", status),
+    )
 
 
 def test_activated_memories_sum_in_sql(db, activation, graph_store):

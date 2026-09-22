@@ -101,10 +101,14 @@ class TestSolutionLookup:
         ]
         for ktype, content, project, confidence in rows:
             db.execute(
-                "INSERT INTO knowledge (type, content, project, confidence, status) VALUES (?, ?, ?, ?, 'active')",
+                "INSERT INTO knowledge (session_id, type, content, project, confidence, status, created_at) "
+                "VALUES ('s1', ?, ?, ?, ?, 'active', '2026-01-01T00:00:00Z')",
                 (ktype, content, project, confidence),
             )
-        db.execute("INSERT INTO knowledge (type, content, project, status) VALUES ('solution', 'authentication retired', 'api', 'superseded')")
+        db.execute(
+            "INSERT INTO knowledge (session_id, type, content, project, status, created_at) "
+            "VALUES ('s1', 'solution', 'authentication retired', 'api', 'superseded', '2026-01-01T00:00:00Z')"
+        )
         db.commit()
         return CognitiveEngine(db)
 
