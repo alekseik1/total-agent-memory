@@ -256,6 +256,31 @@ def test_a_diverging_rebuild_is_skipped_not_rewritten_under_a_fallback_label(sto
     assert result2["skipped"] == 1
 
 
+def test_a_diverging_full_rebuild_aborts_too_not_only_stale_only(store, monkeypatch):
+    """The abort is not gated on `stale_only`: a full rebuild (every active
+    row, not just the stale ones) with the configured backend down must
+    abort the same way, or it would rewrite every row with a fallback
+    vector - strictly more damage than the stale_only case this is already
+    proven for."""
+    store._embed_mode = "ollama"
+    store._embedder = _Embedder(384)
+    monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
+    _seed(store, 1, "nomic-embed-text", 768, "ollama")
+    store.db.commit()
+
+    result = _rebuild(store, stale_only=False)
+
+    assert result["rebuilt"] == 0
+    assert result["skipped"] == 1
+    assert "error" in result
+
+    row = store.db.execute(
+        "SELECT embed_model, embed_dim FROM embeddings WHERE knowledge_id=1"
+    ).fetchone()
+    assert row["embed_model"] == "nomic-embed-text"
+    assert row["embed_dim"] == 768
+
+
 def test_a_mid_run_divergence_reports_rebuilt_and_skipped_separately(store, monkeypatch):
     """The test above only covers row 0 of chunk 0, where `i == 0` makes
     `skipped += len(rows) - i` indistinguishable from `skipped +=

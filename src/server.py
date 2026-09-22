@@ -488,9 +488,13 @@ class Store:
     def embed_diverges_from_active(self, model_name: str) -> str | None:
         """None if `model_name` (the identity that just answered) matches
         the configured backend; otherwise the reason a caller like
-        `memory_rebuild_embeddings` should abort rather than write it under
-        `stale_only`'s selection criterion - the configured backend, not the
-        one that actually answered."""
+        `memory_rebuild_embeddings` should abort rather than write it.
+        Applies to a `stale_only` rebuild and a full one alike: for
+        `stale_only`, writing a fallback vector leaves the row stale again
+        next run; for a full rebuild, the same fallback would get written
+        under every active row instead of just the stale ones - a wider
+        selection makes a backend outage worse to write through, not safer,
+        so both abort the same way."""
         active = self._active_embed_model_name()
         if model_name == active:
             return None
@@ -6955,10 +6959,12 @@ async def _do(name, a):
             if divergence:
                 # The identity that actually answered is not the configured
                 # one, so the configured backend is unavailable right now.
-                # `stale_only` selects rows by comparing to `active_model` -
-                # writing a fallback vector under a row here would make that
-                # row stale again on the next run (never converges) and
-                # narrows an existing good vector while calling it rebuilt.
+                # Abort applies whether stale_only narrowed the selection or
+                # not: under stale_only, writing a fallback vector here would
+                # make the row stale again next run; without it, the same
+                # fallback would get written under every active row instead
+                # of just the stale ones - narrowing an existing good vector
+                # while calling it rebuilt either way.
                 state = (
                     f"{rebuilt} row(s) already rebuilt and committed before the abort"
                     if rebuilt else "nothing was rewritten"
