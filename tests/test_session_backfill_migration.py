@@ -1,4 +1,5 @@
-"""Migration 036 (formerly 030) repairs session rows the old session_end never closed.
+"""migrations/*_backfill_session_rows.sql repairs session rows the old
+session_end never closed (renumbered twice; see CHANGELOG).
 
 Only sessions that actually produced a summary are closed: one without a
 summary was never ended, and stamping an end time on it would be an invention.
@@ -11,9 +12,8 @@ import pytest
 
 from base_schema import apply_full_schema
 
-MIGRATION = (
-    Path(__file__).resolve().parent.parent / "migrations" / "036_backfill_session_rows.sql"
-)
+ROOT = Path(__file__).resolve().parent.parent
+MIGRATION = next((ROOT / "migrations").glob("*_backfill_session_rows.sql"))
 
 
 @pytest.fixture

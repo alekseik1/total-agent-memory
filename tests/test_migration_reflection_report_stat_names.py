@@ -1,17 +1,17 @@
-"""Regression test for migrations/039_reflection_report_stat_names.sql.
+"""Regression test for migrations/904_reflection_report_stat_names.sql.
 
 `_save_report` (src/reflection/agent.py) wrote synthesis['edges_strengthened']
 into column `new_nodes`, synthesis['clusters_found'] into `patterns_found`,
 and synthesis['skills_proposed'] into `skills_refined` - a live report read
-`new_nodes=116176`, which is strengthened graph edges, not new nodes. 039
-renames the three columns to match what they actually hold, and drops
-`rules_proposed`, which every INSERT hardcoded to 0.
+`new_nodes=116176`, which is strengthened graph edges, not new nodes. The
+migration renames the three columns to match what they actually hold, and
+drops `rules_proposed`, which every INSERT hardcoded to 0.
 
-039 (numbered 033 before the v14.2.0 merge renumbered it) is now a
-comment-only historical marker; the actual work lives in
+It is now a comment-only historical marker (renumbered twice; see
+CHANGELOG); the actual work lives in
 `base_schema.apply_reflection_report_column_migrations`, exercised directly
 here, because a bare `RENAME COLUMN` / `DROP COLUMN` is not safe to repeat
-against a database that already applied the old-numbered migration.
+against a database that already applied an old-numbered migration.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from base_schema import apply_reflection_report_column_migrations  # noqa: E402
 
 
-def _pre_039_db() -> sqlite3.Connection:
-    """A `reflection_reports` table shaped as migrations 001-038 left it."""
+def _pre_migration_db() -> sqlite3.Connection:
+    """A `reflection_reports` table shaped as it was before this migration."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(
@@ -63,7 +63,7 @@ def _pre_039_db() -> sqlite3.Connection:
 
 
 def test_migration_renames_columns_and_preserves_existing_rows():
-    conn = _pre_039_db()
+    conn = _pre_migration_db()
 
     apply_reflection_report_column_migrations(conn)
 
@@ -79,7 +79,7 @@ def test_migration_renames_columns_and_preserves_existing_rows():
 
 
 def test_migration_is_idempotent_against_an_already_migrated_database():
-    conn = _pre_039_db()
+    conn = _pre_migration_db()
 
     apply_reflection_report_column_migrations(conn)
     apply_reflection_report_column_migrations(conn)
@@ -106,10 +106,13 @@ def _sql_only(path: Path) -> str:
     return "\n".join(lines)
 
 
-def test_035_and_039_carry_no_sql():
-    """The renumber's replay safety rests on 035/039 staying comment-only
-    historical markers (see base_schema.apply_reflection_report_column_migrations'
-    docstring): a database that already ran them under their old numbers
-    (029/033) must not run their DDL again under the new ones."""
-    assert _sql_only(ROOT / "migrations" / "035_reflection_phase_errors.sql") == ""
-    assert _sql_only(ROOT / "migrations" / "039_reflection_report_stat_names.sql") == ""
+def test_markers_carry_no_sql():
+    """The renumber's replay safety rests on these two files staying
+    comment-only historical markers (see
+    base_schema.apply_reflection_report_column_migrations' docstring): a
+    database that already ran them under an old version key must not run
+    their DDL again under the new one."""
+    phase_errors = next((ROOT / "migrations").glob("*_reflection_phase_errors.sql"))
+    stat_names = next((ROOT / "migrations").glob("*_reflection_report_stat_names.sql"))
+    assert _sql_only(phase_errors) == ""
+    assert _sql_only(stat_names) == ""

@@ -6,9 +6,10 @@ from pathlib import Path
 import pytest
 
 from error_capture import ErrorCapture
+from memory_core.schema_migration import Migration, MigrationRunner
 
-MIGRATION_038 = (
-    Path(__file__).resolve().parent.parent / "migrations" / "038_resolve_learned_errors.sql"
+MIGRATION_RESOLVE_LEARNED_ERRORS = next(
+    (Path(__file__).resolve().parent.parent / "migrations").glob("*_resolve_learned_errors.sql")
 )
 
 
@@ -41,6 +42,11 @@ def ec_db():
             fire_count INTEGER DEFAULT 0, success_count INTEGER DEFAULT 0,
             fail_count INTEGER DEFAULT 0, success_rate REAL DEFAULT 0.0,
             last_fired TEXT, created_at TEXT, updated_at TEXT
+        );
+        CREATE TABLE migrations (
+            version TEXT PRIMARY KEY,
+            description TEXT NOT NULL,
+            applied_at TEXT NOT NULL
         );
     """)
     yield conn
@@ -213,7 +219,7 @@ def test_rules_for_pattern(ec):
 
 def test_resolve_marks_error_resolved(ec, ec_db):
     # learn_error requires a fix, so it never leaves a row open (see the
-    # migration-038 tests below) - insert an open row directly to exercise
+    # resolve_learned_errors migration tests below) - insert an open row directly to exercise
     # resolve() on its own, e.g. an error logged by another writer.
     cur = ec_db.execute(
         """INSERT INTO errors (session_id, category, severity, description,
@@ -238,7 +244,7 @@ def test_custom_threshold(ec_db):
 
 
 # ──────────────────────────────────────────────
-# Migration 038: resolve learned errors
+# resolve_learned_errors migration
 # ──────────────────────────────────────────────
 
 def _insert_learned_error_row(
@@ -261,40 +267,53 @@ def _insert_learned_error_row(
     )
 
 
-def _apply_038(db):
-    db.executescript(MIGRATION_038.read_text())
-    db.commit()
+def _apply_resolve_learned_errors(db):
+    """Drive the migration through the real `MigrationRunner` path (the one
+    production uses for every migration >= TRANSACTIONAL_SCHEMA_VERSION),
+    not a bare `executescript` that skips its INSERT INTO migrations and its
+    BEGIN IMMEDIATE - see rule about false-green tests exercising a copy of
+    the real code path instead of the real path itself."""
+    path = MIGRATION_RESOLVE_LEARNED_ERRORS
+    version = path.stem.split("_", 1)[0]
+    description = path.stem[len(version) + 1 :].replace("_", " ")
+    MigrationRunner(db).apply(Migration(version, description, path.read_text()))
 
 
-def test_migration_038_closes_a_learned_error_that_has_a_fix(ec_db):
+def test_resolve_learned_errors_closes_a_learned_error_that_has_a_fix(ec_db):
     _insert_learned_error_row(ec_db)
     ec_db.commit()
 
-    _apply_038(ec_db)
+    _apply_resolve_learned_errors(ec_db)
 
     row = ec_db.execute("SELECT status, resolved_at, created_at FROM errors").fetchone()
     assert row["status"] == "resolved"
     assert row["resolved_at"] == row["created_at"]
 
 
-def test_migration_038_leaves_a_fixless_open_error_alone(ec_db):
+def test_resolve_learned_errors_leaves_a_fixless_open_error_alone(ec_db):
     _insert_learned_error_row(ec_db, fix="")
     ec_db.commit()
 
-    _apply_038(ec_db)
+    _apply_resolve_learned_errors(ec_db)
 
     row = ec_db.execute("SELECT status, resolved_at FROM errors").fetchone()
     assert row["status"] == "open"
     assert row["resolved_at"] is None
 
 
-def test_migration_038_is_idempotent(ec_db):
+def test_resolve_learned_errors_is_idempotent(ec_db):
+    """Production never re-applies an already-recorded version; a reset
+    tracker (a restored backup) is the only way it genuinely replays, so
+    that is what this forces - same trick as
+    test_rerunning_leaves_reflection_reports_schema_unchanged."""
     _insert_learned_error_row(ec_db)
     ec_db.commit()
 
-    _apply_038(ec_db)
+    _apply_resolve_learned_errors(ec_db)
     first = dict(ec_db.execute("SELECT * FROM errors").fetchone())
-    _apply_038(ec_db)
+    ec_db.execute("DELETE FROM migrations")
+    ec_db.commit()
+    _apply_resolve_learned_errors(ec_db)
     second = dict(ec_db.execute("SELECT * FROM errors").fetchone())
 
     assert first == second
