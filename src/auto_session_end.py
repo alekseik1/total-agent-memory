@@ -71,15 +71,22 @@ def main() -> int:
         print(f"Memory DB not found at {DB_PATH}", file=sys.stderr)
         return 1
 
-    # Nothing extracted means nothing worth resuming from - a summary saying
-    # only "session ended" costs a row and tells the next session nothing.
-    if not (a.user_context or "").strip() and not (a.assistant_context or "").strip():
-        return 0
-
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA busy_timeout=15000")
     try:
+        # Nothing extracted means nothing worth resuming from - a summary
+        # saying only "session ended" costs a row and tells the next session
+        # nothing. The `sessions` row must still close, though: this cannot
+        # early-return before that, or every session where the hook extracted
+        # nothing at all keeps ended_at NULL forever.
+        if not (a.user_context or "").strip() and not (a.assistant_context or "").strip():
+            SessionContinuity(db).close_session_row(
+                a.session_id, project=a.project, branch=a.branch or None
+            )
+            db.commit()
+            return 0
+
         fallback = build_summary(a.reason, a.user_context, a.assistant_context)
         # With an LLM reachable, let it write the summary from the session's
         # own artifacts - the handful of messages the hook could extract is a
@@ -95,8 +102,9 @@ def main() -> int:
         # returning early here would leave that row open forever whenever a
         # duplicate was detected. producer="hook" on both branches, compressed
         # or not: even an LLM-written summary here only compresses what this
-        # script itself extracted, so it must never displace a real
-        # session_end call's summary (see dedup_action in session_continuity.py).
+        # script itself extracted, so within the 300s dedup window it must
+        # never displace a real session_end call's summary (see
+        # _dedup_action in session_continuity.py).
         result = SessionContinuity(db).session_end(
             a.session_id,
             None if compress else fallback,

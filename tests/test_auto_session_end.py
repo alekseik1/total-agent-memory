@@ -76,11 +76,18 @@ def test_it_writes_a_summary_and_a_session_row(memory_dir):
 
 
 def test_a_session_with_nothing_extracted_writes_nothing(memory_dir):
-    """A summary saying only "session ended" tells the next session nothing."""
+    """A summary saying only "session ended" tells the next session nothing,
+    but the `sessions` row must still close - S4: an early return before
+    that would leave ended_at NULL for every session where the hook
+    extracted nothing at all."""
     r = _run(memory_dir, session_id="empty_sess", project="p", reason="User exited")
 
     assert r.returncode == 0, r.stderr
     assert _rows(memory_dir, "SELECT * FROM session_summaries") == []
+    sessions = _rows(memory_dir, "SELECT * FROM sessions WHERE id='empty_sess'")
+    assert len(sessions) == 1
+    assert sessions[0]["ended_at"] is not None
+    assert sessions[0]["project"] == "p"
 
 
 def test_a_second_end_seconds_later_is_not_written_twice(memory_dir):
@@ -117,3 +124,30 @@ def test_the_deterministic_summary_survives_a_failed_compression(memory_dir, mon
     rows = _rows(memory_dir, "SELECT summary FROM session_summaries")
     assert len(rows) == 1
     assert "the work that must survive" in rows[0]["summary"]
+
+
+def test_the_hook_producer_argument_is_actually_wired(memory_dir):
+    """producer="hook" is this file's entire point in the session_end call,
+    and nothing else here pins it: if the kwarg were dropped, session_end
+    would default to producer="tool", which - unlike "hook" - starts a
+    fresh row once the existing one in the burst is already consumed. This
+    proves the literal actually reaches session_end rather than the
+    default."""
+    r = _run(memory_dir, session_id="pin_sess", project="p", reason="User exited",
+              user_context="first work")
+    assert r.returncode == 0, r.stderr
+
+    db = sqlite3.connect(memory_dir / "memory.db")
+    db.execute("UPDATE session_summaries SET consumed = 1")
+    db.commit()
+    db.close()
+
+    r2 = _run(memory_dir, session_id="pin_sess", project="p", reason="User ran /clear",
+               user_context="second work")
+    assert r2.returncode == 0, r2.stderr
+
+    # producer="hook" always skips within the window, regardless of
+    # `consumed` - if the kwarg were dropped (defaulting to "tool"), a
+    # consumed existing row makes dedup start a fresh one instead, and this
+    # would be 2.
+    assert len(_rows(memory_dir, "SELECT * FROM session_summaries")) == 1
