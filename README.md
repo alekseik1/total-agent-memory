@@ -6,7 +6,7 @@
 > Persistent, local memory for AI coding agents: Claude Code, Codex CLI, Cursor, any MCP client.
 > Temporal knowledge graph · procedural memory · AST codebase ingest · cross-project analogy · 3D WebGL visualization.
 
-[![Version](https://img.shields.io/badge/version-14.3.1-8ad.svg)](https://pypi.org/project/total-agent-memory/)
+[![Version](https://img.shields.io/badge/version-14.5.0-8ad.svg)](https://pypi.org/project/total-agent-memory/)
 [![Tests](https://img.shields.io/badge/tests-2162%20passing-4a9.svg)](docs/benchmarks/release-final-v14-20260915/RESULTS.md)
 [![IDEs](https://img.shields.io/badge/IDEs-9%20supported-4a9.svg)]()
 [![LongMemEval R@5](https://img.shields.io/badge/LongMemEval%20R@5-95.1%25-4a9.svg)](evals/longmemeval-2026-08-27-v13-store.json)
@@ -22,6 +22,67 @@
 [![Donate](https://img.shields.io/badge/PayPal-Donate-00457C.svg?logo=paypal&logoColor=white)](https://PayPal.Me/vbcherepanov)
 
 **Why this, not mem0 / Letta / Zep / Supermemory / Cognee?** → [docs/vs-competitors.md](docs/vs-competitors.md)
+
+---
+
+## Version 14.5.0 — on par with Mem0 Platform on LoCoMo and LongMemEval
+
+**Release date: 2026-09-23.**
+
+Mem0 publishes the per-question answers behind its LoCoMo and LongMemEval figures. We graded
+them and TAM's answers to the same held-out questions with the same judge model and two judge
+prompts — the one the public numbers used and Mem0's current one
+([report and how to reproduce it](docs/benchmarks/head-to-head-v14/RESULTS.md)):
+
+| Held-out questions, accuracy % | LoCoMo (1,144), published judge | LoCoMo, Mem0 judge | LongMemEval-S (400), official judge | LongMemEval-S, Mem0 judge |
+|---|---:|---:|---:|---:|
+| Mem0 Platform (gpt-5 answering, top 200 memories) | 88.46 | 94.32 | 91.00 | 91.75 |
+| TAM (gpt-5 answering) | 86.54¹ | 94.23 | **92.25** | 90.75 |
+| TAM (gpt-4.1-mini answering) | 88.02¹ | **94.32**¹ | 87.50 | 88.25 |
+
+¹ English embedding preset (`MEMORY_TEXT_EMBED_MODEL=BAAI/bge-base-en-v1.5`); with the default
+multilingual model, 87.50 and 92.57. No difference between TAM and Mem0 Platform at the same
+answering model is statistically significant — a tie, with TAM retrieving locally and calling no
+LLM when it writes or searches. The report also lists how Mem0's published setup differs from the
+earlier public protocol: a more lenient judge, 156 re-run questions, and answer-prompt hints that
+match individual LoCoMo gold answers.
+
+What changed:
+
+| Change | How you use it |
+|---|---|
+| **Cross-encoder reads the neighbouring turns** | Automatic. Each candidate is scored alone and with the turns before and after it; `MEMORY_CROSS_RERANK_CONTEXT` (400 characters, `0` = off). |
+| **Relative dates resolved in context mode** | Automatic. "last Thursday [Thu 14 December 2023]", counted from the record's timestamp; `MEMORY_CONTEXT_RESOLVE_DATES=off` disables it. |
+| **Context budget shared by rank** | Automatic. The first hits keep long records whole; answers about something the assistant said reach the reader whole for every development question instead of 38%. |
+| **`MEMORY_TEXT_EMBED_MODEL` works; models above 2 GB load** | Set it to change the model of ordinary records (re-embed with `python src/reembed.py --fastembed`). |
+| **Head-to-head tooling** | `benchmarks/crossgrade_mem0.py`, `benchmarks/retrieval_eval.py`; the QA harnesses take reasoning models (`--answer-model gpt-5-2025-08-07`). |
+
+---
+
+## Version 14.4.0 — opt-in fact supersession, cheaper writes at 1M records
+
+**Release date: 2026-09-22.**
+
+A record can now retire the value it replaces. `memory_save(supersede=true)` looks for active
+records of the same project and type that share the new record's opening words and end in a
+different value ("X's citizenship is Argentina" → "... is Armenia", "billing runs on PostgreSQL
+16" → "18"), marks them `superseded` and returns their ids. It is off by default: on a real
+5,128-record store the rule would have retired 138 records that were not updates, such as
+"likes jazz" next to "likes rock". On MemoryAgentBench FactConsolidation with gpt-4o-mini
+([findings](docs/benchmarks/memoryagentbench/FINDINGS.md)):
+
+| | 14.3.1 | 14.4.0, `supersede=true` |
+|---|---:|---:|
+| FC single-hop, 6k / 262k | 82 / 85 | 99 / 93 |
+| FC multi-hop, 6k / 262k | 13 / 3 | 27 / 9 |
+
+What changed, including two write-side costs that grew with the store:
+
+| Change | How you use it |
+|---|---|
+| **Fact supersession** | `memory_save(..., supersede=true)` or `memory_save_fast(..., supersede=true)` for single-valued facts. The response lists retired ids under `superseded`. |
+| **Vector cache patches instead of reloading** | Automatic. Migration 036 logs which record each change touched; a cached pool re-reads only those rows when a search next uses it. Unscoped recall right after a save at 1M records: 4.2 s → 0.37 s. |
+| **Concept name refresh uses an index** | Automatic. Migration 037 indexes graph node names that can match text; the 60-second refresh that stalled one save a minute takes 2.6 ms. Save p99 at 1M records: 1,432 → 140 ms ([report](docs/benchmarks/scale-v14/RESULTS.md)). |
 
 ---
 
@@ -142,14 +203,14 @@ Install the candidate wheel in a dedicated environment. Linux/macOS:
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./dist/total_agent_memory-14.3.1-py3-none-any.whl
+python -m pip install ./dist/total_agent_memory-14.5.0-py3-none-any.whl
 ```
 
 Windows PowerShell, using the environment directly without changing the execution policy:
 
 ```powershell
 py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install .\dist\total_agent_memory-14.3.1-py3-none-any.whl
+.\.venv\Scripts\python.exe -m pip install .\dist\total_agent_memory-14.5.0-py3-none-any.whl
 $env:PATH = "$PWD\.venv\Scripts;$env:PATH"
 ```
 
@@ -245,6 +306,8 @@ Optional remote LLM providers receive the content used in those tasks. Keep Olla
 
 ## Table of contents
 
+- [Version 14.5.0 — on par with Mem0 Platform on LoCoMo and LongMemEval](#version-1450--on-par-with-mem0-platform-on-locomo-and-longmemeval)
+- [Version 14.4.0 — opt-in fact supersession, cheaper writes at 1M records](#version-1440--opt-in-fact-supersession-cheaper-writes-at-1m-records)
 - [Version 14.3.1 — updates are no longer dropped, recall stays fast at 1M records](#version-1431--updates-are-no-longer-dropped-recall-stays-fast-at-1m-records)
 - [Version 14.3.0 — Jev as the contradiction checker](#version-1430--jev-as-the-contradiction-checker)
 - [Version 14.2.0 — facts that change over time](#version-1420--facts-that-change-over-time)
@@ -597,13 +660,12 @@ We're not replacing chatbot memory — we're occupying the **coding-agent + MCP 
 | 3D WebGL graph viewer | ❌ | ❌ | 🟡 | ✅ | ❌ | ❌ | **✅** |
 | Price for graph features | $249/mo | free | cloud | usage | free | free | **free** |
 
-**On competitors' benchmark numbers.** mem0 now publishes 92.5 on LoCoMo and
-94.4 on LongMemEval. Those are end-to-end accuracy with their own generator,
-judge and prompts — not comparable to the retrieval numbers above, and not
-independently reproducible without their stack. We publish retrieval because
-the runner, the corpus and the gold labels are all public and you can re-run
-them on your laptop without an API key. Where a project has not published on a
-benchmark, we write "—" rather than inventing a number.
+**On competitors' benchmark numbers.** mem0 publishes 92.5 on LoCoMo and 94.4 on
+LongMemEval, from its managed platform with gpt-5 answering and judging. It also publishes the
+answers behind them, so they can be graded next to TAM's under one judge: on the same held-out
+questions the two systems tie on both benchmarks
+([head-to-head](docs/benchmarks/head-to-head-v14/RESULTS.md)). Where a project has not published
+per-question answers, we do not compare against its number.
 
 Full side-by-side with pricing, latency, accuracy, "when to pick each" → [docs/vs-competitors.md](docs/vs-competitors.md).
 
@@ -707,7 +769,7 @@ These are the published distribution channels. For the unpublished v14 candidate
 | **uvx** (Python via uv) | `uvx total-agent-memory` | One-off run with no install. Best for trying without commitment. |
 | **pipx** (Python isolated) | `pipx install total-agent-memory` | Installs the `total-agent-memory`, `tam`, `tam-lookup`, `lookup-memory` binaries on PATH in an isolated venv. |
 | **brew** (macOS / Linuxbrew) | `brew install vbcherepanov/tap/total-memory` | Bottle-style install with `tam` and legacy `claude-total-memory` symlinks. |
-| **Docker** (multi-arch) | `docker run -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:14.3.1` | Containerized (linux/amd64 + linux/arm64). Dashboard on `:37737`. |
+| **Docker** (multi-arch) | `docker run -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:14.5.0` | Containerized (linux/amd64 + linux/arm64). Dashboard on `:37737`. |
 | **Claude Code plugin** | `/plugin marketplace add vbcherepanov/total-agent-memory`<br>`/plugin install total-agent-memory@vbcherepanov` | Installs the MCP server, the `memory-protocol` skill and all seven capture hooks in one step, from inside Claude Code. The bootstrap reuses an existing install if it finds one, so nothing is downloaded twice. |
 | **Manual clone** | `git clone https://github.com/vbcherepanov/total-agent-memory ~/total-agent-memory && cd ~/total-agent-memory && ./install.sh --ide claude-code` | Full control. Lets you hack on the server, run benchmarks, and pick which background services to enable. Detailed walkthrough below. |
 
@@ -1355,7 +1417,11 @@ Environment variables (all optional):
 | `TYPESAFE_BASE_URL` / `TYPESAFE_DEFAULT_MODEL` | `https://api.typesafe.ai` / `jev-latest` | Endpoint and model for the Jev scorer (self-hosted servers speaking `/v1/systemone` work too). |
 | `MEMORY_RERANK_ENABLED` | `false` | Honour caller's `rerank=true`. When `false`, CrossEncoder rerank is hard-disabled even if a tool call requests it. |
 | `MEMORY_ENRICHMENT_ENABLED` | `false` | Run the async enrichment worker. Default-ON in `balanced` / `deep`. |
-| `MEMORY_TEXT_EMBED_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Model for `embedding_space=text`. |
+| `MEMORY_TEXT_EMBED_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Model for `embedding_space=text` (every record that is not code, log or config). For an English-only store, `BAAI/bge-base-en-v1.5` retrieves better (LoCoMo evidence in context 81.8% → 86.2%) but handles other languages poorly. Changing it on an existing store needs `python src/reembed.py --fastembed`. `FASTEMBED_MODEL` and `MEMORY_EMBED_MODEL`, the older names, still win when set. |
+| `MEMORY_CROSS_RERANK` | `auto` | Local cross-encoder over the 50 fused candidates of `memory_recall`. `auto` re-ranks once the model has loaded in the background, `on` waits for it, `off` keeps the fused order. |
+| `MEMORY_CROSS_RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | English-only models are skipped for queries written mostly outside the Latin script; `jinaai/jina-reranker-v2-base-multilingual` covers other languages. |
+| `MEMORY_CROSS_RERANK_CONTEXT` | `400` | Characters of the previous and next turn of the same session the cross-encoder also reads with each candidate, so an answer like "It was about acceptance" is found for "What was the poetry reading about?". `0` scores each record alone. |
+| `MEMORY_CONTEXT_RESOLVE_DATES` | `on` | In `memory_recall(mode="context")`, follow relative date phrases with the date they denote, counted from the record's leading timestamp or its `created_at`: "last Thursday [Thu 14 December 2023]", "last week [the week before Sun 17 December 2023]". English and Russian phrases. `off` returns the records as stored. |
 | `MEMORY_CODE_EMBED_MODEL` | _empty → falls back to TEXT model_ | Model for `embedding_space=code`. The row still records `space=code` so a future swap is config-only. |
 | `MEMORY_LOG_EMBED_MODEL` | _empty → TEXT_ | Model for `embedding_space=log`. |
 | `MEMORY_CONFIG_EMBED_MODEL` | _empty → TEXT_ | Model for `embedding_space=config`. |

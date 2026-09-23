@@ -1,0 +1,136 @@
+{
+  "bench": "lme",
+  "questions": 400,
+  "judge_models": {
+    "published": "gpt-4o-2024-08-06",
+    "mem0": "gpt-4o-mini"
+  },
+  "mem0_repo_commit": "4b61c5d31b9c668a12b4f5e78064248a02c82d2b",
+  "cells": [
+    {
+      "system": "mem0-platform",
+      "judge": "published",
+      "accuracy": 91.0,
+      "by_category": {
+        "abstention": 92.0,
+        "knowledge-update": 96.77,
+        "multi-session": 82.29,
+        "single-session-assistant": 97.67,
+        "single-session-preference": 76.0,
+        "single-session-user": 98.11,
+        "temporal-reasoning": 92.71
+      }
+    },
+    {
+      "system": "tam-default-4.1mini",
+      "judge": "published",
+      "accuracy": 87.5,
+      "by_category": {
+        "abstention": 88.0,
+        "knowledge-update": 93.55,
+        "multi-session": 79.17,
+        "single-session-assistant": 100.0,
+        "single-session-preference": 56.0,
+        "single-session-user": 98.11,
+        "temporal-reasoning": 88.54
+      },
+      "vs_mem0": {
+        "difference": -3.5,
+        "ci95": [
+          -7.0,
+          -0.25
+        ],
+        "wins": 17,
+        "losses": 31,
+        "sign_test_p": 0.0595
+      }
+    },
+    {
+      "system": "tam-default-gpt5",
+      "judge": "published",
+      "accuracy": 92.25,
+      "by_category": {
+        "abstention": 92.0,
+        "knowledge-update": 93.55,
+        "multi-session": 86.46,
+        "single-session-assistant": 97.67,
+        "single-session-preference": 92.0,
+        "single-session-user": 98.11,
+        "temporal-reasoning": 91.67
+      },
+      "vs_mem0": {
+        "difference": 1.25,
+        "ci95": [
+          -1.5,
+          4.25
+        ],
+        "wins": 20,
+        "losses": 15,
+        "sign_test_p": 0.4996
+      }
+    },
+    {
+      "system": "mem0-platform",
+      "judge": "mem0",
+      "accuracy": 91.75,
+      "by_category": {
+        "abstention": 88.0,
+        "knowledge-update": 96.77,
+        "multi-session": 84.38,
+        "single-session-assistant": 100.0,
+        "single-session-preference": 88.0,
+        "single-session-user": 98.11,
+        "temporal-reasoning": 90.62
+      }
+    },
+    {
+      "system": "tam-default-4.1mini",
+      "judge": "mem0",
+      "accuracy": 88.25,
+      "by_category": {
+        "abstention": 76.0,
+        "knowledge-update": 93.55,
+        "multi-session": 78.12,
+        "single-session-assistant": 100.0,
+        "single-session-preference": 84.0,
+        "single-session-user": 98.11,
+        "temporal-reasoning": 88.54
+      },
+      "vs_mem0": {
+        "difference": -3.5,
+        "ci95": [
+          -7.0,
+          0.0
+        ],
+        "wins": 16,
+        "losses": 30,
+        "sign_test_p": 0.0541
+      }
+    },
+    {
+      "system": "tam-default-gpt5",
+      "judge": "mem0",
+      "accuracy": 90.75,
+      "by_category": {
+        "abstention": 92.0,
+        "knowledge-update": 90.32,
+        "multi-session": 82.29,
+        "single-session-assistant": 100.0,
+        "single-session-preference": 100.0,
+        "single-session-user": 98.11,
+        "temporal-reasoning": 88.54
+      },
+      "vs_mem0": {
+        "difference": -1.0,
+        "ci95": [
+          -4.25,
+          2.0
+        ],
+        "wins": 18,
+        "losses": 22,
+        "sign_test_p": 0.6358
+      }
+    }
+  ],
+  "spent_usd": 0.5102
+}

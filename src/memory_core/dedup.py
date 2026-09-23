@@ -44,6 +44,51 @@ def _tokens(text: str) -> list[str]:
     return _RE_TOKEN.findall(folded)
 
 
+# updates_value: a value is the differing tail of two statements that share a
+# prefix ("... is Argentina" / "... is Armenia"). At most one shared word may
+# follow it ("любит [красный] цвет"); a longer shared tail means the subject
+# differed and the value was the same ("The company that produced [X] is GM").
+MIN_SHARED_PREFIX = 2
+MAX_VALUE_WORDS = 8
+MAX_SHARED_SUFFIX = 1
+MIN_SHARED_FRACTION = 0.5
+
+
+def updates_value(new: str, stored: str) -> bool:
+    """True when `new` states a different value for what `stored` stated.
+
+    The two must share their opening words and differ in a trailing value
+    with no word in common. This fits functional facts (citizenship, capital,
+    version in use) and misfires on multi-valued ones ("likes jazz" does not
+    retract "likes rock") and on logs with a shared header, so callers opt in
+    per record (`memory_save(supersede=true)`).
+    """
+    a, b = _tokens(new), _tokens(stored)
+    if not a or not b or a == b:
+        return False
+    prefix = 0
+    while prefix < min(len(a), len(b)) and a[prefix] == b[prefix]:
+        prefix += 1
+    suffix = 0
+    while suffix < min(len(a), len(b)) - prefix and a[-1 - suffix] == b[-1 - suffix]:
+        suffix += 1
+    value_a, value_b = a[prefix:len(a) - suffix], b[prefix:len(b) - suffix]
+    return (
+        prefix >= MIN_SHARED_PREFIX
+        and suffix <= MAX_SHARED_SUFFIX
+        and 1 <= len(value_a) <= MAX_VALUE_WORDS
+        and 1 <= len(value_b) <= MAX_VALUE_WORDS
+        and not set(value_a) & set(value_b)
+        and prefix + suffix >= MIN_SHARED_FRACTION * max(len(a), len(b))
+    )
+
+
+def prefix_match_query(text: str, words: int = MIN_SHARED_PREFIX) -> str:
+    """FTS5 MATCH expression for records that start like `text` (candidates only)."""
+    terms = [token for token in _tokens(text)[:words] if "е" not in token]
+    return " ".join('"' + term.replace('"', '""') + '"' for term in terms)
+
+
 def candidate_match_query(text: str) -> str:
     """FTS5 MATCH expression that finds records containing the words of `text`.
 
@@ -125,4 +170,4 @@ def find_duplicate(
     return None
 
 
-__all__ = ["candidate_match_query", "exact_dedup", "find_duplicate", "normalize", "repeats"]
+__all__ = ["candidate_match_query", "exact_dedup", "find_duplicate", "normalize", "prefix_match_query", "repeats", "updates_value"]

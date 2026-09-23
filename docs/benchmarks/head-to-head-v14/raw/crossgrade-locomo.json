@@ -1,0 +1,160 @@
+{
+  "bench": "locomo",
+  "questions": 1144,
+  "judge_models": {
+    "published": "gpt-4o-mini",
+    "mem0": "gpt-4o-mini"
+  },
+  "mem0_repo_commit": "4b61c5d31b9c668a12b4f5e78064248a02c82d2b",
+  "cells": [
+    {
+      "system": "mem0-platform",
+      "judge": "published",
+      "accuracy": 88.46,
+      "by_category": {
+        "multi-hop": 85.1,
+        "open-domain": 73.33,
+        "single-hop": 91.59,
+        "temporal": 87.88
+      }
+    },
+    {
+      "system": "tam-default-4.1mini",
+      "judge": "published",
+      "accuracy": 87.5,
+      "by_category": {
+        "multi-hop": 79.33,
+        "open-domain": 68.0,
+        "single-hop": 93.49,
+        "temporal": 84.85
+      },
+      "vs_mem0": {
+        "difference": -0.96,
+        "ci95": [
+          -2.97,
+          1.05
+        ],
+        "wins": 70,
+        "losses": 81,
+        "sign_test_p": 0.4159
+      }
+    },
+    {
+      "system": "tam-en-4.1mini",
+      "judge": "published",
+      "accuracy": 88.02,
+      "by_category": {
+        "multi-hop": 83.65,
+        "open-domain": 69.33,
+        "single-hop": 92.7,
+        "temporal": 85.28
+      },
+      "vs_mem0": {
+        "difference": -0.44,
+        "ci95": [
+          -2.53,
+          1.66
+        ],
+        "wins": 73,
+        "losses": 78,
+        "sign_test_p": 0.7449
+      }
+    },
+    {
+      "system": "tam-en-gpt5",
+      "judge": "published",
+      "accuracy": 86.54,
+      "by_category": {
+        "multi-hop": 80.77,
+        "open-domain": 60.0,
+        "single-hop": 93.65,
+        "temporal": 80.95
+      },
+      "vs_mem0": {
+        "difference": -1.92,
+        "ci95": [
+          -4.11,
+          0.17
+        ],
+        "wins": 69,
+        "losses": 91,
+        "sign_test_p": 0.0966
+      }
+    },
+    {
+      "system": "mem0-platform",
+      "judge": "mem0",
+      "accuracy": 94.32,
+      "by_category": {
+        "multi-hop": 93.27,
+        "open-domain": 88.0,
+        "single-hop": 95.24,
+        "temporal": 94.81
+      }
+    },
+    {
+      "system": "tam-default-4.1mini",
+      "judge": "mem0",
+      "accuracy": 92.57,
+      "by_category": {
+        "multi-hop": 88.46,
+        "open-domain": 80.0,
+        "single-hop": 95.4,
+        "temporal": 92.64
+      },
+      "vs_mem0": {
+        "difference": -1.75,
+        "ci95": [
+          -3.5,
+          -0.09
+        ],
+        "wins": 40,
+        "losses": 60,
+        "sign_test_p": 0.0569
+      }
+    },
+    {
+      "system": "tam-en-4.1mini",
+      "judge": "mem0",
+      "accuracy": 94.32,
+      "by_category": {
+        "multi-hop": 92.79,
+        "open-domain": 90.67,
+        "single-hop": 95.71,
+        "temporal": 93.07
+      },
+      "vs_mem0": {
+        "difference": 0.0,
+        "ci95": [
+          -1.75,
+          1.66
+        ],
+        "wins": 51,
+        "losses": 51,
+        "sign_test_p": 1.0
+      }
+    },
+    {
+      "system": "tam-en-gpt5",
+      "judge": "mem0",
+      "accuracy": 94.23,
+      "by_category": {
+        "multi-hop": 90.87,
+        "open-domain": 84.0,
+        "single-hop": 96.83,
+        "temporal": 93.51
+      },
+      "vs_mem0": {
+        "difference": -0.09,
+        "ci95": [
+          -1.75,
+          1.57
+        ],
+        "wins": 47,
+        "losses": 48,
+        "sign_test_p": 1.0
+      }
+    }
+  ],
+  "spent_usd": 0.0
+}

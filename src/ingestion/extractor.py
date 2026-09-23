@@ -373,9 +373,19 @@ Content:
 
         cache: dict[str, dict] = {}
         try:
-            rows = self.db.execute(
-                "SELECT id, name, type FROM graph_nodes WHERE status = 'active'"
-            ).fetchall()
+            # Names with a colon can never equal a token from _tokenize, which
+            # has none; that leaves out the "save:<id>:<time>" event node every
+            # save adds, so the refresh no longer grows with the store (1.7 s
+            # per refresh at 1M records).
+            try:
+                rows = self.db.execute(
+                    "SELECT id, name, type FROM graph_nodes INDEXED BY idx_graph_nodes_matchable "
+                    "WHERE status = 'active' AND instr(name, ':') = 0"
+                ).fetchall()
+            except sqlite3.OperationalError:  # before migration 037
+                rows = self.db.execute(
+                    "SELECT id, name, type FROM graph_nodes WHERE status = 'active' AND instr(name, ':') = 0"
+                ).fetchall()
             for row in rows:
                 name_lower = row[1].lower().strip() if row[1] else ""
                 if name_lower:

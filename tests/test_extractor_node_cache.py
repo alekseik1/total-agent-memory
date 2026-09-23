@@ -200,3 +200,16 @@ def test_auto_link_does_not_construct_its_own_extractor():
         "the node cache and makes the write path quadratic"
     )
     assert "shared_extractor" in source
+
+
+def test_event_nodes_stay_out_of_the_name_cache(extractor):
+    """Every save adds a "save:<id>:<time>" event node; no token can match it."""
+    extractor.db.execute(
+        "INSERT INTO graph_nodes (id, type, name, status) VALUES ('ev1', 'event', 'save:1:2026-09-21T00:00:00Z', 'active')"
+    )
+    extractor.db.execute("INSERT INTO graph_nodes (id, type, name, status) VALUES ('c1', 'concept', 'postgres', 'active')")
+    extractor.db.commit()
+    extractor._node_names_cache = None
+    names = extractor._get_node_names()
+    assert "postgres" in names
+    assert not any(":" in name for name in names)

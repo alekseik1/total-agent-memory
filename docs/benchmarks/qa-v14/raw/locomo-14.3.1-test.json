@@ -1,0 +1,36 @@
+{
+  "variant": {
+    "name": "final-old-14.3.1",
+    "limit": 50,
+    "neighbors": 1,
+    "context_chars": 60000,
+    "reasoning": true
+  },
+  "split": "test",
+  "answer_model": "gpt-4.1-mini-2025-04-14",
+  "judge_model": "gpt-4o-mini",
+  "spent_usd_this_run": 2.4091,
+  "n": 1155,
+  "accuracy": 85.63,
+  "by_category": {
+    "multi-hop": {
+      "n": 208,
+      "accuracy": 75.0
+    },
+    "open-domain": {
+      "n": 75,
+      "accuracy": 64.0
+    },
+    "single-hop": {
+      "n": 641,
+      "accuracy": 92.51
+    },
+    "temporal": {
+      "n": 231,
+      "accuracy": 83.12
+    }
+  },
+  "errors": 0,
+  "context_tokens_mean": 2922,
+  "retrieval_ms_p50": 39.7
+}

@@ -83,7 +83,8 @@ def embed_fastembed(texts: list[str], model_name: str) -> list[list[float]]:
     global _fastembed_instance
     if _fastembed_instance is None:
         from fastembed import TextEmbedding
-        _fastembed_instance = TextEmbedding(model_name, threads=get_embed_threads())
+        from memory_core.fastembed_loader import load_model
+        _fastembed_instance = load_model(TextEmbedding, model_name, threads=get_embed_threads())
     embeddings = list(_fastembed_instance.embed(texts))
     return [emb.tolist() if hasattr(emb, 'tolist') else list(emb) for emb in embeddings]
 
@@ -136,10 +137,8 @@ def main():
 
     if args.model is None:
         if args.fastembed:
-            args.model = os.environ.get(
-                "FASTEMBED_MODEL",
-                "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-            )
+            import config as _cfg
+            args.model = os.environ.get("FASTEMBED_MODEL") or _cfg.get_text_embed_model()
         elif args.ollama:
             args.model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
         else:
