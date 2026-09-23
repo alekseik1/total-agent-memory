@@ -97,11 +97,11 @@ and versions use [Semantic Versioning](https://semver.org/).
   `base_schema.apply_reflection_report_column_migrations` (PRAGMA-guarded,
   not a bare `ALTER TABLE`), so a reflection phase that fails (or is
   deferred/skipped) is now visible in the saved report instead of only
-  reaching stderr. The migration that originally carried this DDL,
-  `900_reflection_phase_errors.sql` (numbered `029`, then renumbered to
-  `035` in the v14.2.0 cycle - see "Migration numbering" below), is now a
-  comment-only historical marker - see its header comment.
-- The fork's other four migrations moved alongside it for the same reason:
+  reaching stderr. `900_reflection_phase_errors.sql`, which originally
+  carried this DDL, is now a comment-only marker - see its header comment.
+- Four more migrations join it in a reserved `900`-`904` range, used because
+  these five are added independently of the project's own sequential
+  numbering and must never collide with it:
   `901_backfill_session_rows.sql`, `902_backfill_orphan_session_rows.sql`
   and `903_resolve_learned_errors.sql` are unchanged data repairs under
   their new numbers. `904_reflection_report_stat_names.sql` renames
@@ -110,35 +110,17 @@ and versions use [Semantic Versioning](https://semver.org/).
   `rules_proposed`, which every insert hardcoded to 0; like `900`, its DDL
   now lives in `apply_reflection_report_column_migrations` and the file
   itself is comment-only.
+- `Store._apply_sql_migrations` deletes stale tracker rows left by earlier
+  numbering of these same five migrations before deciding what still needs
+  to run, matched by (version, description) pair so no other project's rows
+  are ever touched - see the function's own comment for why. On a database
+  that never carried those rows this is a no-op; the two comment-only
+  markers (`900`, `904`) re-run as no-ops and the three data repairs
+  (`901`-`903`) are idempotent either way.
 - `fact_merger`'s merged records now carry `session_id='fact-merge'` and
   `source='merged'` instead of a raw insert that violated `knowledge`'s
   `NOT NULL` `session_id`; the origin session row is seeded once in the base
   schema rather than written per merge.
-
-#### Migration numbering: the fork's five migrations moved to a reserved 900-904 range
-- Upstream and the fork each allocate the next free sequential migration
-  number independently, so every upstream release that adds its own
-  migrations can re-collide with the fork's: `029`-`033` collided with
-  upstream's v14.2.0 migrations and were renumbered to `035`-`039` - the
-  numbering live on a released database today. Upstream's v14.3.1 then
-  claimed `035` for its own `035_fts_project_token.sql`; a third renumber,
-  to `036`-`040`, was drafted to resolve that but never shipped - it exists
-  only on this unreleased branch. Instead of repairing the collision a third
-  time, the fork's five migrations moved straight to a reserved `900`-`904`
-  range, a block upstream will never reach.
-- On startup, `Store._apply_sql_migrations` deletes the fork's stale tracker
-  rows from either of the two generations that actually shipped (`029`-`033`,
-  and `035`-`039` under the fork's own descriptions - matched by (version,
-  description) pair, so
-  upstream's real rows at those same version keys are never touched) before
-  deciding what still needs to run. Without this, a database that already
-  ran the fork's migrations under an old number would see upstream's real
-  migration at that same key as already-applied and silently skip it -
-  breaking project-scoped recall in the `035` case (its full-text index
-  never gains the `fts_project` column described under 14.3.1 below) or
-  crashing outright for `029`-`034`. The two comment-only
-  markers (`900`, `904`) then re-run as no-ops and the three data repairs
-  (`901`-`903`) are idempotent, so nothing is lost by the replay.
 
 ### Fixed - `ContentValidator`'s absolute-path check never matched real paths
 - The old path regex consumed exactly one character after the leading slash,
