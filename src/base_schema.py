@@ -123,17 +123,16 @@ def apply_reflection_report_column_migrations(db: sqlite3.Connection, log=lambda
 
     This logic used to be bare `ALTER TABLE` statements in
     `migrations/900_reflection_phase_errors.sql` and
-    `migrations/904_reflection_report_stat_names.sql` (renumbered twice and
-    moved to the reserved 900s range; see CHANGELOG). A database that
+    `migrations/904_reflection_report_stat_names.sql`. A database that
     already applied them under an old number runs them again under the new
     one, and `ADD COLUMN` / `RENAME COLUMN` / `DROP COLUMN` are not safe to
     repeat in SQLite - see the comment atop each of those files.
 
     Runs inside `BEGIN IMMEDIATE` so the write lock is taken before the
     `PRAGMA table_info` read below: two `Store.__init__` calls against the
-    same file (a concurrent MCP session plus the launchd reflection runner,
-    see the migration rule in project memory) can otherwise both read the
-    pre-migration column set, and the second one's `ALTER TABLE` then raises
+    same file (a concurrent MCP session plus a background reflection runner)
+    can otherwise both read the pre-migration column set, and the second
+    one's `ALTER TABLE` then raises
     `duplicate column name` / `no such column` - the PRAGMA guard alone only
     protects sequential replay, not a concurrent first run. With the lock
     taken first, the second caller blocks until the first commits, then

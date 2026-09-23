@@ -1276,33 +1276,16 @@ class Store:
         )
         self.db.commit()
 
-        # The fork's own five migrations have collided with an upstream
-        # release's numbering twice (029-033 -> 035-039 -> 036-040) and now
-        # live at 900-904, a reserved range upstream will never claim - see
-        # CHANGELOG for the full history. A database that ran the fork's
-        # migrations under either past numbering still carries tracker rows
-        # under those old keys, which would make upstream's real 029-033 or
-        # 035 look already-applied and get silently skipped below. For
-        # 029-033 that crashes migration 034 (`no such trigger:
-        # atomic_source_update`); for 035 (`migrations/035_fts_project_token.sql`,
-        # in this tree today) nothing crashes at migration time -
-        # `knowledge.fts_project` never gets created and `scoped_match()`
-        # (memory_core/fts_schema.py) degrades silently, breaking
-        # project-scoped recall at query time instead. Delete those rows
-        # before the `applied` set is computed - matched by (version,
-        # description) pairs, not by version alone, so a database that never
-        # ran the fork's old migrations is untouched, and upstream's own
-        # "035" row (now present, under upstream's own description) is never
-        # deleted. Losing these rows is safe: 900/904 are PRAGMA-guarded
-        # no-ops (see their file comments) and 901-903 are idempotent
-        # UPDATE/INSERT-WHERE-NOT-EXISTS. Only two stale generations can
-        # exist on a real database (029-033, pre-v14.2.0; 035-039, the
-        # numbering live today) - 036-040 never shipped, it only ever
-        # existed on this unreleased branch, so it is deliberately not
-        # listed below; do not add it. The bases below must only ever be
-        # numbering the fork has moved AWAY from - "900" (the range the fork
-        # occupies today) must never be added, or every startup would delete
-        # and replay this generation's own tracker rows forever.
+        # These five migrations live in a reserved high range (900-904) so
+        # they never collide with a sequentially-numbered migration added
+        # later. Earlier numbering generations of the same five left tracker
+        # rows behind; the DELETE below clears those rows, matched by
+        # (version, description) so only these five migrations' own rows are
+        # ever touched - no other project's rows. On a database that never
+        # carried the old rows, this is a no-op. The bases below must only
+        # ever be numbering this generation has moved AWAY from - "900"
+        # (the range it occupies today) must never be added, or every
+        # startup would delete and replay this generation's own rows forever.
         _fork_migration_slugs = [
             "reflection phase errors",
             "backfill session rows",

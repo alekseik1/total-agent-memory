@@ -15,16 +15,12 @@
 -- A column that always lies is worse than no column; dropped rather than
 -- renamed.
 --
--- Historical marker only: renumbered twice and moved to the reserved 900s
--- range; see CHANGELOG. A database that already applied it under an old
--- version key would run it again under this one, and `RENAME COLUMN` /
--- `DROP COLUMN` are not safe to repeat: SQLite raises "no such column" the
--- second time, and migrations with a version >= TRANSACTIONAL_SCHEMA_VERSION
--- run through `memory_core.schema_migration.MigrationRunner`, which has no
--- tolerance for that error - a bare re-run would raise `MigrationFailed`
--- uncaught and crash `Store.__init__`. The real work moved to
--- `base_schema.apply_reflection_report_column_migrations` (PRAGMA-guarded,
--- same pattern as `apply_core_column_migrations`), called from
--- `Store._apply_sql_migrations` after this loop has ensured
--- `reflection_reports` exists. This file stays on disk, comment-only, so
--- version 904 remains a recorded row (mirrors 028_agent_lineage.sql).
+-- This file is a comment-only marker: `RENAME COLUMN` / `DROP COLUMN` are
+-- not safe to repeat (SQLite raises "no such column" the second time, and
+-- the `MigrationRunner` that runs versions >= TRANSACTIONAL_SCHEMA_VERSION
+-- has no tolerance for that error), so the real DDL lives in
+-- `base_schema.apply_reflection_report_column_migrations`, PRAGMA-guarded
+-- so it is safe to replay, called from `Store._apply_sql_migrations` after
+-- this loop has ensured `reflection_reports` exists. This file stays on
+-- disk so version 904 remains a recorded tracker row (mirrors
+-- 028_agent_lineage.sql).

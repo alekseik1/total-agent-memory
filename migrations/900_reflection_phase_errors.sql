@@ -11,17 +11,12 @@
 -- One JSON blob of {phase: message} per report, so a failing phase is queryable
 -- instead of archaeological.
 --
--- Historical marker only: renumbered twice and moved to the reserved 900s
--- range; see CHANGELOG. A database that already applied it under an old
--- version key would run it again under this one, and `ALTER TABLE ADD
--- COLUMN` is not safe to repeat: SQLite has no `ADD COLUMN IF NOT EXISTS`,
--- and migrations with a version >= TRANSACTIONAL_SCHEMA_VERSION run through
--- `memory_core.schema_migration.MigrationRunner`, which has no tolerance for
--- "duplicate column name" the way the legacy path's
--- `Store._replay_migration_skipping_existing` does - a bare re-run would
--- raise `MigrationFailed` uncaught and crash `Store.__init__`. The real work
--- moved to `base_schema.apply_reflection_report_column_migrations`
--- (PRAGMA-guarded, same pattern as `apply_core_column_migrations`), called
--- from `Store._apply_sql_migrations` after this loop has ensured
--- `reflection_reports` exists. This file stays on disk, comment-only, so
--- version 900 remains a recorded row (mirrors 028_agent_lineage.sql).
+-- This file is a comment-only marker: `ALTER TABLE ADD COLUMN` is not safe
+-- to repeat (SQLite has no `ADD COLUMN IF NOT EXISTS`, and the
+-- `MigrationRunner` that runs versions >= TRANSACTIONAL_SCHEMA_VERSION has
+-- no tolerance for "duplicate column name"), so the real DDL lives in
+-- `base_schema.apply_reflection_report_column_migrations`, PRAGMA-guarded
+-- so it is safe to replay, called from `Store._apply_sql_migrations` after
+-- this loop has ensured `reflection_reports` exists. This file stays on
+-- disk so version 900 remains a recorded tracker row (mirrors
+-- 028_agent_lineage.sql).
