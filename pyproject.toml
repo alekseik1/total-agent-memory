@@ -26,8 +26,8 @@ classifiers = [
 dependencies = [
     "mcp[cli]>=1.9,<3",
     "chromadb>=0.4.0",
-    # The torch stack (sentence-transformers, transformers, FlagEmbedding,
-    # peft) moved to the [rerank] extra. See the comment on that extra for
+    # The torch stack — sentence-transformers, transformers, FlagEmbedding,
+    # peft — moved to the [rerank] extra. See the comment on that extra for
     # the measurement; nothing in the default configuration can reach it.
 
     # ingest_codebase() parses source with tree-sitter. Without this the
