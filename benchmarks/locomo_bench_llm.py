@@ -80,18 +80,32 @@ def import_store():
 
 
 def patch_thread_safety(server_mod, store) -> None:
-    """Reopen sqlite connection with check_same_thread=False.
+    """Make sure the store's connection can be used from the worker threads.
 
     Recall.search silently swallows SQLite ProgrammingError raised when a
     connection is used from a non-owning thread, which makes thread-pool
-    retrieval return empty results. The re-open + external lock lets us run
-    Haiku calls concurrently while serializing DB access.
+    retrieval return empty results. Store opens its connection with
+    check_same_thread=False, and components created during warm-up (the vector
+    cache among them) keep a reference to it, so it is kept as is. Only a
+    connection that fails from another thread is replaced; RETRIEVAL_LOCK
+    serializes DB access either way.
     """
     import sqlite3
-    try:
-        store.db.close()
-    except Exception:
-        pass
+
+    failure: list[BaseException] = []
+
+    def probe() -> None:
+        try:
+            store.db.execute("SELECT 1").fetchone()
+        except sqlite3.ProgrammingError as exc:
+            failure.append(exc)
+
+    worker = threading.Thread(target=probe)
+    worker.start()
+    worker.join()
+    if not failure:
+        return
+    store.db.close()
     store.db = sqlite3.connect(str(server_mod.MEMORY_DIR / "memory.db"),
                                check_same_thread=False)
     store.db.row_factory = sqlite3.Row

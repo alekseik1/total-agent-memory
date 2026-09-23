@@ -124,3 +124,7 @@ docs/benchmarks/release-final-v14-20260915/*
 !docs/benchmarks/scale-v14/raw/
 !docs/benchmarks/memoryagentbench/
 !docs/benchmarks/memoryagentbench/raw/
+!docs/benchmarks/qa-v14/
+!docs/benchmarks/qa-v14/raw/
+!docs/benchmarks/head-to-head-v14/
+!docs/benchmarks/head-to-head-v14/raw/

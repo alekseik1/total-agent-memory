@@ -1,0 +1,36 @@
+{
+  "variant": {
+    "name": "gpt5-en",
+    "limit": 50,
+    "neighbors": 1,
+    "context_chars": 60000,
+    "reasoning": false
+  },
+  "split": "test",
+  "answer_model": "gpt-5-2025-08-07",
+  "judge_model": "gpt-4o-mini",
+  "spent_usd_this_run": 0.3463,
+  "n": 1155,
+  "accuracy": 86.23,
+  "by_category": {
+    "multi-hop": {
+      "n": 208,
+      "accuracy": 79.33
+    },
+    "open-domain": {
+      "n": 75,
+      "accuracy": 60.0
+    },
+    "single-hop": {
+      "n": 641,
+      "accuracy": 93.45
+    },
+    "temporal": {
+      "n": 231,
+      "accuracy": 80.95
+    }
+  },
+  "errors": 0,
+  "context_tokens_mean": 2991,
+  "retrieval_ms_p50": 3362.9
+}

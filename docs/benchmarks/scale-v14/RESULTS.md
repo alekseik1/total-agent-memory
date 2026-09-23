@@ -1,8 +1,8 @@
 # Scale: 10k, 100k and 1M records
 
-How the SQLite core behaves as a store grows, on 14.3.0 and 14.3.1.
+How the SQLite core behaves as a store grows, on 14.3.0, 14.3.1 and 14.4.0.
 
-Host: Apple M2 Max, 12 cores, 64 GB RAM, macOS. Harness: `benchmarks/scale_bench.py`. Raw reports: `raw/v14.3.0/`, `raw/v14.3.1/`, and `raw/intermediate/` (the same fixes before migration 035 and multi-process HTTP).
+Host: Apple M2 Max, 12 cores, 64 GB RAM, macOS. Harness: `benchmarks/scale_bench.py`. Raw reports: `raw/v14.3.0/`, `raw/v14.3.1/`, `raw/v14.4.0/` with its paired `raw/v14.3.1-rerun/`, and `raw/intermediate/` (the same fixes before migration 035 and multi-process HTTP).
 
 ## Corpus
 
@@ -81,12 +81,39 @@ Profiled at 110k records. Before the fixes, five queries accounted for 98% of re
 
 The HTTP server ran every tool call synchronously on one event loop, so its throughput was 1 / latency however many clients connected. `MCP_HTTP_WORKERS=N` starts N server processes on one listening socket. Each is a fresh interpreter with its own store connection, and they share the database through SQLite WAL. Sessions are stateless in that mode.
 
+## 14.4.0 (paired rerun, 2026-09-22)
+
+A new corpus was embedded and loaded with the 14.3.1 code to 10k, 100k and 1M records. At each size the store was cloned twice (APFS clone), and 14.3.1 and 14.4.0 were measured one after the other on their own clone, with nothing else running. 14.4.0 applies migrations 036 and 037 when it opens its clone. Reports: `raw/v14.3.1-rerun/` and `raw/v14.4.0/`.
+
+Latency in ms, p50 / p95 (save: p99 / max).
+
+| | 14.3.1 | 14.4.0 |
+|---|---:|---:|
+| **1M records** | | |
+| Recall, tenant-scoped | 113 / 156 | 89 / 128 |
+| Recall, all tenants | 332 / 757 | 327 / 745 |
+| Save, p99 / max | 1,432 / 2,701 | 140 / 174 |
+| Recall after write (scoped) | 89 / 125 | 77 / 110 |
+| Unscoped recall right after a save (20 pairs) | 4,233 p50 | 371 p50 |
+| HTTP calls/s, 1 client · 16 clients, one process | 9.9 · 11.3 | 11.1 · 12.0 |
+| **100k records** | | |
+| Recall, tenant-scoped | 22 / 31 | 22 / 31 |
+| Save, p99 / max | 168 / 255 | 67 / 69 |
+| **10k records** | | |
+| Recall, tenant-scoped | 18 / 23 | 18 / 23 |
+
+`hit_at_5` is identical on both versions at every size (tenant 1.00; all tenants 0.967 / 0.973 / 0.97).
+
+- **Save stalls were the concept name refresh.** Every 60 s the extractor re-read all active graph nodes, and every save adds an event node, so at 1M one save a minute waited 1.4–2.7 s. Migration 037 indexes only names without a colon (event names always have one); the refresh reads about 200 rows.
+- **Unscoped recall after a write.** 14.3.1 threw away every vector pool on any write, so the next unscoped recall re-read a million binary vectors. 14.4.0 logs the records each write touched (migration 036) and patches the pool a search uses with just those rows. The first unscoped recall after start still loads the pool (4.1 s in this series); the 19 that followed took 360–550 ms.
+- **Pools are patched when used.** An earlier 14.4.0 candidate patched every cached pool on every write. With one pool per project that made write-then-recall 18% slower on LongMemEval (23.2 → 27.3 ms per query, 100 questions, ABBA order). The release patches a pool only when a search reads it: 22.9 vs 23.1 ms.
+
 ## Limits that remain
 
 - **One process still serves one call at a time.** Workers add throughput; one client's latency does not drop. With 4 workers the 1M store reaches 25 calls/s at 16 clients. More than 4 workers was not measured.
 - **Unscoped recall at 1M: 349 ms p50, 805 ms p95.** Without a project, the full-text tier still ranks every match of a common word across the whole store.
-- **Save stalls at 1M: p99 1.4 s.** Occasional save stalls, most likely WAL checkpoints; not investigated.
-- **First recall after start: 10.8 s at 1M.** The binary vector pool (56 B per record) loads from SQLite on the first query and again after any write, because the cache is invalidated.
+- **Save stalls at 1M (14.3.1): p99 1.4 s.** Found in 14.4.0: the concept name refresh, fixed by migration 037 (p99 140 ms).
+- **First recall after start: 10.8 s at 1M.** The binary vector pool (56 B per record) loads from SQLite on the first query. Since 14.4.0 a write no longer invalidates it.
 
 ## Caveats
 

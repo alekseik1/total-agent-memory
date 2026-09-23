@@ -1,12 +1,12 @@
-"""`recall_count` feedback must be opt-out for measurement callers.
+"""`recall_count` is a usage statistic, not a ranking signal.
 
-`Recall.search` bumps `recall_count` on every row it returns, and the scorer
-adds `recall_boost = min(0.3, recall_count * 0.05)`. That spaced-repetition
-loop is wanted in normal use and fatal for anything that *measures* retrieval:
-re-running a benchmark against the same database scores higher each time,
-because it is partly measuring its own previous runs.
-
-Benchmarks and `memory_explain_search` therefore pass `record_usage=False`.
+`Recall.search` bumps `recall_count` on every row it returns. Until 14.4.0 the
+scorer also added `min(0.3, recall_count * 0.05)`, so rows that merely showed
+up often (short turns matching a common name) outranked the ones that answered
+the question: on LoCoMo an agent's own queries cost 4.7 points of R@10 within
+one pass. Counting stays (dashboard, consolidation); ranking ignores it.
+Benchmarks and `memory_explain_search` pass `record_usage=False` so their runs
+leave no trace in the statistics.
 """
 
 from __future__ import annotations
@@ -99,3 +99,22 @@ def test_explain_search_does_not_mutate_counters(seeded, monkeypatch):
         server._do("memory_explain_search", {"query": "RabbitMQ", "project": "usage"})
     )
     assert sum(_counts(store)) == 0
+
+
+def test_recorded_usage_does_not_change_ranking(seeded):
+    """Rows returned many times must not climb above better matches."""
+    store, recall = seeded
+
+    def ids(record: bool) -> list[int]:
+        res = recall.search(query="how do we deploy", project="usage", limit=3,
+                            detail="compact", record_usage=record)
+        return [r["id"] for group in res["results"].values() for r in group]
+
+    before = ids(False)
+    assert before, "search returned nothing — fixture is not exercising the path"
+    last = before[-1]
+    store.db.execute("UPDATE knowledge SET recall_count=500 WHERE id=?", (last,))
+    store.db.commit()
+    for _ in range(3):
+        ids(True)
+    assert ids(False) == before

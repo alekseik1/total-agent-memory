@@ -20,6 +20,12 @@ ANSWER_GUIDANCE = (
     "Event dates and message dates are different; preserve unknown dates. "
     "Use evidence_ids together to resolve references. Do not substitute a later event "
     "for an earlier one or treat a plan as a completed action."
+    " When asked for advice, suggestions or a recommendation, answer it and tailor it to the person: build on"
+    " the preferences, possessions, plans and past experiences the excerpts record, and name them; such a"
+    " question needs no stored answer, so do not reply \"Not enough information\" to it."
+    " When counting or totalling, first list each distinct matching item with its excerpt and date, count an"
+    " item mentioned in several excerpts once, and keep only items that meet every condition of the question"
+    " (time window, kind, status)."
 )
 
 
