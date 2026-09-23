@@ -143,7 +143,7 @@ def test_instance_level_strict_paths_default_still_honoured():
 @pytest.mark.parametrize(
     "path",
     [
-        "/Users/alice/agecode/src/api/v1/chat.py",
+        "/Users/alice/project/src/api/v1/chat.py",
         "/etc/hosts",
         "~/.tam/memory.db",
         "/src/fact_merger.py",
@@ -160,7 +160,7 @@ def test_strict_path_detected_when_lost(path):
 
 def test_strict_path_detected_when_lost_at_line_start():
     v = ContentValidator()
-    path = "/Users/alice/agecode/src/api/v1/chat.py"
+    path = "/Users/alice/project/src/api/v1/chat.py"
     orig = f"Context above.\n{path} is the file to check.\nMore context below."
     trans = "Context above.\nThe relevant file to check.\nMore context below."
     r = v.validate(orig, trans, strict_paths=True)
@@ -169,7 +169,7 @@ def test_strict_path_detected_when_lost_at_line_start():
 
 def test_strict_path_detected_when_lost_quoted_and_parenthesised():
     v = ContentValidator()
-    path = "/Users/alice/agecode/src/api/v1/chat.py"
+    path = "/Users/alice/project/src/api/v1/chat.py"
     orig = f'See "{path}" (also referenced) for details.'
     trans = "See the relevant file for details."
     r = v.validate(orig, trans, strict_paths=True)
