@@ -1,5 +1,5 @@
 """migrations/*_backfill_session_rows.sql repairs session rows the old
-session_end never closed (renumbered twice; see CHANGELOG).
+session_end never closed.
 
 Only sessions that actually produced a summary are closed: one without a
 summary was never ended, and stamping an end time on it would be an invention.

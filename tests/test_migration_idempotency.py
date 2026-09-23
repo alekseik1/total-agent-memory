@@ -88,8 +88,8 @@ def test_rerunning_leaves_the_tracker_rows_identical(runner):
 
 
 def test_migration_versions_are_unique():
-    """Two v14 merge cycles each claimed a version key the fork already used
-    (029-033, then 035). Both collisions passed
+    """Two v14 merge cycles each claimed a version key this project already
+    used (029-033, then 035). Both collisions passed
     `test_all_migrations_apply_on_a_fresh_database` because it compares SETS
     of prefixes, which collapse a duplicate to one element on both sides.
     """
@@ -207,12 +207,12 @@ def test_lineage_columns_have_exactly_one_owner(tmp_path, monkeypatch):
         store.db.close()
 
 
-def test_repair_lets_upstream_035_and_the_forks_900s_reapply(runner):
-    """Reproduces the live database's actual state: migrations 001-034
-    applied for real, the fork's five still recorded at 035-039 under their
-    v14.2.0 descriptions, upstream's real 035 (fts_project_token) never run.
-    The repair block must delete the stale 035-039 rows so upstream's real
-    035 re-applies for real (not a copy of its DDL) and the fork's five
+def test_repair_lets_upstream_035_and_the_900s_reapply(runner):
+    """Reproduces a live database's actual state: migrations 001-034
+    applied for real, these five migrations still recorded at 035-039 under
+    their v14.2.0 descriptions, the real 035 (fts_project_token) never run.
+    The repair block must delete the stale 035-039 rows so the real 035
+    re-applies for real (not a copy of its DDL) and these five migrations
     re-apply under 900-904.
     """
     runner._apply_sql_migrations()  # clean baseline: everything applied once
@@ -267,9 +267,9 @@ def test_repair_lets_upstream_035_and_the_forks_900s_reapply(runner):
 
 def test_repair_does_not_delete_upstreams_own_035_row(runner):
     """The repair matches (version, description) pairs, not version alone -
-    upstream's real '035' row (description 'fts project token') must
-    survive even though '035' is also a key the repair deletes under the
-    fork's old description.
+    the real '035' row (description 'fts project token') must survive even
+    though '035' is also a key the repair deletes under its old
+    description.
     """
     runner._apply_sql_migrations()
     before = runner.db.execute(

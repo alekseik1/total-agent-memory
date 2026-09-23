@@ -1,5 +1,5 @@
 """migrations/*_backfill_orphan_session_rows.sql gives a session row to
-summaries that never had one (renumbered twice; see CHANGELOG).
+summaries that never had one.
 
 *_backfill_session_rows.sql could only repair rows that existed. These are
 the sessions that ended under an identity the MCP server does not issue - a

@@ -7,8 +7,7 @@ and synthesis['skills_proposed'] into `skills_refined` - a live report read
 migration renames the three columns to match what they actually hold, and
 drops `rules_proposed`, which every INSERT hardcoded to 0.
 
-It is now a comment-only historical marker (renumbered twice; see
-CHANGELOG); the actual work lives in
+It is now a comment-only marker; the actual work lives in
 `base_schema.apply_reflection_report_column_migrations`, exercised directly
 here, because a bare `RENAME COLUMN` / `DROP COLUMN` is not safe to repeat
 against a database that already applied an old-numbered migration.
