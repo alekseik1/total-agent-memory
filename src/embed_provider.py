@@ -168,7 +168,9 @@ class FastEmbedProvider:
             self._model = False
             return None
         try:
-            self._model = TextEmbedding(self._model_name, threads=config.get_embed_threads())
+            from memory_core.fastembed_loader import load_model
+
+            self._model = load_model(TextEmbedding, self._model_name, threads=config.get_embed_threads())
         except Exception as exc:  # noqa: BLE001
             # Loudly: the caller falls back to sentence-transformers, which
             # pulls torch and costs ~400 MB RSS. That used to happen with only

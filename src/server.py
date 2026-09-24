@@ -140,8 +140,12 @@ from base_schema import (  # noqa: E402
 from paths import memory_dir as _resolve_memory_dir  # noqa: E402
 
 MEMORY_DIR = _resolve_memory_dir()
+# Records a supersede=true save compares against (most recent first).
+SUPERSEDE_CANDIDATES = 500
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-FASTEMBED_MODEL = os.environ.get("FASTEMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+# The text space is embedded by the store itself; MEMORY_TEXT_EMBED_MODEL names its model
+# (FASTEMBED_MODEL is the older name and still wins when set).
+FASTEMBED_MODEL = os.environ.get("FASTEMBED_MODEL") or _v11_config.get_text_embed_model()
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 USE_OLLAMA_EMBED = os.environ.get("USE_OLLAMA_EMBED", "auto")  # auto|true|false
@@ -433,7 +437,9 @@ class Store:
         """Lazy-init FastEmbed model."""
         if self._fastembed_model is None and HAS_FASTEMBED:
             try:
-                self._fastembed_model = TextEmbedding(FASTEMBED_MODEL, threads=_v11_config.get_embed_threads())
+                from memory_core.fastembed_loader import load_model
+                self._fastembed_model = load_model(TextEmbedding, FASTEMBED_MODEL,
+                                                   threads=_v11_config.get_embed_threads())
                 LOG(f"FastEmbed: loaded {FASTEMBED_MODEL}")
             except Exception as e:
                 LOG(f"FastEmbed: init failed ({e})")
@@ -2161,6 +2167,41 @@ class Store:
 
         return rid, replaces is not None, was_redacted, private_sections, quality_meta
 
+    def supersede_values(self, rid, content, ktype, project):
+        """Retire active records that `content` (record `rid`) states a new value for.
+
+        Opt-in per save (`memory_save(supersede=true)`); see
+        memory_core.dedup.updates_value for the rule. Returns the retired ids.
+        """
+        from memory_core.dedup import prefix_match_query, updates_value
+        from memory_core.fts_schema import project_token
+
+        terms = prefix_match_query(content)
+        if not terms:
+            return []
+        rows = self.db.execute("""
+            WITH f AS MATERIALIZED (
+                SELECT rowid AS id FROM knowledge_fts WHERE knowledge_fts MATCH ?
+            )
+            SELECT k.id, k.content FROM f JOIN knowledge k ON k.id=f.id
+            WHERE k.status='active' AND k.project=? AND k.type=? AND k.id<>?
+            ORDER BY k.id DESC LIMIT ?
+        """, (f"content : ({terms}) AND fts_project : {project_token(project)}",
+              project, ktype, rid, SUPERSEDE_CANDIDATES)).fetchall()
+        retired = [row[0] for row in rows if updates_value(content, row[1])]
+        for old_id in retired:
+            self.db.execute(
+                "UPDATE knowledge SET status='superseded', superseded_by=? WHERE id=? AND status='active'",
+                (rid, old_id))
+            self._delete_embedding(old_id)
+        self.db.commit()
+        if retired and self.chroma and not self._check_binary_search():
+            try:
+                self.chroma.delete(ids=[str(i) for i in retired])
+            except Exception as e:  # noqa: BLE001 — chroma raises its own types; cleanup must not fail the save
+                LOG(f"Chroma delete of superseded ids={retired} failed: {e}")
+        return retired
+
     def bump_recall(self, ids):
         """Strengthen memories that are recalled (spaced repetition effect)."""
         now = utc_now()
@@ -3037,9 +3078,15 @@ class Recall:
         per-tier breakdowns; this is the data path used by the
         `memory_explain_search` MCP tool.
         """
+        from memory_core.cross_rerank import shared_reranker
         from memory_core.retrieval import SearchScope
         scope = SearchScope(project=project, kind=ktype, branch=branch,
                             spaces=embedding_space)
+        # Candidates gathered per tier. A cross-encoder needs a wider window
+        # than the caller's limit to have anything to re-order.
+        cross = shared_reranker()
+        cross_active = cross is not None and cross.applies_to(query)
+        pool = max(limit, (cross.window + 1) // 2) if cross_active else limit
         cacheable = not self.s.db.in_transaction
         revision = (self.s.db.total_changes,
                     self.s.db.execute("PRAGMA data_version").fetchone()[0])
@@ -3066,6 +3113,7 @@ class Recall:
             "fusion": fusion, "rerank": rerank, "diverse": diverse,
             # v11 Phase 6b — embedding_space affects candidate pool, must be in cache key.
             "embedding_space": ",".join(_v11_spaces) if _v11_spaces else None,
+            "cross_rerank": f"{cross.model}/{cross.window}/{cross.weight}/{cross.context_chars}" if cross_active else None,
         }
         # _explain bypasses both caches: the payload includes ephemeral
         # tier rankings that are not part of the cached representation.
@@ -3149,7 +3197,7 @@ class Recall:
                 ph = ",".join("?" * len(_v11_spaces))
                 conds.append(f"COALESCE(e.embedding_space, 'text') IN ({ph})")
                 params.extend(_v11_spaces)
-            params.append(limit * 3)
+            params.append(pool * 3)
             from memory_core.telemetry import op_timer
             with op_timer("retrieval_fts_ms"):
                 if project:
@@ -3194,7 +3242,7 @@ class Recall:
 
         from memory_core.atomic_facts import FactRepository
         try:
-            atomic_hits = FactRepository(self.s.db).search(query, scope, limit * 3)
+            atomic_hits = FactRepository(self.s.db).search(query, scope, pool * 3)
             if atomic_hits:
                 tier_rankings["atomic_facts"] = [hit["id"] for hit in atomic_hits]
                 for hit in atomic_hits:
@@ -3213,7 +3261,7 @@ class Recall:
         can_embed = self.s._embed_mode != "none"
         self.s._semantic_diagnostics = []
         semantic_tier = self.s._search_spaces(
-            query, project=project, spaces=_v11_spaces, limit=limit * 3, kind=ktype, branch=branch,
+            query, project=project, spaces=_v11_spaces, limit=pool * 3, kind=ktype, branch=branch,
         ) if can_embed else []
         from memory_core.retrieval import fetch_active_records
         semantic_records = fetch_active_records(
@@ -3237,7 +3285,7 @@ class Recall:
                 hyde_vector = hyde_expand(query, project)
                 if hyde_vector:
                     hyde_tier = self.s._binary_search(
-                        hyde_vector, project=project, n_results=limit * 2,
+                        hyde_vector, project=project, n_results=pool * 2,
                         embedding_spaces=["text"],
                         embedding_model=self.s._active_embed_model_name(),
                         kind=ktype, branch=branch,
@@ -3278,7 +3326,7 @@ class Recall:
                     q_emb = q_emb_list[0] if q_emb_list else None
                 if q_emb:
                     repr_hits, repr_winners = search_with_winners(
-                        self.s.db, q_emb, project=project, n_candidates=100, top_n=limit * 3
+                        self.s.db, q_emb, project=project, n_candidates=100, top_n=pool * 3
                     )
                     if repr_hits:
                         repr_records = fetch_active_records(
@@ -3312,7 +3360,7 @@ class Recall:
             LOG(f"multi_repr tier error: {e}")
 
         # ── Tier 3: Fuzzy search (catches typos and partial matches) ──
-        if len(results) < limit:
+        if len(results) < pool:
             from memory_core.telemetry import op_timer
             with op_timer("retrieval_fuzzy_ms"):
                 try:
@@ -3327,7 +3375,7 @@ class Recall:
                     if branch:
                         conds2.append("(k.branch=? OR k.branch='')")
                         params2.append(branch)
-                    params2.append(limit * 5)
+                    params2.append(pool * 5)
                     candidates = self.s.q(f"""
                         SELECT * FROM knowledge k WHERE {' AND '.join(conds2)}
                         ORDER BY last_confirmed DESC LIMIT ?
@@ -3557,9 +3605,11 @@ class Recall:
             else:
                 hl = get_parent_half_life_days()
                 item["half_life_days"] = hl
-            decay = Store._decay_factor(lc, hl)
-            recall_boost = min(0.3, (item["r"].get("recall_count", 0) or 0) * 0.05)
-            item["decay_factor"] = decay + recall_boost
+            # recall_count is not a ranking signal: it counts how often a record
+            # was returned, not whether it helped, so boosting by it promoted
+            # whatever generic rows matched common words (-4.7 pts R@10 on
+            # LoCoMo within one pass of an agent's own queries).
+            item["decay_factor"] = Store._decay_factor(lc, hl)
             # v10 — importance boost (defaults to neutral 1.0 for legacy rows
             # without the column or with NULL/unknown values).
             imp = (item["r"].get("importance") or "medium").lower()
@@ -3568,8 +3618,8 @@ class Recall:
         # B2 — per-tier decay closure for RRF.
         # For each (doc, tier) contribution we apply the half-life appropriate
         # to that tier: multi_repr uses the per-view half-life (summary fastest,
-        # raw slowest), every other tier uses the parent half-life. Recall_count
-        # boost still applies. Importance is *outside* the closure — multiplied
+        # raw slowest), every other tier uses the parent half-life. Importance
+        # is *outside* the closure — multiplied
         # against the final fused score so it scales the document as a whole.
         def _tier_score_weight(doc_id, tier_name):
             item = results.get(doc_id)
@@ -3580,9 +3630,7 @@ class Recall:
                 hl = get_repr_half_life_days(item["matched_repr"])
             else:
                 hl = get_parent_half_life_days()
-            decay = Store._decay_factor(lc, hl)
-            recall_boost = min(0.3, (item["r"].get("recall_count", 0) or 0) * 0.05)
-            return decay + recall_boost
+            return Store._decay_factor(lc, hl)
 
         # ── Score fusion: RRF or legacy ──
         if use_rrf and tier_rankings:
@@ -3612,12 +3660,12 @@ class Recall:
                     item["rrf_score"] = item["score"] * 0.5  # penalized fallback
 
             # Sort by fused RRF score
-            ranked = sorted(results.values(), key=lambda x: x.get("rrf_score", 0), reverse=True)[:limit * 2]
+            ranked = sorted(results.values(), key=lambda x: x.get("rrf_score", 0), reverse=True)[:pool * 2]
         else:
             # Legacy: apply decay + importance to additive scores
             for item in results.values():
                 item["score"] *= item["decay_factor"] * item["importance_boost"]
-            ranked = sorted(results.values(), key=lambda x: x["score"], reverse=True)[:limit * 2]
+            ranked = sorted(results.values(), key=lambda x: x["score"], reverse=True)[:pool * 2]
 
         # Stage 4.3 (optional): Temporal-index hard filter.
         # When query has explicit dates and index is populated, drop candidates
@@ -3654,6 +3702,30 @@ class Recall:
                     ranked = [e["_orig"] for e in reordered]
             except Exception as e:
                 LOG(f"Temporal filter failed, keeping RRF order: {e}")
+
+        # Stage 4.8: cross-encoder over the fused window (fastembed, local).
+        # Its rank joins the RRF rank; see memory_core/cross_rerank.py.
+        if cross_active and len(ranked) > 1:
+            from config import get_cross_rerank_mode
+            from memory_core.cross_rerank import session_window_texts
+            try:
+                db = self.s.db
+
+                def with_neighbours(window):
+                    texts = session_window_texts(db, [item["r"] for item in window], side_chars=cross.context_chars)
+                    return [texts.get(item["r"]["id"], item["r"].get("content", "")) for item in window]
+
+                def recency(item):
+                    return item["r"].get("created_at") or "", item["r"]["id"]
+
+                ranked = cross.rerank(query, ranked, lambda item: item["r"].get("content", ""),
+                                      wait=get_cross_rerank_mode() == "on",
+                                      context_of=with_neighbours if cross.context_chars else None,
+                                      recency_of=recency)
+            except Exception as e:  # noqa: BLE001 — onnxruntime raises its own types; keep the fused order
+                from memory_core.telemetry import counters as _cross_counters
+                LOG(f"cross-rerank failed, keeping fused order: {e}")
+                _cross_counters.bump("cross_rerank_errors")
 
         # Stage 5 (optional): CrossEncoder re-ranking
         # CE is trained on MS-MARCO (web search) — helps for precision in large bases,
@@ -3771,11 +3843,10 @@ class Recall:
 
         ranked = [item for item in ranked if scope.allows(item["r"], self.s.db)][:limit]
 
-        # Spaced-repetition feedback: a recalled record scores higher next
-        # time (`recall_boost` below). Callers that measure retrieval rather
-        # than use it — benchmarks, evals, memory_explain_search — must pass
-        # record_usage=False, otherwise every re-run inflates the scores of
-        # whatever the previous run happened to return.
+        # Usage statistics (recall_count, last_recalled) for the dashboard and
+        # consolidation; they do not affect ranking. Callers that measure
+        # retrieval — benchmarks, evals, memory_explain_search — pass
+        # record_usage=False so their runs leave no trace in those statistics.
         if record_usage:
             returned_ids = [item["r"]["id"] for item in ranked]
             if returned_ids:
@@ -4421,6 +4492,11 @@ async def _tool_catalogue():
                     "parent_agent_id": {
                         "type": "string",
                         "description": "Optional parent agent ID (the dispatching Agent tool / parent span). Together with agent_id forms the subagent lineage tree.",
+                    },
+                    "supersede": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Retire active records of the same project and type that this one gives a new value for: same opening words, different trailing value (\"X's citizenship is Argentina\" -> \"... is Armenia\"). Use for single-valued facts only; \"likes jazz\" would retire \"likes rock\". The retired ids are returned as `superseded`.",
                     },
                 },
                 "required": ["content", "type"],
@@ -5221,6 +5297,8 @@ async def _tool_catalogue():
                     "importance": {"type": "string", "enum": ["critical", "high", "medium", "low"], "default": "medium"},
                     "agent_id": {"type": "string", "description": "Optional Claude Code subagent ID (v2.1.139+)"},
                     "parent_agent_id": {"type": "string", "description": "Optional parent agent ID (the dispatching span)"},
+                    "supersede": {"type": "boolean", "default": False,
+                                  "description": "Same as memory_save.supersede: retire records this one gives a new value for."},
                 },
                 "required": ["content", "type"],
             },
@@ -6016,6 +6094,8 @@ async def _do(name, a):
                     "verifiability": verdict.get("verifiability"),
                 },
             })
+        superseded = (store.supersede_values(rid, a["content"], a["type"], a.get("project", "general"))
+                      if a.get("supersede") and not was_dedup else [])
         # Invalidate cache on write
         if store.cache is not None:
             store.cache.invalidate(project=a.get("project"))
@@ -6023,6 +6103,8 @@ async def _do(name, a):
         if getattr(store, "v9_cache", None) is not None:
             store.v9_cache.invalidate_all()
         result = {"saved": True, "id": rid, "deduplicated": was_dedup}
+        if superseded:
+            result["superseded"] = superseded
         if was_redacted:
             result["privacy_redacted"] = True
         if private_sections:
@@ -6823,11 +6905,15 @@ async def _do(name, a):
         if rid is None:
             return J({"saved": False, "rejected_by_quality_gate": False,
                       "reason": "save_knowledge returned no id"})
+        superseded = (store.supersede_values(rid, a["content"], a["type"], a.get("project", "general"))
+                      if a.get("supersede") and not was_dedup else [])
         if store.cache is not None:
             store.cache.invalidate(project=a.get("project"))
         if getattr(store, "v9_cache", None) is not None:
             store.v9_cache.invalidate_all()
         out = {"saved": True, "id": rid, "deduplicated": was_dedup, "mode": "fast"}
+        if superseded:
+            out["superseded"] = superseded
         if was_redacted:
             out["privacy_redacted"] = True
         if private_sections:
@@ -7623,6 +7709,11 @@ async def _bootstrap_session():
         LOG(f"Cleaned {cleaned} old observations (>{OBSERVATION_RETENTION_DAYS}d)")
     LOG(f"Session: {SID} | Branch: {BRANCH or '(none)'} | Memory: {MEMORY_DIR} | Sessions: {store.total_sessions()}")
     LOG(f"Config: decay={DECAY_HALF_LIFE}d archive={ARCHIVE_AFTER_DAYS}d purge={PURGE_AFTER_DAYS}d")
+    from memory_core.cross_rerank import shared_reranker
+    cross = shared_reranker()
+    if cross is not None:
+        cross.start()  # load in the background; searches keep the fused order until it is ready
+        LOG(f"Cross-rerank: {cross.model} window={cross.window} weight={cross.weight}")
 
 
 async def _run_stdio():

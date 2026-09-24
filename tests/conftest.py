@@ -17,6 +17,10 @@ if "TAM_MEMORY_DIR" not in os.environ and "CLAUDE_MEMORY_DIR" not in os.environ:
     _safe_tam_root = tempfile.mkdtemp(prefix="tam-test-root-")
     os.environ["TAM_MEMORY_DIR"] = _safe_tam_root
 
+# The cross-encoder downloads an 80 MB model on first use. Tests that cover
+# it inject a fake encoder; everything else runs without it.
+os.environ.setdefault("MEMORY_CROSS_RERANK", "off")
+
 # Ensure src/ is importable
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 

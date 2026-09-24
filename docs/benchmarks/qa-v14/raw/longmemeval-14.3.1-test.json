@@ -1,0 +1,48 @@
+{
+  "variant": {
+    "name": "final-old-14.3.1",
+    "limit": 20,
+    "context_chars": 48000,
+    "reasoning": true,
+    "neighbors": 2
+  },
+  "split": "test",
+  "answer_model": "gpt-4.1-mini-2025-04-14",
+  "judge_model": "gpt-4o-2024-08-06",
+  "spent_usd_this_run": 1.6444,
+  "n": 400,
+  "accuracy": 84.5,
+  "by_type": {
+    "abstention": {
+      "n": 25,
+      "accuracy": 84.0
+    },
+    "knowledge-update": {
+      "n": 62,
+      "accuracy": 95.16
+    },
+    "multi-session": {
+      "n": 96,
+      "accuracy": 78.12
+    },
+    "single-session-assistant": {
+      "n": 43,
+      "accuracy": 88.37
+    },
+    "single-session-preference": {
+      "n": 25,
+      "accuracy": 56.0
+    },
+    "single-session-user": {
+      "n": 53,
+      "accuracy": 98.11
+    },
+    "temporal-reasoning": {
+      "n": 96,
+      "accuracy": 82.29
+    }
+  },
+  "errors": 0,
+  "context_tokens_mean": 9222,
+  "retrieval_ms_p50": 65.0
+}

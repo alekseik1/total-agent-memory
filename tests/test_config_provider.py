@@ -256,6 +256,32 @@ def test_get_embed_model_defaults(monkeypatch):
     assert config.get_embed_model("cohere") == "embed-multilingual-v3.0"
 
 
+def test_text_embed_model_drives_the_local_provider(monkeypatch):
+    """MEMORY_TEXT_EMBED_MODEL used to reach only code/log/config rows; text rows kept the default."""
+    import config
+
+    monkeypatch.delenv("MEMORY_EMBED_MODEL", raising=False)
+    monkeypatch.delenv("MEMORY_TEXT_EMBED_MODEL", raising=False)
+    assert config.get_embed_model("fastembed") == "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    monkeypatch.setenv("MEMORY_TEXT_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
+    assert config.get_embed_model("fastembed") == "BAAI/bge-base-en-v1.5"
+    assert config.get_embed_model("openai") == "text-embedding-3-small"
+    monkeypatch.setenv("MEMORY_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
+    assert config.get_embed_model("fastembed") == "BAAI/bge-small-en-v1.5"
+
+
+def test_store_embeds_text_with_the_text_model():
+    import os
+    import subprocess
+
+    env = {key: value for key, value in os.environ.items() if key != "FASTEMBED_MODEL"}
+    env["MEMORY_TEXT_EMBED_MODEL"] = "BAAI/bge-base-en-v1.5"
+    src = str(Path(__file__).parent.parent / "src")
+    out = subprocess.run([sys.executable, "-c", "import server; print(server.FASTEMBED_MODEL)"],
+                         cwd=src, env=env, capture_output=True, text=True, timeout=120, check=True)
+    assert out.stdout.strip().splitlines()[-1] == "BAAI/bge-base-en-v1.5"
+
+
 def test_get_embed_api_key_provider_specific(monkeypatch):
     import config
 

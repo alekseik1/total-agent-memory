@@ -555,6 +555,9 @@ def get_embed_model(provider: str | None = None) -> str:
     override = os.environ.get("MEMORY_EMBED_MODEL")
     if override:
         return override
+    if p == "fastembed":
+        # The local provider embeds the text space, so it follows that space's model.
+        return get_text_embed_model()
     return _DEFAULT_EMBED_MODEL_BY_PROVIDER.get(p, "")
 
 
@@ -801,6 +804,66 @@ def get_contradiction_policy() -> str:
     """
     raw = os.environ.get("MEMORY_CONTRADICTION_POLICY", "").strip().lower()
     return raw if raw in CONTRADICTION_POLICIES else CONTRADICTION_POLICIES[0]
+
+
+# 14.5 — cross-encoder re-ranking of the fused candidate window (fastembed,
+# ONNX, no torch). The model scores (query, record) pairs; its rank joins the
+# RRF rank with CROSS_RERANK_WEIGHT. English-only models are skipped for
+# queries written mostly outside the Latin script.
+def context_resolves_dates() -> bool:
+    """MEMORY_CONTEXT_RESOLVE_DATES (default on): context mode follows relative date
+    phrases ("last Thursday") with the date they denote, counted from the record's time."""
+    raw = (os.environ.get("MEMORY_CONTEXT_RESOLVE_DATES", "on") or "on").strip().lower()
+    if raw not in ("on", "off"):
+        raise ValueError("MEMORY_CONTEXT_RESOLVE_DATES must be on or off")
+    return raw == "on"
+
+
+CROSS_RERANK_MODES = ("auto", "on", "off")
+DEFAULT_CROSS_RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
+MULTILINGUAL_CROSS_RERANK_MODELS = frozenset({"jinaai/jina-reranker-v2-base-multilingual"})
+DEFAULT_CROSS_RERANK_WINDOW = 50
+DEFAULT_CROSS_RERANK_WEIGHT = 2.0
+# Characters of the previous and of the next turn the encoder reads with each candidate.
+DEFAULT_CROSS_RERANK_CONTEXT = 400
+
+
+def get_cross_rerank_mode() -> str:
+    """``auto`` (default) re-ranks once the model is loaded; ``on`` waits for it; ``off`` disables."""
+    raw = (os.environ.get("MEMORY_CROSS_RERANK", "auto") or "auto").strip().lower()
+    if raw in ("1", "true", "yes"):
+        return "on"
+    if raw in ("0", "false", "no"):
+        return "off"
+    if raw not in CROSS_RERANK_MODES:
+        raise ValueError(f"MEMORY_CROSS_RERANK must be one of {', '.join(CROSS_RERANK_MODES)}")
+    return raw
+
+
+def get_cross_rerank_model() -> str:
+    return (os.environ.get("MEMORY_CROSS_RERANK_MODEL", "") or DEFAULT_CROSS_RERANK_MODEL).strip()
+
+
+def get_cross_rerank_window() -> int:
+    value = int(os.environ.get("MEMORY_CROSS_RERANK_WINDOW", str(DEFAULT_CROSS_RERANK_WINDOW)))
+    if value < 2:
+        raise ValueError("MEMORY_CROSS_RERANK_WINDOW must be at least 2")
+    return value
+
+
+def get_cross_rerank_weight() -> float:
+    value = float(os.environ.get("MEMORY_CROSS_RERANK_WEIGHT", str(DEFAULT_CROSS_RERANK_WEIGHT)))
+    if value <= 0:
+        raise ValueError("MEMORY_CROSS_RERANK_WEIGHT must be positive")
+    return value
+
+
+def get_cross_rerank_context() -> int:
+    """MEMORY_CROSS_RERANK_CONTEXT: characters of each neighbouring turn read with a candidate (0 = off)."""
+    value = int(os.environ.get("MEMORY_CROSS_RERANK_CONTEXT", str(DEFAULT_CROSS_RERANK_CONTEXT)))
+    if value < 0:
+        raise ValueError("MEMORY_CROSS_RERANK_CONTEXT must be zero or positive")
+    return value
 
 
 def is_rerank_enabled() -> bool:

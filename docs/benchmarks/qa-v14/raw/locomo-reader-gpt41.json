@@ -1,0 +1,36 @@
+{
+  "variant": {
+    "name": "reader-gpt41",
+    "limit": 50,
+    "neighbors": 1,
+    "context_chars": 60000,
+    "reasoning": true
+  },
+  "split": "test",
+  "answer_model": "gpt-4.1-2025-04-14",
+  "judge_model": "gpt-4o-mini",
+  "spent_usd_this_run": 3.9071,
+  "n": 400,
+  "accuracy": 82.25,
+  "by_category": {
+    "multi-hop": {
+      "n": 77,
+      "accuracy": 66.23
+    },
+    "open-domain": {
+      "n": 27,
+      "accuracy": 48.15
+    },
+    "single-hop": {
+      "n": 218,
+      "accuracy": 91.28
+    },
+    "temporal": {
+      "n": 78,
+      "accuracy": 84.62
+    }
+  },
+  "errors": 0,
+  "context_tokens_mean": 2895,
+  "retrieval_ms_p50": 318.8
+}

@@ -73,3 +73,23 @@ def test_metadata_overflow_is_explicit():
 def test_neighbor_anchor_link_survives_rendering():
     packed = pack_evidence([{"id": 2, "anchor_id": 1, "content": "Yes, that one."}])
     assert json.loads(packed.splitlines()[0])["anchor_id"] == 1
+
+
+def test_rank_weighting_keeps_the_top_hit_whole():
+    """Forty long rounds share the budget; the first search hit must not be cut to an excerpt."""
+    from memory_core.evidence_context import rank_weighted
+
+    answer = "assistant: " + " ".join(f"{n}. parameter number {n}" for n in range(1, 101))
+    hits = [{"id": 0, "content": answer}] + [
+        {"id": n, "content": f"user: filler round {n}. " + "unrelated chatter " * 120} for n in range(1, 40)]
+    hits.append({"id": 99, "content": "neighbour " * 200, "via": ["session_neighbor"]})
+
+    uniform = pack_evidence_records(hits, query="What was the 27th parameter?", max_chars=48000)
+    assert "excerpt truncated" in uniform[0]["content"]
+
+    weighted_hits = rank_weighted(hits)
+    assert [hit["evidence_weight"] for hit in weighted_hits[:3]] == [4.0, 2.5, 2.0]
+    assert weighted_hits[-1]["evidence_weight"] == 0.5
+    weighted = pack_evidence_records(weighted_hits, query="What was the 27th parameter?", max_chars=48000)
+    assert weighted[0]["content"] == answer
+    assert len({hit["id"] for hit in weighted}) == len(hits)
