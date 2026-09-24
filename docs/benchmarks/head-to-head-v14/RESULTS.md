@@ -1,6 +1,6 @@
-# TAM against Mem0 Platform on the same questions, graded by the same judges
+# TAM against Mem0 Platform on the same questions, graded by the same judge per column
 
-2026-09-23. Mem0 publishes the per-question answers behind its LoCoMo (92.5) and LongMemEval (94.4) figures. This report grades those answers and TAM's answers to the same held-out questions with one judge model and two judge prompts, so the difference between the systems is not a difference between graders.
+2026-09-23, revised 2026-09-24 after external review (see *Revisions*). Mem0 publishes the per-question answers behind its LoCoMo (92.5) and LongMemEval (94.4) figures. This report grades those answers and TAM's answers to the same held-out questions. Within each grading configuration, both systems' saved answers are evaluated by the same model and prompt, so the difference between the systems within a column is not a difference between graders. The two LoCoMo configurations share a judge model and differ in the prompt; the two LongMemEval configurations differ in both judge model and rubric.
 
 ## Result
 
@@ -16,13 +16,33 @@ LoCoMo: 1,144 questions of conversations 3-9 (categories 1-4; the 11 of 1,155 th
 
 What this supports:
 
-- **LoCoMo: a tie.** With the English embedding preset and gpt-4.1-mini answering, TAM matches Mem0 Platform with gpt-5 answering under both judges; no difference reaches significance.
-- **LongMemEval: a tie at the same answering model.** With gpt-5 answering from TAM's context, TAM scores 92.25 against Mem0's 91.00 under the official judge and 90.75 against 91.75 under Mem0's judge; neither difference is significant. TAM is ahead on preference questions (92 vs 76) and multi-session questions (86.5 vs 82.3), behind on knowledge updates (93.5 vs 96.8). With gpt-4.1-mini answering, TAM is 3.5 points behind (p 0.05-0.06).
+- **LoCoMo: no statistically detected difference.** With the English embedding preset and gpt-4.1-mini answering, TAM scores within half a point of Mem0 Platform with gpt-5 answering under both judges; no difference reaches significance on these 1,144 questions.
+- **LongMemEval: no statistically detected difference at the same answering model.** With gpt-5 answering from TAM's context, TAM is correct on 369 of 400 against Mem0's 364 under the official judge (TAM-only / Mem0-only correct 20 / 15, exact two-sided sign test p 0.50) and on 363 against 367 under Mem0's judge (18 / 22, p 0.64). By question type (table below), TAM is ahead on preference questions (23 vs 19 of 25) and non-abstention multi-session questions (83 vs 79 of 96), behind on non-abstention knowledge updates (58 vs 60 of 62). With gpt-4.1-mini answering, TAM is 3.5 points behind (p 0.05-0.06).
 - TAM retrieves locally, with no LLM call when it writes or searches. Mem0 Platform extracts memories with an LLM on every write.
 
-It does not support "first place" for either system: every difference between TAM and Mem0 Platform at the same answering model is within noise, on both benchmarks and under both judges.
+It does not support "first place" for either system, and it does not demonstrate equivalence: on these questions no difference between TAM and Mem0 Platform at the same answering model is statistically detected, on either benchmark or under either judge, and a sample of this size cannot rule out differences of a few points.
 
-Judges: the published LoCoMo judge is the prompt Zep and Mem0 published (verbatim in `benchmarks/locomo_qa.py`), run on gpt-4o-mini; the official LongMemEval judge is the evaluator's task-specific prompt set (verbatim in `benchmarks/longmemeval_qa.py`), run on gpt-4o-2024-08-06. The Mem0 judges are the prompts of `mem0ai/memory-benchmarks` at commit `4b61c5d`, run on gpt-4o-mini. Both systems' answers go through the identical calls. Re-running a judge moves a cell by up to ±0.3 points.
+LongMemEval held-out questions by type, gpt-5 answering (correct / questions; the 25 abstention questions, whose ids end in `_abs`, are counted separately, as the evaluator reports them):
+
+| Question type | Questions | Mem0, official judge | TAM, official judge | Mem0, Mem0 judge | TAM, Mem0 judge |
+|---|---:|---:|---:|---:|---:|
+| knowledge-update | 62 | 60 | 58 | 60 | 56 |
+| multi-session | 96 | 79 | 83 | 81 | 79 |
+| single-session-assistant | 43 | 42 | 42 | 43 | 43 |
+| single-session-preference | 25 | 19 | 23 | 22 | 25 |
+| single-session-user | 53 | 52 | 52 | 52 | 52 |
+| temporal-reasoning | 96 | 89 | 88 | 87 | 85 |
+| abstention (all types) | 25 | 23 | 23 | 22 | 23 |
+| **total** | **400** | **364** | **369** | **367** | **363** |
+
+Judges: the published LoCoMo judge is the prompt Zep and Mem0 published (verbatim in `benchmarks/locomo_qa.py`), run on gpt-4o-mini; the official LongMemEval judge is the evaluator's task-specific prompt set (verbatim in `benchmarks/longmemeval_qa.py`), run on gpt-4o-2024-08-06. The Mem0 judges are the prompts of `mem0ai/memory-benchmarks` at commit `4b61c5d`, run on gpt-4o-mini. Both systems' answers go through the identical calls. Re-running a judge moves a cell by up to ±0.3 points. The paired comparison within a column holds; the difference between the two LongMemEval columns changes the judge model and the rubric at once, so it cannot isolate the effect of the prompt (`judge_models` in `raw/crossgrade-lme.json`).
+
+## Protocol
+
+- **Splits.** LongMemEval-S: the 100 questions with the smallest SHA-256 of their `question_id` are the development split, the other 400 are reported. The exact lists are `splits/longmemeval-dev-ids.txt` and `splits/longmemeval-heldout-ids.txt`; the development split has 11 knowledge-update, 27 multi-session, 13 single-session-assistant, 5 single-session-preference, 12 single-session-user and 32 temporal-reasoning questions. LoCoMo: conversations 0-2 (385 questions) are development, conversations 3-9 are reported; the 11 question texts that occur twice there are graded once (`splits/locomo-heldout-dropped-duplicates.txt`). No full-500 or full-LoCoMo score is reported here; one would include development questions.
+- **Tuning history.** Changes were chosen on the development splits, but the configuration was not frozen before the reported questions were first scored. The reported LongMemEval questions were scored with TAM's own harness judge on 2026-09-22 (14.3.1 against the 14.4.0 candidate, and a gpt-4.1 reader experiment) and on the morning of 2026-09-23 after that day's first changes (neighbour-aware re-ranking, relative dates, answer guidance); rank-weighted context packing was added later that day, chosen on the development split, and the columns above were then produced. The reported split therefore measures a configuration chosen on development data by an author who had seen earlier scores on the reported split; a deterministic split alone does not establish the absence of tuning on it.
+- **Ingest.** LongMemEval stores each user/assistant round as its own record, with speaker labels kept, the session date and the session id; the LongMemEval paper considers round-level decomposition in §3.1 and §5.2. LoCoMo stores each turn as a record, prefixed with its session date and speaker.
+- **Retrieval into the reader's context.** `memory_recall(mode="context")`: LongMemEval takes the top 20 rounds and adds 2 neighbouring rounds of the same session on each side (`--limit 20 --neighbors 2`) within a 48,000-character budget shared by rank; LoCoMo takes the top 50 turns with 1 neighbour on each side within 60,000 characters. The cross-encoder re-ranks the fused candidates in both. The context averaged about 9,000 tokens on LongMemEval and 3,000 on LoCoMo.
 
 ## How Mem0's published numbers were produced
 
@@ -100,3 +120,15 @@ python benchmarks/retrieval_eval.py --bench locomo --store /tmp/tam/locomo --spl
 - Mem0's answers are its published ones: its retrieval was not re-run, so the comparison takes its best reported run, re-runs included.
 - The English preset uses an English-only embedding model (`BAAI/bge-base-en-v1.5`); TAM's default is multilingual, and that default is the row below it.
 - No other system was graded. Zep's and ByteRover's per-question answers are not published.
+
+## Revisions
+
+2026-09-24, after an external review that recalculated every LongMemEval accuracy cell, paired win/loss count and exact sign-test p from the saved verdicts at `4e8c81a` and found them in agreement:
+
+- The introduction said one judge model and two prompts; that holds for LoCoMo only. The LongMemEval configurations differ in judge model and rubric, as `judge_models` in the raw output already recorded.
+- "A tie" became "no statistically detected difference": the test does not demonstrate equivalence.
+- Added the exact split id lists, the per-type table with denominators, the tuning history, and the ingest and context-budget description. No number changed.
+
+External saved-verdict review and reporting feedback: Youngseok Oh (@YS-OH-CORE), with substantial technical analysis, code, and execution assistance from Zero (ChatGPT).
+
+The check covers the six LongMemEval accuracy cells and four paired comparisons from the saved verdicts. It does not certify retrieval, answer generation, fresh judge decisions, tuning independence, overall system quality, or institutional endorsement. The tuning history above was read by the reviewers, not independently audited.
