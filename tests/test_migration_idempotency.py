@@ -224,6 +224,11 @@ def test_repair_lets_upstream_035_and_the_900s_reapply(runner):
     runner.db.execute("DROP TABLE IF EXISTS knowledge_fts")
     runner.db.execute("ALTER TABLE knowledge DROP COLUMN fts_project")
     runner.db.execute("DROP TABLE vector_changes")
+    for (name,) in runner.db.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'vector_revision_%'"
+    ).fetchall():
+        runner.db.execute(f"DROP TRIGGER {name}")
+    runner.db.executescript((ROOT / "migrations" / "032_vector_index_revision.sql").read_text())
     runner.db.execute("DROP INDEX idx_graph_nodes_matchable")
 
     runner.db.execute(
@@ -271,9 +276,27 @@ def test_repair_lets_upstream_035_and_the_900s_reapply(runner):
     objects = {
         r[0] for r in runner.db.execute("SELECT name FROM sqlite_master").fetchall()
     }
-    assert {"vector_changes", "idx_graph_nodes_matchable"} <= objects
+    assert {"vector_changes", "idx_vector_changes_revision", "idx_graph_nodes_matchable"} <= objects
+
+    kid = runner.db.execute(
+        "INSERT INTO knowledge (session_id, type, content, created_at) VALUES (?, ?, ?, ?)",
+        ("s1", "fact", "logged", "2026-01-01T00:00:00Z"),
+    ).lastrowid
+    logged = runner.db.execute(
+        "SELECT COUNT(*) FROM vector_changes WHERE knowledge_id=?", (kid,)
+    ).fetchone()[0]
+    assert logged == 1
 
     assert {"900", "901", "902", "903", "904"} <= _applied(runner)
+
+    repaired = runner.db.execute(
+        "SELECT version, description, applied_at FROM migrations WHERE version IN ('036','037')"
+    ).fetchall()
+    runner._apply_sql_migrations()
+    again = runner.db.execute(
+        "SELECT version, description, applied_at FROM migrations WHERE version IN ('036','037')"
+    ).fetchall()
+    assert [tuple(r) for r in again] == [tuple(r) for r in repaired]
 
 
 def test_repair_does_not_delete_upstreams_own_035_row(runner):
