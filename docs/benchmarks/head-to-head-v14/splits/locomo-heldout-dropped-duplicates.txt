@@ -1,0 +1,12 @@
+# conversation|question texts that occur more than once in conversations 3-9; graded once, as one key
+7|Have Deborah and Jolene been to Rio de Janeiro?
+7|How old are Deborah's cats?
+7|What are Jolene's favorite books?
+7|What are the names of Jolene's snakes?
+7|What do Deborah and Jolene plan to try when they meet in a new cafe?
+7|What games does Jolene recommend for Deborah?
+7|What music pieces does Deborah listen to during her yoga practice?
+7|What projects is Jolene planning for next year?
+7|What was Jolene doing with her partner in Rio de Janeiro?
+7|When did Jolene's parents give her first console?
+7|Where did Deborah get her cats?
