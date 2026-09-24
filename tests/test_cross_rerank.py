@@ -131,6 +131,68 @@ def test_context_view_lifts_a_turn_whose_neighbour_matches_the_question():
     assert encoder.calls == 3
 
 
+class WorldKnowledgeEncoder:
+    """Prefers records naming the real-world value, as a web-trained encoder does."""
+
+    def __init__(self, known):
+        self.known = known
+
+    def rerank(self, query, documents):
+        return [1.0 if any(value in doc for value in self.known) else 0.0 for doc in documents]
+
+
+def dated(*rows):
+    return [{"r": {"id": n, "content": text, "created_at": at}} for n, (text, at) in enumerate(rows)]
+
+
+def test_a_record_stays_below_its_own_later_update():
+    """MemoryAgentBench FC: the encoder lifts the replaced value; its later update must stay above it."""
+    candidates = dated(("The company that produced Windows Vista is Raytheon", "2024-01-02T00:00:00Z"),
+                       ("Pius VI is affiliated with the religion of Jainism", "2024-01-02T00:00:00Z"),
+                       ("The company that produced Windows Vista is Microsoft", "2024-01-01T00:00:00Z"),
+                       ("Pius VI is affiliated with the religion of Catholic Church", "2024-01-01T00:00:00Z"))
+    reranker = ready(WorldKnowledgeEncoder(("Microsoft", "Catholic")), weight=4.0)
+    text_of = lambda i: i["r"]["content"]
+    biased = reranker.rerank("Which company produced Windows Vista?", candidates, text_of, wait=False)
+    assert order(biased)[:2] == [2, 3]
+    fixed = reranker.rerank("Which company produced Windows Vista?", candidates, text_of, wait=False,
+                            recency_of=lambda i: (i["r"]["created_at"], i["r"]["id"]))
+    assert order(fixed) == [0, 1, 2, 3]
+
+
+def test_update_order_keeps_unrelated_records_in_place():
+    ranked = dated(("Jon: nice weather today", "2024-01-05"),
+                   ("Messi's citizenship is Argentina", "2024-01-01"),
+                   ("Gina: thanks!", "2024-01-04"),
+                   ("Messi's citizenship is Armenia", "2024-01-03"),
+                   ("Messi's citizenship is Spain", "2024-01-02"))
+    result = cross_rerank.keep_updates_below(ranked, lambda i: i["r"]["content"],
+                                             lambda i: (i["r"]["created_at"], i["r"]["id"]))
+    assert order(result) == [0, 3, 2, 4, 1]
+
+
+def test_same_time_updates_fall_back_to_insertion_order():
+    ranked = dated(("Anna lives in Paris", "2024-01-01"), ("Anna lives in Rome", "2024-01-01"))
+    result = cross_rerank.keep_updates_below(ranked, lambda i: i["r"]["content"],
+                                             lambda i: (i["r"]["created_at"], i["r"]["id"]))
+    assert order(result) == [1, 0]
+
+
+def test_search_ranks_the_later_update_first(store, monkeypatch):
+    """End to end: a biased encoder cannot lift a value above the record that replaced it."""
+    store.save_knowledge(sid="s1", content="The company that produced Windows Vista is Microsoft", ktype="fact",
+                         project="books", skip_dedup=True)
+    store.save_knowledge(sid="s1", content="The company that produced Windows Vista is Raytheon", ktype="fact",
+                         project="books", skip_dedup=True)
+    monkeypatch.setattr(cross_rerank, "shared_reranker",
+                        lambda: ready(WorldKnowledgeEncoder(("Microsoft",)), weight=4.0))
+    result = server.Recall(store).search(query="Which company produced Windows Vista?", project="books",
+                                         limit=5, detail="full", record_usage=False)
+    texts = [hit["content"] for group in result["results"].values() for hit in group]
+    vista = [text for text in texts if "Windows Vista" in text]
+    assert vista[0].endswith("Raytheon")
+
+
 def test_session_window_texts_stays_inside_the_session(store):
     store.session_start("s2", project="books")
     store.save_knowledge(sid="s2", content="other session turn", ktype="fact", project="books", skip_dedup=True)

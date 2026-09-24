@@ -101,11 +101,14 @@ class CrossReranker:
         return self.multilingual or latin_share(query) >= LATIN_SHARE_REQUIRED
 
     def rerank(self, query: str, items: Sequence[dict], text_of: Callable[[dict], str], *, wait: bool,
-               context_of: Callable[[list[dict]], list[str]] | None = None) -> list[dict]:
+               context_of: Callable[[list[dict]], list[str]] | None = None,
+               recency_of: Callable[[dict], tuple] | None = None) -> list[dict]:
         """`items` in fused order -> the window re-ordered, followed by the rest unchanged.
 
         `context_of(window)` gives each candidate's text with its neighbouring turns; when
         present, the encoder scores both views and the weight is split between them.
+        `recency_of(item)` orders records that update each other's value; see
+        `keep_updates_below`.
         """
         if len(items) < 2 or not self.applies_to(query):
             counters.bump("cross_rerank_skipped")
@@ -133,7 +136,52 @@ class CrossReranker:
         fused = sorted(range(len(window)), key=lambda i: (
             -(1 / (RRF_K + i + 1) + sum(share / (RRF_K + rank[i] + 1) for rank in ranks)), i))
         counters.bump("cross_rerank_applied")
-        return [window[i] for i in fused] + list(items[self.window:])
+        reordered = [window[i] for i in fused]
+        if recency_of is not None:
+            reordered = keep_updates_below(reordered, text_of, recency_of)
+        return reordered + list(items[self.window:])
+
+
+def keep_updates_below(ranked: list[dict], text_of: Callable[[dict], str],
+                       recency_of: Callable[[dict], tuple]) -> list[dict]:
+    """Put each record below its own later update.
+
+    A web-trained encoder knows the real-world value: it ranks "Windows Vista
+    was produced by Microsoft" above the later record "... by Raytheon" that
+    replaced it. Records that state different values for the same statement
+    (`dedup.updates_value`) form a group; the group keeps the places the
+    encoder gave it, filled newest first. Other records keep their places.
+    """
+    from memory_core.dedup import tokens_update_value, value_tokens
+
+    tokens = [value_tokens(text_of(item)) for item in ranked]
+    parent = list(range(len(ranked)))
+
+    def root(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(ranked)):
+        for j in range(i + 1, len(ranked)):
+            if root(i) != root(j) and tokens_update_value(tokens[i], tokens[j]):
+                parent[root(j)] = root(i)
+    groups: dict[int, list[int]] = {}
+    for i in range(len(ranked)):
+        groups.setdefault(root(i), []).append(i)
+    out = list(ranked)
+    moved = False
+    for places in groups.values():
+        if len(places) < 2:
+            continue
+        newest_first = sorted(places, key=lambda i: recency_of(ranked[i]), reverse=True)
+        for place, source in zip(places, newest_first):
+            out[place] = ranked[source]
+        moved = moved or newest_first != places
+    if moved:
+        counters.bump("cross_rerank_update_order_restored")
+    return out
 
 
 def session_window_texts(db, rows: Sequence[dict], *, side_chars: int) -> dict[int, str]:

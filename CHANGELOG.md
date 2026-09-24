@@ -4,6 +4,10 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+## [14.5.1] - 2026-09-24
+
+- Recall no longer ranks a record above its own later update. The cross-encoder that 14.5.0 turned on is trained on web search and knows the real-world value, so it lifted "The company that produced Windows Vista is Microsoft" above the later record "… is Raytheon" that replaced it. After re-ranking, records that give different values for the same statement (same opening words, a different trailing value — the rule `memory_save(supersede=true)` uses) keep the places the encoder gave them, filled newest first; every other record keeps its place. On MemoryAgentBench FactConsolidation single-hop 6k, the newest value now ranks first for 98 of 100 questions (45 in 14.5.0; the gold value is among the top 10 for all 100 in both). The development splits do not move beyond noise: LoCoMo 92.73 vs 92.99 (2 answers better, 3 worse, 337 of 385 identical), LongMemEval 92.0 vs 92.0 (all 100 answers identical). MemoryAgentBench results and what changed in the adapter: `docs/benchmarks/memoryagentbench/FINDINGS.md`.
+
 ## [14.5.0] - 2026-09-23
 
 - The cross-encoder also reads each candidate together with the turns before and after it in its session, and both verdicts join the fused rank. A conversational turn often answers a question only next to its neighbour — "What was it about?" / "Self-acceptance and trans stories" — and the turn alone shares no word with the question. On the LoCoMo development conversations, every evidence turn of a question reaches the context for 81.8% of questions (80.3% before; multi-hop 41.9% → 45.9%), recall@10 rises from 80.3% to 82.3%, and recall@1 stays near 48% (`benchmarks/retrieval_eval.py`). `MEMORY_CROSS_RERANK_CONTEXT` sets how many characters of each neighbour it reads (400; `0` scores the record alone).

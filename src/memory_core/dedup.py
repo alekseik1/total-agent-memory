@@ -63,7 +63,16 @@ def updates_value(new: str, stored: str) -> bool:
     retract "likes rock") and on logs with a shared header, so callers opt in
     per record (`memory_save(supersede=true)`).
     """
-    a, b = _tokens(new), _tokens(stored)
+    return tokens_update_value(_tokens(new), _tokens(stored))
+
+
+def value_tokens(text: str) -> list[str]:
+    """Tokens in the form `tokens_update_value` compares."""
+    return _tokens(text)
+
+
+def tokens_update_value(a: list[str], b: list[str]) -> bool:
+    """`updates_value` on texts already split by `value_tokens`."""
     if not a or not b or a == b:
         return False
     prefix = 0
