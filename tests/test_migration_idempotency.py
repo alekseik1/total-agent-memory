@@ -210,10 +210,9 @@ def test_lineage_columns_have_exactly_one_owner(tmp_path, monkeypatch):
 def test_repair_lets_upstream_035_and_the_900s_reapply(runner):
     """Reproduces a live database's actual state: migrations 001-034
     applied for real, these five migrations still recorded at 035-039 under
-    their v14.2.0 descriptions, the real 035 (fts_project_token) never run.
-    The repair block must delete the stale 035-039 rows so the real 035
-    re-applies for real (not a copy of its DDL) and these five migrations
-    re-apply under 900-904.
+    their v14.2.0 descriptions, the real 035-037 never run. The repair block
+    must delete the stale 035-039 rows so the real 035-037 re-apply for real
+    (not a copy of their DDL) and these five migrations re-apply under 900-904.
     """
     runner._apply_sql_migrations()  # clean baseline: everything applied once
 
@@ -224,9 +223,12 @@ def test_repair_lets_upstream_035_and_the_900s_reapply(runner):
     runner.db.execute("DROP TRIGGER IF EXISTS k_fts_d")
     runner.db.execute("DROP TABLE IF EXISTS knowledge_fts")
     runner.db.execute("ALTER TABLE knowledge DROP COLUMN fts_project")
+    runner.db.execute("DROP TABLE vector_changes")
+    runner.db.execute("DROP INDEX idx_graph_nodes_matchable")
 
     runner.db.execute(
-        "DELETE FROM migrations WHERE version IN ('035','900','901','902','903','904')"
+        "DELETE FROM migrations WHERE version IN "
+        "('035','036','037','900','901','902','903','904')"
     )
     for version, description in [
         ("035", "reflection phase errors"),
@@ -257,10 +259,19 @@ def test_repair_lets_upstream_035_and_the_900s_reapply(runner):
     }
     assert "k_fts_d" in triggers
 
-    stale = runner.db.execute(
-        "SELECT version FROM migrations WHERE version IN ('036','037','038','039')"
+    rows = runner.db.execute(
+        "SELECT version, description FROM migrations "
+        "WHERE version IN ('036','037','038','039') ORDER BY version"
     ).fetchall()
-    assert stale == []
+    assert [tuple(r) for r in rows] == [
+        ("036", "vector change log"),
+        ("037", "graph matchable names"),
+    ]
+
+    objects = {
+        r[0] for r in runner.db.execute("SELECT name FROM sqlite_master").fetchall()
+    }
+    assert {"vector_changes", "idx_graph_nodes_matchable"} <= objects
 
     assert {"900", "901", "902", "903", "904"} <= _applied(runner)
 
