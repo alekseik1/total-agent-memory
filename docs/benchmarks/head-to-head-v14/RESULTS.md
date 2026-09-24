@@ -128,3 +128,7 @@ python benchmarks/retrieval_eval.py --bench locomo --store /tmp/tam/locomo --spl
 - The introduction said one judge model and two prompts; that holds for LoCoMo only. The LongMemEval configurations differ in judge model and rubric, as `judge_models` in the raw output already recorded.
 - "A tie" became "no statistically detected difference": the test does not demonstrate equivalence.
 - Added the exact split id lists, the per-type table with denominators, the tuning history, and the ingest and context-budget description. No number changed.
+
+External saved-verdict review and reporting feedback: Youngseok Oh (@YS-OH-CORE), with substantial technical analysis, code, and execution assistance from Zero (ChatGPT).
+
+The check covers the six LongMemEval accuracy cells and four paired comparisons from the saved verdicts. It does not certify retrieval, answer generation, fresh judge decisions, tuning independence, overall system quality, or institutional endorsement. The tuning history above was read by the reviewers, not independently audited.
