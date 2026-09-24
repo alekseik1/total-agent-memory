@@ -6,7 +6,11 @@ figures (github.com/mem0ai/memory-benchmarks, results/platform/*.json: gpt-5
 answering from the top 200 memories, gpt-5 judging). This script takes those
 answers and the answers the TAM harnesses wrote (`locomo_qa.py`,
 `longmemeval_qa.py`), restricts both to the same held-out questions, and grades
-every answer twice with one judge model:
+every answer under two judges; within a judge, both systems' answers get the
+same model and prompt. `published` keeps each benchmark's own judge model
+(gpt-4o-mini for LoCoMo, gpt-4o-2024-08-06 for LongMemEval); `mem0` runs on
+--mem0-judge-model, which defaults to the same model. The report's LongMemEval
+run set it to gpt-4o-mini, so there the two judges differ in model and rubric:
 
 * `published` — the judge the public numbers used before 2026: for LoCoMo the
   prompt Zep and Mem0 published (verbatim in locomo_qa.py), for LongMemEval

@@ -25,14 +25,15 @@
 
 ---
 
-## Version 14.5.0 — on par with Mem0 Platform on LoCoMo and LongMemEval
+## Version 14.5.0 — no significant difference from Mem0 Platform on LoCoMo and LongMemEval
 
 **Release date: 2026-09-23.**
 
 Mem0 publishes the per-question answers behind its LoCoMo and LongMemEval figures. We graded
-them and TAM's answers to the same held-out questions with the same judge model and two judge
-prompts — the one the public numbers used and Mem0's current one
-([report and how to reproduce it](docs/benchmarks/head-to-head-v14/RESULTS.md)):
+them and TAM's answers to the same held-out questions under two grading configurations each — the
+judge the public numbers used and Mem0's current one. Within a configuration both systems' answers
+go through the same judge model and prompt; the two LongMemEval configurations differ in both judge
+model and rubric ([report, protocol and how to reproduce it](docs/benchmarks/head-to-head-v14/RESULTS.md)):
 
 | Held-out questions, accuracy % | LoCoMo (1,144), published judge | LoCoMo, Mem0 judge | LongMemEval-S (400), official judge | LongMemEval-S, Mem0 judge |
 |---|---:|---:|---:|---:|
@@ -42,8 +43,9 @@ prompts — the one the public numbers used and Mem0's current one
 
 ¹ English embedding preset (`MEMORY_TEXT_EMBED_MODEL=BAAI/bge-base-en-v1.5`); with the default
 multilingual model, 87.50 and 92.57. No difference between TAM and Mem0 Platform at the same
-answering model is statistically significant — a tie, with TAM retrieving locally and calling no
-LLM when it writes or searches. The report also lists how Mem0's published setup differs from the
+answering model is statistically significant on these questions. That is not a demonstrated
+equivalence, and the reported split was not scored blind (the report gives the tuning history); TAM
+gets there retrieving locally and calling no LLM when it writes or searches. The report also lists how Mem0's published setup differs from the
 earlier public protocol: a more lenient judge, 156 re-run questions, and answer-prompt hints that
 match individual LoCoMo gold answers.
 
@@ -306,7 +308,7 @@ Optional remote LLM providers receive the content used in those tasks. Keep Olla
 
 ## Table of contents
 
-- [Version 14.5.0 — on par with Mem0 Platform on LoCoMo and LongMemEval](#version-1450--on-par-with-mem0-platform-on-locomo-and-longmemeval)
+- [Version 14.5.0 — no significant difference from Mem0 Platform on LoCoMo and LongMemEval](#version-1450--no-significant-difference-from-mem0-platform-on-locomo-and-longmemeval)
 - [Version 14.4.0 — opt-in fact supersession, cheaper writes at 1M records](#version-1440--opt-in-fact-supersession-cheaper-writes-at-1m-records)
 - [Version 14.3.1 — updates are no longer dropped, recall stays fast at 1M records](#version-1431--updates-are-no-longer-dropped-recall-stays-fast-at-1m-records)
 - [Version 14.3.0 — Jev as the contradiction checker](#version-1430--jev-as-the-contradiction-checker)
