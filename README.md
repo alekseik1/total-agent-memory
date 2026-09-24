@@ -6,7 +6,7 @@
 > Persistent, local memory for AI coding agents: Claude Code, Codex CLI, Cursor, any MCP client.
 > Temporal knowledge graph · procedural memory · AST codebase ingest · cross-project analogy · 3D WebGL visualization.
 
-[![Version](https://img.shields.io/badge/version-14.5.0-8ad.svg)](https://pypi.org/project/total-agent-memory/)
+[![Version](https://img.shields.io/badge/version-14.5.1-8ad.svg)](https://pypi.org/project/total-agent-memory/)
 [![Tests](https://img.shields.io/badge/tests-2162%20passing-4a9.svg)](docs/benchmarks/release-final-v14-20260915/RESULTS.md)
 [![IDEs](https://img.shields.io/badge/IDEs-9%20supported-4a9.svg)]()
 [![LongMemEval R@5](https://img.shields.io/badge/LongMemEval%20R@5-95.1%25-4a9.svg)](evals/longmemeval-2026-08-27-v13-store.json)
@@ -203,14 +203,14 @@ Install the candidate wheel in a dedicated environment. Linux/macOS:
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./dist/total_agent_memory-14.5.0-py3-none-any.whl
+python -m pip install ./dist/total_agent_memory-14.5.1-py3-none-any.whl
 ```
 
 Windows PowerShell, using the environment directly without changing the execution policy:
 
 ```powershell
 py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install .\dist\total_agent_memory-14.5.0-py3-none-any.whl
+.\.venv\Scripts\python.exe -m pip install .\dist\total_agent_memory-14.5.1-py3-none-any.whl
 $env:PATH = "$PWD\.venv\Scripts;$env:PATH"
 ```
 
@@ -769,7 +769,7 @@ These are the published distribution channels. For the unpublished v14 candidate
 | **uvx** (Python via uv) | `uvx total-agent-memory` | One-off run with no install. Best for trying without commitment. |
 | **pipx** (Python isolated) | `pipx install total-agent-memory` | Installs the `total-agent-memory`, `tam`, `tam-lookup`, `lookup-memory` binaries on PATH in an isolated venv. |
 | **brew** (macOS / Linuxbrew) | `brew install vbcherepanov/tap/total-memory` | Bottle-style install with `tam` and legacy `claude-total-memory` symlinks. |
-| **Docker** (multi-arch) | `docker run -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:14.5.0` | Containerized (linux/amd64 + linux/arm64). Dashboard on `:37737`. |
+| **Docker** (multi-arch) | `docker run -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:14.5.1` | Containerized (linux/amd64 + linux/arm64). Dashboard on `:37737`. |
 | **Claude Code plugin** | `/plugin marketplace add vbcherepanov/total-agent-memory`<br>`/plugin install total-agent-memory@vbcherepanov` | Installs the MCP server, the `memory-protocol` skill and all seven capture hooks in one step, from inside Claude Code. The bootstrap reuses an existing install if it finds one, so nothing is downloaded twice. |
 | **Manual clone** | `git clone https://github.com/vbcherepanov/total-agent-memory ~/total-agent-memory && cd ~/total-agent-memory && ./install.sh --ide claude-code` | Full control. Lets you hack on the server, run benchmarks, and pick which background services to enable. Detailed walkthrough below. |
 

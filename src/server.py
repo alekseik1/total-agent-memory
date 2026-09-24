@@ -3475,9 +3475,13 @@ class Recall:
                     texts = session_window_texts(db, [item["r"] for item in window], side_chars=cross.context_chars)
                     return [texts.get(item["r"]["id"], item["r"].get("content", "")) for item in window]
 
+                def recency(item):
+                    return item["r"].get("created_at") or "", item["r"]["id"]
+
                 ranked = cross.rerank(query, ranked, lambda item: item["r"].get("content", ""),
                                       wait=get_cross_rerank_mode() == "on",
-                                      context_of=with_neighbours if cross.context_chars else None)
+                                      context_of=with_neighbours if cross.context_chars else None,
+                                      recency_of=recency)
             except Exception as e:  # noqa: BLE001 — onnxruntime raises its own types; keep the fused order
                 from memory_core.telemetry import counters as _cross_counters
                 LOG(f"cross-rerank failed, keeping fused order: {e}")

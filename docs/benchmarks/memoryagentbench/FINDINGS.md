@@ -6,7 +6,8 @@ total-agent-memory as a memory method in [MemoryAgentBench](https://github.com/H
 
 - **Store.** TAM 14.3.1 (the release that fixes dedup, see `CHANGELOG.md`) runs as its own process over MCP stdio, in fast mode. It gets a fresh `TAM_MEMORY_DIR` per context and no API keys, so it makes no LLM calls.
 - **Write.** The context is parsed into one fact per record, in context order. The parser is the harness's `parse_fact_lines`, the same one the knowl and agentmemory methods use. Each fact is one `memory_save` (`type=fact`), called sequentially, so recorded times grow with position.
-- **Read.** `memory_recall` with `limit=10` and `detail=full` runs on the question that `_extract_retrieval_query` extracts. Hits keep TAM's rank order. The reader assembly is shared with the RAG family (`Memory i:` labels, instruction after the facts, generic system message) and is the same as knowl and agentmemory.
+- **Read.** `memory_recall` with `limit=10` and `detail=full` runs on the question that `_extract_retrieval_query` extracts. The reader assembly is shared with the RAG family (`Memory i:` labels, instruction after the facts, generic system message) and is the same as knowl and agentmemory.
+- **Order of the hits.** Since the 14.5.x runs, the adapter hands the reader TAM's top 10 in the order they were recorded, oldest first. The FC instruction says a larger serial number is a newer fact, and the only serial numbers the reader sees are the `Memory i` labels, so presenting the hits in rank order tells it that the lowest-ranked hit is the newest (finding 7). The 14.3.x and 14.4.0 rows and the `rankorder` rows below used rank order. Recorded order carries recency even in the `nodates` config, so from 14.5.x on `nodates` no longer isolates the recorded date.
 - **Two configs.** They differ only in whether the reader sees each hit's recorded time:
   - `dates` prefixes each hit with `[recorded 2026-09-21T13:05:59.181144Z]`;
   - `nodates` passes the fact text alone.
@@ -15,17 +16,25 @@ total-agent-memory as a memory method in [MemoryAgentBench](https://github.com/H
 
 ## Results
 
-SubEM; each TAM figure is one run. The 14.3.1 rows are the 14.3.1 release code, the supersede row is the 14.4.0 code.
+SubEM; each TAM figure is one run. The 14.3.1 rows are the 14.3.1 release code, the supersede row is the 14.4.0 code, the 14.5.x rows are the release code. Rows marked *rank order* present the hits in TAM's rank order; the 14.5.x rows without the mark present them in recorded order.
 
 | | FC-SH 6k | FC-SH 262k | FC-MH 6k | FC-MH 262k |
 |---|---:|---:|---:|---:|
-| TAM 14.4.0, supersede | 99.0 | 93.0 | 27.0 | 9.0 |
-| TAM 14.3.1, dates | 82.0 | 85.0 | 13.0 | 3.0 |
-| TAM 14.3.1, no dates | 71.0 | 81.0 | 11.0 | 6.0 |
+| TAM 14.5.1, dates | 100.0 | 91.0 | 18.0 | 5.0 |
+| TAM 14.5.1, no dates | 98.0 | 92.0 | 24.0 | 8.0 |
+| TAM 14.5.0, dates | 98.0 | 92.0 | 16.0 | 7.0 |
+| TAM 14.5.0, no dates | 97.0 | 91.0 | 22.0 | 7.0 |
+| TAM 14.5.0, dates, *rank order* | 88.0 | 78.0 | 11.0 | 5.0 |
+| TAM 14.5.0, no dates, *rank order* | 73.0 | 65.0 | 11.0 | 5.0 |
+| TAM 14.4.0, supersede, *rank order* | 99.0 | 93.0 | 27.0 | 9.0 |
+| TAM 14.3.1, dates, *rank order* | 82.0 | 85.0 | 13.0 | 3.0 |
+| TAM 14.3.1, no dates, *rank order* | 71.0 | 81.0 | 11.0 | 6.0 |
 | BM25 (this harness, same run setup) | 83.0 | 46.0 | 12.0 | 3.0 |
 | knowl (PR #23) | 95.0 | 89.0 | — | — |
 | agentmemory (PR #23) | 83.0 | 79.0 | — | — |
-| TAM 14.3.0, dates | 71.0 | — | — | — |
+| TAM 14.3.0, dates, *rank order* | 71.0 | — | — | — |
+
+knowl and agentmemory present their hits in rank order too, as far as their modules show; the 14.5.x rows are therefore not like-for-like with them. BM25 retrieves 4096-character chunks that keep the facts' own serial numbers, so its reader sees the real order.
 
 - **Run-to-run spread.** FC-SH was run three times at temperature 0.7, during development and on the release code. With dates the scores were 80 / 84 / 82 on 6k and 86 / 86 / 85 on 262k; without dates 71 / 72 / 71 and 79 / 80 / 81. The earlier two runs predate a change to how exact repeats are stored, which touched one fact in FC-SH 262k and none in FC-SH 6k.
 - **Cost.** The 14.3.x runs in this directory cost $1.65 of gpt-4o-mini in total (11.0M input tokens).
@@ -39,11 +48,14 @@ SubEM; each TAM figure is one run. The 14.3.1 rows are the 14.3.1 release code, 
 4. **FC-MH is near floor for every method measured here.** Two-hop questions need the intermediate entity, which a single retrieval on the question rarely returns.
 5. **14.3.0 lost facts on write.** Its dedup treated near-identical texts as repeats, so 36 of the 455 FC-SH 6k facts, all of them updates, were never stored, and the score was 71.0. 14.3.1 stores a record unless it has the same words in the same order as one already stored; an exact repeat replaces the stored record, so it carries the later date. In FC-SH 262k that happens once, a case-only repeat ("Safety is associated with…" / "safety is associated with…").
 6. **Retiring the old value at write time closes most of the FC-SH gap.** With `supersede`, the reader no longer has to pick between conflicting values: FC-SH goes from 82 / 85 to 99 / 93 and FC-MH from 13 / 3 to 27 / 9, above knowl (95 / 89) on FC-SH. The rule fits this dataset, where every fact is single-valued. On a real 5,128-record store it would have retired 138 records that were not updates (multi-valued relations such as "likes jazz" / "likes rock", logs with a shared header), which is why it is opt-in per record and not the default.
+7. **Presentation order decided more than retrieval, and 14.5.0's regression was mostly that.** 14.5.0 turned on a web-trained cross-encoder that ranks the real-world value above the recorded update ("Windows Vista" → Microsoft above the later "Raytheon"); in rank order FC-SH fell from 82 / 85 to 88 / 78 with dates and from 71 / 81 to 73 / 65 without. 14.5.1 keeps a record below its own later update after re-ranking: on FC-SH 6k the newest value ranks first for 98 of 100 questions instead of 45 (gold value in the top 10 for all 100 in both). In rank order that made the scores *worse* (27 on FC-SH 6k without dates in a run we stopped), because the reader took the last `Memory i` as the newest and the newest now came first. Presented in recorded order, 14.5.0 and 14.5.1 score within two points of each other on every FC-SH cell (97–100 on 6k, 91–92 on 262k). The earlier figures in this table therefore understate what the retrieval found, and part of 14.3.1's advantage over 14.5.0 in rank order came from older values happening to rank higher.
 
 ## Files
 
 `raw/<run>/<dataset>.json` are the harness's result files, with every question, answer, model output and metric:
 
+- `tam-14.5.1-dates`, `tam-14.5.1-nodates`, `tam-14.5.0-dates`, `tam-14.5.0-nodates`: recorded-order runs of the two releases, same adapter, same day.
+- `tam-14.5.0-rankorder-dates`, `tam-14.5.0-rankorder-nodates`: 14.5.0 with the hits in rank order.
 - `tam-14.3.1-dates`, `tam-14.3.1-nodates`: the release-code runs in the table.
 - `tam-14.4.0-supersede`: the `supersede` config on the 14.4.0 code.
 - `run1-*`, `run2-*`: the two earlier FC runs (spread).
