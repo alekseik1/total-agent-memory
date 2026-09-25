@@ -121,12 +121,12 @@ def test_queue_stores_valid_compressed(cmp_db):
 @pytest.mark.parametrize(
     "original",
     [
-        pytest.param("Docs at https://critical.example/doc - do not lose this URL. " * 30, id="url"),
+        pytest.param("Docs at https://critical.example/doc — do not lose this URL. " * 30, id="url"),
         pytest.param("Edit /Users/alice/project/src/server.py - do not lose this path. " * 30, id="path"),
     ],
 )
-def test_queue_rejects_compressed_that_loses_url_or_path(cmp_db, original):
-    """Compressed output missing a URL or path is silently dropped (raw still stored)."""
+def test_queue_rejects_compressed_that_loses_url(cmp_db, original):
+    """Compressed output missing URLs is silently dropped (raw still stored)."""
     from representations_queue import RepresentationsQueue
 
     q = RepresentationsQueue(cmp_db)
@@ -134,7 +134,7 @@ def test_queue_rejects_compressed_that_loses_url_or_path(cmp_db, original):
     q.enqueue(kid)
 
     def bad_gen(content, project=None):
-        return {"compressed": "Short version without it."}
+        return {"compressed": "Short version without the URL."}
 
     stats = q.process_pending(bad_gen, _fake_emb, "fake", limit=1)
     assert stats["processed"] == 1  # processing completed
