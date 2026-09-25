@@ -291,11 +291,17 @@ class Store:
         # only happens when the first session of the day opens the db. Use a
         # short timeout so a busy result (the common case) fails fast instead
         # of stalling startup.
+        # A successful TRUNCATE reports (0, 0, 0), so the size to log is read
+        # from the file before the checkpoint.
+        wal_path = self.db_path.with_name(self.db_path.name + "-wal")
+        wal_bytes = wal_path.stat().st_size if wal_path.exists() else 0
         try:
             self.db.execute(f"PRAGMA busy_timeout={DB_STARTUP_CHECKPOINT_TIMEOUT_MS}")
             row = self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            if row and row[0] == 0:
-                LOG(f"WAL checkpoint: truncated ({row[2]} pages)")
+            if row and row[0] != 0:
+                LOG(f"WAL checkpoint busy: {row[1]} log frames, {row[2]} checkpointed")
+            elif wal_bytes:
+                LOG(f"WAL checkpoint: truncated {wal_bytes} bytes")
         except sqlite3.OperationalError as exc:
             LOG(f"WAL checkpoint skipped: {exc}")
         finally:
