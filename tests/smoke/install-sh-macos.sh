@@ -4,7 +4,7 @@
 # dashboard process starts and answers HTTP 200.
 #
 # Must run on a real macOS host (launchctl requires Darwin).
-# Uses a sandbox HOME so it doesn't touch the real user setup.
+# Uses a sandbox HOME and a stub launchctl so it doesn't touch the real user setup.
 #
 # Required: bash 3.2+, launchctl, python3 ≥ 3.10.
 #
@@ -13,6 +13,7 @@
 #   2 — placeholder leak in plist
 #   3 — wrong path in plist
 #   4 — dashboard didn't come up
+#   5 - Step 5 did not bootout and bootstrap every plist through the launchctl stub
 set -euo pipefail
 
 [ "$(uname)" = "Darwin" ] || { echo "SKIP: macOS-only smoke"; exit 0; }
@@ -24,16 +25,17 @@ echo "→ sandbox HOME = $SANDBOX"
 
 cleanup() {
   echo "→ cleanup"
-  for label in com.total-agent-memory.dashboard com.claude.memory.reflection \
-               com.claude.memory.orphan-backfill com.claude.memory.check-updates; do
-    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-  done
   rm -rf "$SANDBOX"
 }
 trap cleanup EXIT
 
+mkdir -p "$SANDBOX/bin"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexit 0\n' "$SANDBOX/launchctl.log" > "$SANDBOX/bin/launchctl"
+chmod +x "$SANDBOX/bin/launchctl"
+
 echo "→ running install.sh in sandbox (skip pip/model)"
 HOME="$SANDBOX" \
+PATH="$SANDBOX/bin:$PATH" \
 INSTALL_TEST_MODE=skip-heavy \
 TAM_MEMORY_DIR="$SANDBOX/.tam" \
 bash "$REPO_ROOT/install.sh" --ide claude-code 2>&1 | tail -5
@@ -80,6 +82,14 @@ for plist in "$LA_DIR"/*.plist; do
   fi
 done
 echo "  ✓ all plists substituted correctly"
+
+[ -s "$SANDBOX/launchctl.log" ] || { echo "FAIL: launchctl stub never called"; exit 5; }
+for plist in "$LA_DIR"/*.plist; do
+  grep -qxF "bootout gui/$(id -u)/$(basename "$plist" .plist)" "$SANDBOX/launchctl.log" || {
+    echo "FAIL: no stub bootout for $plist"; exit 5; }
+  grep -qxF "bootstrap gui/$(id -u) $plist" "$SANDBOX/launchctl.log" || {
+    echo "FAIL: no stub bootstrap for $plist"; exit 5; }
+done
 
 echo "✓ install.sh smoke OK (plists valid; dashboard not exercised here because"
 echo "  pip was skipped — see install-docker-pull.sh for runtime smoke)"
