@@ -126,7 +126,7 @@ def test_queue_stores_valid_compressed(cmp_db):
     ],
 )
 def test_queue_rejects_compressed_that_loses_url(cmp_db, original):
-    """Compressed output missing URLs is silently dropped (raw still stored)."""
+    """Compressed output missing URLs or paths is silently dropped (raw still stored)."""
     from representations_queue import RepresentationsQueue
 
     q = RepresentationsQueue(cmp_db)

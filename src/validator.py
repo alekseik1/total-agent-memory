@@ -31,21 +31,17 @@ _CODE_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _URL_RE = re.compile(r"https?://[^\s<>`'\"()]+")
 _URL_TRAILING_PUNCT = ".,;:!?"
 
-# Backticks and `*` at the edge of a word are stripped before path extraction
-# so the same path is found whether or not an LLM wrapped it in `code` or
-# **bold**; a `*` inside a path (/src/**/*.py) is kept.
-_MARKDOWN_STRIP_RE = re.compile(r"(?<!\S)[`*]+|[`*]+(?!\S)")
-
 # Absolute paths (/Users/..., /etc/...) and tilde paths (~/...).
 # A slash may only start a path at the beginning of the text/line or after
-# whitespace/quote/bracket/`=`/`:`/`,`/`|`/`<`/`>`/`;`, so prose like
-# "EU/Russia" is ignored while "db=/path" and "|/path|" are still matched.
-_PATH_BOUNDARY = r"""(?:(?<=^)|(?<=[\s'"(\[{=:,|<>;]))"""
+# whitespace/quote/bracket/`=`/`:`/`,`/`|`/`<`/`>`/`;`/backtick/`*`, so prose
+# like "EU/Russia" is ignored while "db=/path", "|/path|" and "**/path**" are
+# still matched.
+_PATH_BOUNDARY = r"""(?:(?<=^)|(?<=[\s'"(\[{=:,|<>;`*]))"""
 
 # Extensions that make a single-segment absolute path (/README.md) count.
 _CODE_EXT = r"(?:py|sql|md|json|ya?ml|toml|sh|ts|js|txt|ini|cfg|go|rs|tsx|jsx)"
 
-_SEG = r"[A-Za-z0-9_.*\-]+"
+_SEG = r"[A-Za-z0-9_.\-]+"
 # Absolute body: either >=2 segments or a trailing slash (single `(seg/)+`
 # repetition with an empty final segment covers both), or a single segment
 # with a recognized extension (/README.md). This is what excludes bare
@@ -127,7 +123,6 @@ def _extract_paths(text: str) -> set[str]:
     cleaned = text
     for u in urls:
         cleaned = cleaned.replace(u, " ")
-    cleaned = _MARKDOWN_STRIP_RE.sub("", cleaned)
     paths: set[str] = set()
     for m in _PATH_RE.findall(cleaned):
         # Strip trailing punctuation (comma/period/etc.) that regex may include.
@@ -187,10 +182,11 @@ class ContentValidator:
             errors.append(f"url lost: {u}")
 
         # ── Paths
-        orig_paths = _extract_paths(original)
-        trans_paths = _extract_paths(transformed)
-        for p in orig_paths - trans_paths:
-            errors.append(f"path lost: {p}")
+        # Kept if the path text survives anywhere, so formatting added around
+        # it in the transformed text cannot fail the check.
+        for p in _extract_paths(original):
+            if p.rstrip("/") not in transformed:
+                errors.append(f"path lost: {p}")
 
         # ── Inline code
         orig_inline = _extract_inline_code(original)

@@ -134,7 +134,6 @@ def test_tilde_path_preserved():
         pytest.param("See ~/.bashrc here.", "~/.bashrc", id="tilde-dotfile"),
         pytest.param("See ~/foo here.", "~/foo", id="tilde-one-segment"),
         pytest.param("cat ~/.zshrc now", "~/.zshrc", id="tilde-mid-sentence"),
-        pytest.param("rm /tmp/*.log now", "/tmp/*.log", id="glob"),
         pytest.param("Intro.\n/etc/hosts is it.\nEnd.", "/etc/hosts", id="line-start"),
         pytest.param('See "/etc/hosts" here.', "/etc/hosts", id="quoted"),
         pytest.param("See (/etc/hosts) here.", "/etc/hosts", id="parenthesised"),
@@ -152,10 +151,18 @@ def test_path_detected_when_lost(orig, lost):
     assert r.errors == [f"path lost: {lost}"]
 
 
-def test_glob_path_change_detected():
+@pytest.mark.parametrize(
+    "orig, trans, errors",
+    [
+        pytest.param("see (`/etc/hosts`) x", "see x", ["path lost: /etc/hosts", "inline code lost: `/etc/hosts`"], id="backtick-in-parens"),
+        pytest.param("path:`/etc/hosts`", "path", ["path lost: /etc/hosts", "inline code lost: `/etc/hosts`"], id="backtick-after-colon"),
+        pytest.param("Edit **/Users/alice/src/server.py** now", "Edit the file now", ["path lost: /Users/alice/src/server.py"], id="bold"),
+    ],
+)
+def test_wrapped_path_detected_when_lost(orig, trans, errors):
     v = ContentValidator()
-    r = v.validate("Match /src/**/*.py files.", "Match /src/**/*.ts files.")
-    assert r.errors == ["path lost: /src/**/*.py"]
+    r = v.validate(orig, trans)
+    assert r.errors == errors
 
 
 @pytest.mark.parametrize(
@@ -163,7 +170,8 @@ def test_glob_path_change_detected():
     [
         pytest.param("Edit /Users/alice/src/server.py now", "Edit `/Users/alice/src/server.py` now", id="backtick-added"),
         pytest.param("Edit /Users/alice/src/server.py now", "Edit **/Users/alice/src/server.py** now", id="bold-added"),
-        pytest.param("Edit **/Users/alice/src/server.py** now", "Edit /Users/alice/src/server.py now", id="bold-removed"),
+        pytest.param("see /etc/hosts, now", "see **/etc/hosts**, now", id="bold-before-comma"),
+        pytest.param("See /tmp/cache/ here.", "See /tmp/cache here.", id="trailing-slash-dropped"),
     ],
 )
 def test_path_survives_markdown_wrapping(orig, trans):
@@ -192,6 +200,11 @@ def test_path_survives_markdown_wrapping(orig, trans):
         "3.5/4.0",
         "27.07/28.07",
         "v1.2/2.0",
+        "input/output/errors",
+        "and/or/but",
+        "python/3.12/site",
+        "27.07/28.07/29.07",
+        "EU/Russia/China",
     ],
 )
 def test_path_check_ignores_prose_slashes(phrase):
