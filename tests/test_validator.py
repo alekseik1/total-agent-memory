@@ -100,19 +100,18 @@ def test_multiple_urls_preserved():
 
 def test_absolute_path_preserved():
     v = ContentValidator()
-    orig = "Edit /Users/alice/project/src/server.py"
-    trans = "Edit /Users/alice/project/src/server.py now."
+    orig = "Edit /Users/x/project/src/server.py"
+    trans = "Edit /Users/x/project/src/server.py now."
     r = v.validate(orig, trans)
     assert r.ok
 
 
 def test_absolute_path_lost_fails():
     v = ContentValidator()
-    path = "/Users/alice/project/src/server.py"
-    orig = f"Edit {path}"
+    orig = "Edit /Users/x/project/src/server.py"
     trans = "Edit the server file."
     r = v.validate(orig, trans)
-    assert r.errors == [f"path lost: {path}"]
+    assert r.errors == ["path lost: /Users/x/project/src/server.py"]
 
 
 def test_tilde_path_preserved():
@@ -124,57 +123,53 @@ def test_tilde_path_preserved():
 
 
 @pytest.mark.parametrize(
-    "path",
+    "orig, lost",
     [
-        "/Users/alice/project/src/api/v1/chat.py",
-        "/etc/hosts",
-        "~/.tam/memory.db",
-        "/src/fact_merger.py",
-        "alembic/versions/485866bf9d39_update_checkin.py",
+        pytest.param("See /Users/alice/project/src/api/v1/chat.py here.", "/Users/alice/project/src/api/v1/chat.py", id="deep"),
+        pytest.param("See /etc/hosts here.", "/etc/hosts", id="two-segments"),
+        pytest.param("See /README.md here.", "/README.md", id="single-segment-ext"),
+        pytest.param("See /tmp/cache/ here.", "/tmp/cache/", id="trailing-slash"),
+        pytest.param("See ~/.tam/memory.db here.", "~/.tam/memory.db", id="tilde"),
+        pytest.param("See ~/.claude here.", "~/.claude", id="tilde-dotdir"),
+        pytest.param("See ~/.bashrc here.", "~/.bashrc", id="tilde-dotfile"),
+        pytest.param("See ~/foo here.", "~/foo", id="tilde-one-segment"),
+        pytest.param("cat ~/.zshrc now", "~/.zshrc", id="tilde-mid-sentence"),
+        pytest.param("rm /tmp/*.log now", "/tmp/*.log", id="glob"),
+        pytest.param("Intro.\n/etc/hosts is it.\nEnd.", "/etc/hosts", id="line-start"),
+        pytest.param('See "/etc/hosts" here.', "/etc/hosts", id="quoted"),
+        pytest.param("See (/etc/hosts) here.", "/etc/hosts", id="parenthesised"),
+        pytest.param("set db=/var/lib/app.db here", "/var/lib/app.db", id="equals"),
+        pytest.param("set key:/etc/hosts here", "/etc/hosts", id="colon"),
+        pytest.param("set a,/etc/hosts here", "/etc/hosts", id="comma"),
+        pytest.param("| file |/etc/hosts| x |", "/etc/hosts", id="table-cell"),
+        pytest.param("See </etc/hosts> here.", "/etc/hosts", id="autolink"),
+        pytest.param("set a;/etc/hosts here", "/etc/hosts", id="semicolon"),
     ],
 )
-def test_path_detected_when_lost(path):
+def test_path_detected_when_lost(orig, lost):
     v = ContentValidator()
-    orig = f"See {path} for details."
-    trans = "See the relevant file for details."
-    r = v.validate(orig, trans)
-    assert r.errors == [f"path lost: {path}"]
+    r = v.validate(orig, "See the relevant file.")
+    assert r.errors == [f"path lost: {lost}"]
 
 
-def test_path_detected_when_lost_at_line_start():
+def test_glob_path_change_detected():
     v = ContentValidator()
-    path = "/Users/alice/project/src/api/v1/chat.py"
-    orig = f"Context above.\n{path} is the file to check.\nMore context below."
-    trans = "Context above.\nThe relevant file to check.\nMore context below."
-    r = v.validate(orig, trans)
-    assert r.errors == [f"path lost: {path}"]
+    r = v.validate("Match /src/**/*.py files.", "Match /src/**/*.ts files.")
+    assert r.errors == ["path lost: /src/**/*.py"]
 
 
-def test_path_detected_when_lost_quoted_and_parenthesised():
+@pytest.mark.parametrize(
+    "orig, trans",
+    [
+        pytest.param("Edit /Users/alice/src/server.py now", "Edit `/Users/alice/src/server.py` now", id="backtick-added"),
+        pytest.param("Edit /Users/alice/src/server.py now", "Edit **/Users/alice/src/server.py** now", id="bold-added"),
+        pytest.param("Edit **/Users/alice/src/server.py** now", "Edit /Users/alice/src/server.py now", id="bold-removed"),
+    ],
+)
+def test_path_survives_markdown_wrapping(orig, trans):
     v = ContentValidator()
-    path = "/Users/alice/project/src/api/v1/chat.py"
-    orig = f'See "{path}" (also referenced) for details.'
-    trans = "See the relevant file for details."
     r = v.validate(orig, trans)
-    assert r.errors == [f"path lost: {path}"]
-
-
-def test_path_survives_backtick_wrapping():
-    v = ContentValidator()
-    path = "/Users/alice/project/src/server.py"
-    orig = f"Edit {path} now"
-    trans = f"Edit `{path}` now"
-    r = v.validate(orig, trans)
-    assert r.ok
-
-
-def test_path_survives_bold_wrapping():
-    v = ContentValidator()
-    path = "/Users/alice/project/src/server.py"
-    orig = f"Edit {path} now"
-    trans = f"Edit **{path}** now"
-    r = v.validate(orig, trans)
-    assert r.ok
+    assert r.errors == []
 
 
 @pytest.mark.parametrize(

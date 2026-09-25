@@ -6,7 +6,7 @@ and versions use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-- The validator's path-loss check matches real absolute paths. Its pattern took a slash plus exactly one character and then required another slash, so only paths with a one-character segment matched: `/a/b/c` and `~/.tam/x` were checked, `/etc/hosts` and `/Users/alice/project/src/server.py` were not, and a fact merge or a compressed view could drop them unnoticed. The check now also ignores what the fixed pattern would otherwise read as paths: backticks and `**` around a path, slash commands (`/compact`), version pairs (`python/3.12`) and number or date ranges (`3.5/4.0`, `27.07/28.07`). Relative paths count only with a code or doc extension (`alembic/versions/x.py`).
+- The validator's path-loss check matches real absolute paths. Its pattern took a slash plus exactly one character and then required another slash, so only paths with a one-character segment matched: `/a/b/c` and `~/.tam/x` were checked, `/etc/hosts` and `/Users/alice/project/src/server.py` were not, and a fact merge or a compressed view could drop them unnoticed. A slash starts a path only at line start or after whitespace, a quote, a bracket, `=`, `:`, `,`, `|`, `<`, `>` or `;`, so `EU/Russia` stays prose; slash commands (`/compact`) and version or date pairs (`python/3.12`, `27.07/28.07`) do not count, and backticks or `**` around a path are ignored on both sides. Because the check used to match almost nothing, it now rejects compressed views that drop a path, and such a record keeps only `raw`: on one real store, 93 of 282 existing compressed views (33%) would have been rejected.
 
 ## [14.5.1] - 2026-09-24
 
