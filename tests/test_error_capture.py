@@ -86,12 +86,13 @@ def test_learn_error_creates_row(ec, ec_db):
     assert "pattern:sqlite-locked-during-ddl" in row["tags"]
 
 
-def test_learn_error_rejects_missing_fields(ec):
+def test_learn_error_rejects_missing_fields(ec, ec_db):
     for missing in ["file", "error", "root_cause", "fix", "pattern"]:
         s = _sample()
         s[missing] = ""
         with pytest.raises(ValueError):
             ec.learn_error(**s)
+    assert ec_db.execute("SELECT COUNT(*) FROM errors").fetchone()[0] == 0
 
 
 def test_learn_error_stores_severity_and_category(ec, ec_db):
@@ -109,14 +110,6 @@ def test_learn_error_with_a_fix_is_resolved_and_stamped(ec, ec_db):
     ).fetchone()
     assert row["status"] == "resolved"
     assert row["resolved_at"] == row["created_at"]
-
-
-def test_learn_error_rejects_empty_fix_instead_of_leaving_the_row_open(ec, ec_db):
-    """fix is a required, validated field - an empty fix never reaches the
-    INSERT, so there is no path where learn_error writes an open row."""
-    with pytest.raises(ValueError):
-        ec.learn_error(**_sample(fix=""))
-    assert ec_db.execute("SELECT COUNT(*) FROM errors").fetchone()[0] == 0
 
 
 # ──────────────────────────────────────────────
@@ -217,15 +210,29 @@ def test_rules_for_pattern(ec):
     assert rules[0]["priority"] == 7
 
 
+def _insert_learned_error_row(
+    db,
+    *,
+    status="open",
+    fix="commit before ALTER TABLE",
+    context="root_cause: DDL during active transaction | pattern: sqlite-locked-during-ddl",
+    created_at="2026-08-01T00:00:00Z",
+    resolved_at=None,
+):
+    """Simulate a row the pre-fix `learn_error` would have written."""
+    return db.execute(
+        """INSERT INTO errors
+           (session_id, category, severity, description, context, fix,
+            project, tags, status, resolved_at, created_at)
+           VALUES ('learn_error', 'bug', 'medium', 'boom', ?, ?, 'general',
+                   '[]', ?, ?, ?)""",
+        (context, fix, status, resolved_at, created_at),
+    ).lastrowid
+
+
 def test_resolve_marks_error_resolved(ec, ec_db):
-    # learn_error never leaves a row open; insert one as another writer would.
-    cur = ec_db.execute(
-        """INSERT INTO errors (session_id, category, severity, description,
-                                project, tags, status, created_at)
-           VALUES ('other-writer', 'bug', 'medium', 'boom', 'general', '[]',
-                   'open', '2026-08-01T00:00:00Z')"""
-    )
-    error_id = cur.lastrowid
+    # learn_error no longer leaves a row open; insert one as it used to.
+    error_id = _insert_learned_error_row(ec_db)
     assert ec.resolve(error_id, note="fixed") is True
     row = ec_db.execute("SELECT status, resolved_at FROM errors").fetchone()
     assert row["status"] == "resolved"
@@ -245,26 +252,6 @@ def test_custom_threshold(ec_db):
 # resolve_learned_errors migration
 # ──────────────────────────────────────────────
 
-def _insert_learned_error_row(
-    db,
-    *,
-    status="open",
-    fix="commit before ALTER TABLE",
-    context="root_cause: DDL during active transaction | pattern: sqlite-locked-during-ddl",
-    created_at="2026-08-01T00:00:00Z",
-    resolved_at=None,
-):
-    """Simulate a row the pre-fix `learn_error` would have written."""
-    db.execute(
-        """INSERT INTO errors
-           (session_id, category, severity, description, context, fix,
-            project, tags, status, resolved_at, created_at)
-           VALUES ('learn_error', 'bug', 'medium', 'boom', ?, ?, 'general',
-                   '[]', ?, ?, ?)""",
-        (context, fix, status, resolved_at, created_at),
-    )
-
-
 def _apply_resolve_learned_errors(db):
     """Apply through `MigrationRunner`, the path production takes for
     versions >= TRANSACTIONAL_SCHEMA_VERSION."""
@@ -280,20 +267,34 @@ def test_resolve_learned_errors_closes_a_learned_error_that_has_a_fix(ec_db):
 
     _apply_resolve_learned_errors(ec_db)
 
-    row = ec_db.execute("SELECT status, resolved_at, created_at FROM errors").fetchone()
+    row = ec_db.execute("SELECT status, resolved_at FROM errors").fetchone()
     assert row["status"] == "resolved"
-    assert row["resolved_at"] == row["created_at"]
+    assert row["resolved_at"] == "2026-08-01T00:00:00Z"
 
 
-def test_resolve_learned_errors_leaves_a_fixless_open_error_alone(ec_db):
-    _insert_learned_error_row(ec_db, fix="")
+@pytest.mark.parametrize(
+    "row, status, resolved_at",
+    [
+        ({"fix": ""}, "open", None),
+        ({"fix": None}, "open", None),
+        ({"context": "written by another tool"}, "open", None),
+        (
+            {"status": "resolved", "resolved_at": "2026-08-05T00:00:00Z"},
+            "resolved",
+            "2026-08-05T00:00:00Z",
+        ),
+    ],
+    ids=["empty-fix", "null-fix", "other-writer", "already-resolved"],
+)
+def test_resolve_learned_errors_leaves_the_row_alone(ec_db, row, status, resolved_at):
+    _insert_learned_error_row(ec_db, **row)
     ec_db.commit()
 
     _apply_resolve_learned_errors(ec_db)
 
-    row = ec_db.execute("SELECT status, resolved_at FROM errors").fetchone()
-    assert row["status"] == "open"
-    assert row["resolved_at"] is None
+    after = ec_db.execute("SELECT status, resolved_at FROM errors").fetchone()
+    assert after["status"] == status
+    assert after["resolved_at"] == resolved_at
 
 
 def test_resolve_learned_errors_is_idempotent(ec_db):
