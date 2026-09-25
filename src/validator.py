@@ -34,8 +34,8 @@ _URL_TRAILING_PUNCT = ".,;:!?"
 # Absolute paths (/Users/..., /etc/...) and tilde paths (~/...).
 # A slash may only start a path at the beginning of the text/line or after
 # whitespace/quote/bracket/`=`/`:`/`,`/`|`/`<`/`>`/`;`/backtick/`*`, so prose
-# like "EU/Russia" is ignored while "db=/path", "|/path|" and "**/path**" are
-# still matched.
+# like "EU/Russia" is ignored while "db=/var/x", "|/etc/hosts|" and
+# "**/etc/hosts**" are still matched.
 _PATH_BOUNDARY = r"""(?:(?<=^)|(?<=[\s'"(\[{=:,|<>;`*]))"""
 
 # Extensions that make a single-segment absolute path (/README.md) count.

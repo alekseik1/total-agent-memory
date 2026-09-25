@@ -172,6 +172,8 @@ def test_wrapped_path_detected_when_lost(orig, trans, errors):
         pytest.param("Edit /Users/alice/src/server.py now", "Edit **/Users/alice/src/server.py** now", id="bold-added"),
         pytest.param("see /etc/hosts, now", "see **/etc/hosts**, now", id="bold-before-comma"),
         pytest.param("See /tmp/cache/ here.", "See /tmp/cache here.", id="trailing-slash-dropped"),
+        pytest.param("see /etc/hosts now", "see _/etc/hosts_ now", id="italic-added"),
+        pytest.param("see /etc/hosts now", "see /etc/hosts/ now", id="trailing-slash-added"),
     ],
 )
 def test_path_survives_markdown_wrapping(orig, trans):
