@@ -4,6 +4,10 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- The validator's path-loss check matches real absolute paths. Its pattern took a slash plus exactly one character and then required another slash, so only paths with a one-character segment matched: `/a/b/c` and `~/.tam/x` were checked, `/etc/hosts` and `/Users/alice/project/src/server.py` were not, and a fact merge or a compressed view could drop them unnoticed. The check now also ignores what the fixed pattern would otherwise read as paths: backticks and `**` around a path, slash commands (`/compact`), version pairs (`python/3.12`) and number or date ranges (`3.5/4.0`, `27.07/28.07`). Relative paths count only with a code or doc extension (`alembic/versions/x.py`).
+
 ## [14.5.1] - 2026-09-24
 
 - Recall no longer ranks a record above its own later update. The cross-encoder that 14.5.0 turned on is trained on web search and knows the real-world value, so it lifted "The company that produced Windows Vista is Microsoft" above the later record "… is Raytheon" that replaced it. After re-ranking, records that give different values for the same statement (same opening words, a different trailing value — the rule `memory_save(supersede=true)` uses) keep the places the encoder gave them, filled newest first; every other record keeps its place. On MemoryAgentBench FactConsolidation single-hop 6k, the newest value now ranks first for 98 of 100 questions (45 in 14.5.0; the gold value is among the top 10 for all 100 in both). The development splits do not move beyond noise: LoCoMo 92.73 vs 92.99 (2 answers better, 3 worse, 337 of 385 identical), LongMemEval 92.0 vs 92.0 (all 100 answers identical). MemoryAgentBench results and what changed in the adapter: `docs/benchmarks/memoryagentbench/FINDINGS.md`.

@@ -100,19 +100,19 @@ def test_multiple_urls_preserved():
 
 def test_absolute_path_preserved():
     v = ContentValidator()
-    orig = "Edit /Users/x/project/src/server.py"
-    trans = "Edit /Users/x/project/src/server.py now."
+    orig = "Edit /Users/alice/project/src/server.py"
+    trans = "Edit /Users/alice/project/src/server.py now."
     r = v.validate(orig, trans)
     assert r.ok
 
 
 def test_absolute_path_lost_fails():
     v = ContentValidator()
-    orig = "Edit /Users/x/project/src/server.py"
+    path = "/Users/alice/project/src/server.py"
+    orig = f"Edit {path}"
     trans = "Edit the server file."
     r = v.validate(orig, trans)
-    assert not r.ok
-    assert any("path" in e.lower() for e in r.errors)
+    assert r.errors == [f"path lost: {path}"]
 
 
 def test_tilde_path_preserved():
@@ -121,6 +121,90 @@ def test_tilde_path_preserved():
     trans = "From ~/claude-memory-server/."
     r = v.validate(orig, trans)
     assert r.ok
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/Users/alice/project/src/api/v1/chat.py",
+        "/etc/hosts",
+        "~/.tam/memory.db",
+        "/src/fact_merger.py",
+        "alembic/versions/485866bf9d39_update_checkin.py",
+    ],
+)
+def test_path_detected_when_lost(path):
+    v = ContentValidator()
+    orig = f"See {path} for details."
+    trans = "See the relevant file for details."
+    r = v.validate(orig, trans)
+    assert r.errors == [f"path lost: {path}"]
+
+
+def test_path_detected_when_lost_at_line_start():
+    v = ContentValidator()
+    path = "/Users/alice/project/src/api/v1/chat.py"
+    orig = f"Context above.\n{path} is the file to check.\nMore context below."
+    trans = "Context above.\nThe relevant file to check.\nMore context below."
+    r = v.validate(orig, trans)
+    assert r.errors == [f"path lost: {path}"]
+
+
+def test_path_detected_when_lost_quoted_and_parenthesised():
+    v = ContentValidator()
+    path = "/Users/alice/project/src/api/v1/chat.py"
+    orig = f'See "{path}" (also referenced) for details.'
+    trans = "See the relevant file for details."
+    r = v.validate(orig, trans)
+    assert r.errors == [f"path lost: {path}"]
+
+
+def test_path_survives_backtick_wrapping():
+    v = ContentValidator()
+    path = "/Users/alice/project/src/server.py"
+    orig = f"Edit {path} now"
+    trans = f"Edit `{path}` now"
+    r = v.validate(orig, trans)
+    assert r.ok
+
+
+def test_path_survives_bold_wrapping():
+    v = ContentValidator()
+    path = "/Users/alice/project/src/server.py"
+    orig = f"Edit {path} now"
+    trans = f"Edit **{path}** now"
+    r = v.validate(orig, trans)
+    assert r.ok
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "EU/Russia",
+        "1/6",
+        "activity/nutrition/sleep",
+        "SQLAlchemy/Postgres",
+        "closes/rolls",
+        "/compact",
+        "/jira-task",
+        "/loop",
+        "/babysit-prs",
+        "/memory",
+        "python/3.12",
+        "requests/2.31",
+        "uvicorn/0.30.1",
+        "1/6.5",
+        "3.5/4.0",
+        "27.07/28.07",
+        "v1.2/2.0",
+    ],
+)
+def test_path_check_ignores_prose_slashes(phrase):
+    v = ContentValidator()
+    orig = f"Discussion of {phrase} came up."
+    trans = "Discussion came up."
+    r = v.validate(orig, trans)
+    assert r.errors == []
 
 
 # ──────────────────────────────────────────────

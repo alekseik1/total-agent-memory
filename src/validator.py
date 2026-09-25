@@ -31,8 +31,40 @@ _CODE_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _URL_RE = re.compile(r"https?://[^\s<>`'\"()]+")
 _URL_TRAILING_PUNCT = ".,;:!?"
 
-# Absolute paths: /Users/..., /etc/..., /home/...  AND tilde paths ~/...
-_PATH_RE = re.compile(r"(?:~|/[A-Za-z0-9_.-])(?:/[A-Za-z0-9_.\-]+)+/?")
+# Markdown emphasis/backticks are stripped before path extraction so the same
+# path is found whether or not an LLM wrapped it in `code` or **bold** -
+# extraction must be symmetric between original and transformed text.
+_MARKDOWN_STRIP_RE = re.compile(r"[`*]")
+
+# Absolute paths (/Users/..., /etc/...), tilde paths (~/...), and relative
+# paths that carry a recognized code/doc extension (alembic/versions/x.py).
+# A slash may only start a path at the beginning of the text/line or after
+# whitespace/quote/bracket/`=`/`:`/`,`, so prose like "EU/Russia" or
+# "SQLAlchemy/Postgres" is ignored while "db=/path" is still matched.
+_PATH_BOUNDARY = r"""(?:(?<=^)|(?<=[\s'"(\[{=:,]))"""
+
+# Extensions that plausibly identify a real code/doc file. Used to gate the
+# relative-path branch so version/tool pairs (python/3.12, 1/6.5, v1.2/2.0)
+# and date ranges (27.07/28.07) are never mistaken for paths.
+_CODE_EXT = r"(?:py|sql|md|json|ya?ml|toml|sh|ts|js|txt|ini|cfg|go|rs|tsx|jsx)"
+
+_SEG = r"[A-Za-z0-9_.\-]+"
+# Absolute body: either >=2 segments or a trailing slash (single `(seg/)+`
+# repetition with an empty final segment covers both), or a single segment
+# with a recognized extension (/README.md). This is what excludes bare
+# single-segment slash tokens like slash-commands ("/compact", "/jira-task").
+_ABS_MULTI_OR_TRAILING = rf"(?:{_SEG}/)+(?:{_SEG})?"
+_ABS_EXT_SINGLE = rf"{_SEG}\.{_CODE_EXT}\b"
+_ABS_BODY = rf"(?:{_ABS_MULTI_OR_TRAILING}|{_ABS_EXT_SINGLE})"
+
+# Relative body: >=2 segments, final one gated on _CODE_EXT (not "any
+# extension") so numeric/version tuples don't qualify as extensions.
+_REL_BODY = rf"{_SEG}(?:/{_SEG})+\.{_CODE_EXT}\b"
+
+_PATH_RE = re.compile(
+    _PATH_BOUNDARY + rf"(?:~?/{_ABS_BODY}|{_REL_BODY})",
+    re.MULTILINE,
+)
 
 # Markdown headings (line-starting #..######).
 _HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S", re.MULTILINE)
@@ -99,6 +131,7 @@ def _extract_paths(text: str) -> set[str]:
     cleaned = text
     for u in urls:
         cleaned = cleaned.replace(u, " ")
+    cleaned = _MARKDOWN_STRIP_RE.sub("", cleaned)
     paths: set[str] = set()
     for m in _PATH_RE.findall(cleaned):
         # Strip trailing punctuation (comma/period/etc.) that regex may include.
