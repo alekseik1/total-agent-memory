@@ -363,16 +363,17 @@ class Store:
         self.db.execute("PRAGMA cache_size=-20000")
         self.db.execute(f"PRAGMA journal_size_limit={DB_JOURNAL_SIZE_LIMIT_BYTES}")
 
-        # Opportunistic WAL reclaim: a full TRUNCATE checkpoint only succeeds
-        # with zero other readers holding a snapshot, which realistically
-        # only happens when the first session of the day opens the db. Use a
-        # short timeout so a busy result (the common case) fails fast instead
-        # of stalling startup.
+        # Opportunistic WAL reclaim: a PASSIVE checkpoint that copies every
+        # frame lets the next writer restart the WAL, and journal_size_limit
+        # then shrinks the file. PASSIVE, not TRUNCATE: the team server runs
+        # this same Store under Litestream, which owns forced checkpoints.
+        # Use a short timeout so a busy result fails fast instead of stalling
+        # startup.
         try:
             self.db.execute(f"PRAGMA busy_timeout={DB_STARTUP_CHECKPOINT_TIMEOUT_MS}")
-            row = self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            if row and row[0] == 0:
-                LOG(f"WAL checkpoint: truncated ({row[2]} pages)")
+            row = self.db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            if row and row[0] == 0 and row[1] == row[2]:
+                LOG(f"WAL checkpoint: complete ({row[2]} pages)")
         except sqlite3.OperationalError:
             pass
         finally:
