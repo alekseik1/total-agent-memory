@@ -49,24 +49,28 @@ def test_locked_write_does_not_leave_the_transaction_open(live_server):
     server, store = live_server
     store.db.execute("PRAGMA busy_timeout=50")
     blocker = sqlite3.connect(str(store.db_path), isolation_level=None)
-    blocker.execute("BEGIN IMMEDIATE")
-    blocker.execute("UPDATE sessions SET status='closed' WHERE id=?", (server.SID,))
+    try:
+        blocker.execute("BEGIN IMMEDIATE")
+        blocker.execute("UPDATE sessions SET status='closed' WHERE id=?", (server.SID,))
 
-    result, is_error = call(server, "memory_save", type="fact", project="p",
-                            content="Deploys go through the blue green pipeline on Fridays")
+        result, is_error = call(server, "memory_save", type="fact", project="p",
+                                content="Deploys go through the blue green pipeline on Fridays")
 
-    assert is_error, result
-    assert "database is locked" in result
-    assert not store.db.in_transaction
-    blocker.execute("COMMIT")
-    blocker.close()
+        assert is_error, result
+        assert "database is locked" in result
+        assert not store.db.in_transaction
+        blocker.execute("COMMIT")
+    finally:
+        blocker.rollback()
+        blocker.close()
     result, is_error = call(server, "memory_save", type="fact", project="p",
                             content="Release notes are drafted by the on-call engineer")
     assert not is_error, result
     assert result["saved"] is True
 
 
-def test_write_error_swallowed_by_a_helper_does_not_leave_the_transaction_open(live_server):
+def test_write_error_swallowed_by_a_helper_does_not_leave_the_transaction_open(live_server, monkeypatch):
+    monkeypatch.setenv("MEMORY_OUTBOX_ENABLED", "true")
     server, store = live_server
     store.db.execute("CREATE TRIGGER fail_intent_update BEFORE UPDATE ON write_intents "
                      "BEGIN SELECT RAISE(ABORT, 'intent update failed'); END")
@@ -77,3 +81,6 @@ def test_write_error_swallowed_by_a_helper_does_not_leave_the_transaction_open(l
 
     assert not is_error, result
     assert not store.db.in_transaction
+    statuses = store.db.execute("SELECT status FROM write_intents WHERE session_id=?",
+                                (server.SID,)).fetchall()
+    assert [s for (s,) in statuses] == ["pending"]

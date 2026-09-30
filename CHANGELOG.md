@@ -15,8 +15,9 @@ and versions use [Semantic Versioning](https://semver.org/).
   never rolled back, so the next read pinned a stale snapshot: every later
   write in that process failed at once with `SQLITE_BUSY_SNAPSHOT` and the WAL
   could not checkpoint (grew to 241 MB) until restart.
-- `_call_tool_impl` and the enrichment worker's tick loop now roll back any
-  transaction still open after a call.
+- `_call_tool_impl` now rolls back any transaction still open after a call;
+  the enrichment worker's tick loop does the same, but only on its own
+  connection.
 
 ### Fixed - the enrichment worker corrupted transactions it did not own
 - `_WorkerThread` drained the queue through `store.db`, the same

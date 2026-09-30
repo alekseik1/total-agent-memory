@@ -5782,6 +5782,7 @@ async def _call_tool_impl(name, args) -> tuple[list[TextContent], bool]:
     inside the result so the model can see and self-correct, rather than as a
     protocol-level error.
     """
+    failed = False
     try:
         # Guarded: a client can call a tool before _bootstrap_session() has
         # run (or after a failed bootstrap). Losing the audit line is fine;
@@ -5793,15 +5794,18 @@ async def _call_tool_impl(name, args) -> tuple[list[TextContent], bool]:
         r = await _do(name, args)
         return [TextContent(type="text", text=r)], False
     except Exception as e:
+        failed = True
         LOG(f"Error in {name}: {e}")
         return [TextContent(type="text", text=f"Error: {e}")], True
     finally:
         # A failed write leaves the implicit transaction open; its snapshot
         # then fails every later write on this connection with BUSY_SNAPSHOT.
+        # Assumes the MCP handler is the only writer on store.db; the enrichment
+        # worker shares it only for :memory: or test-double stores.
         if store is not None and getattr(store.db, "in_transaction", False):
             try:
                 store.db.rollback()
-                LOG(f"leaked transaction after {name}, rolled back")
+                LOG(f"leaked transaction after {name} (ok={not failed}), rolled back")
             except Exception as e:
                 LOG(f"rollback after {name} failed: {e}")
 
