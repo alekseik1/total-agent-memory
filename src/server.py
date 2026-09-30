@@ -5795,6 +5795,15 @@ async def _call_tool_impl(name, args) -> tuple[list[TextContent], bool]:
     except Exception as e:
         LOG(f"Error in {name}: {e}")
         return [TextContent(type="text", text=f"Error: {e}")], True
+    finally:
+        # A failed write leaves the implicit transaction open; its snapshot
+        # then fails every later write on this connection with BUSY_SNAPSHOT.
+        if store is not None and getattr(store.db, "in_transaction", False):
+            try:
+                store.db.rollback()
+                LOG(f"leaked transaction after {name}, rolled back")
+            except Exception as e:
+                LOG(f"rollback after {name} failed: {e}")
 
 
 async def call_tool(name, args):

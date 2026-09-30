@@ -604,6 +604,12 @@ class _WorkerThread(threading.Thread):
                     run_pending(db, store=self._store)
                 except Exception as e:
                     LOG(f"tick error: {e}")
+                if owned and db.in_transaction:
+                    try:
+                        db.rollback()
+                        LOG("leaked transaction after tick, rolled back")
+                    except Exception as e:
+                        LOG(f"rollback after tick failed: {e}")
                 self._stop_event.wait(tick)
         finally:
             if owned:

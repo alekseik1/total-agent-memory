@@ -10,6 +10,14 @@ and versions use [Semantic Versioning](https://semver.org/).
 
 - **Credential redaction broke some request IDs.** The payment-card rule matched a UUID whose first three groups happen to be all digits (about one UUID in a thousand), so a team-server `memory_save` could fail with "request_id: Input should be a valid UUID". A card number now has to stand alone (not inside a hyphenated or alphanumeric identifier) and pass the Luhn check, so UUIDs, order numbers and other 16-digit identifiers are kept.
 
+### Fixed - a failed write left the connection's transaction open
+- A write that failed with `database is locked` (or one a helper swallowed)
+  never rolled back, so the next read pinned a stale snapshot: every later
+  write in that process failed at once with `SQLITE_BUSY_SNAPSHOT` and the WAL
+  could not checkpoint (grew to 241 MB) until restart.
+- `_call_tool_impl` and the enrichment worker's tick loop now roll back any
+  transaction still open after a call.
+
 ### Fixed - the enrichment worker corrupted transactions it did not own
 - `_WorkerThread` drained the queue through `store.db`, the same
   `sqlite3.Connection` every MCP handler writes through. Python's sqlite3
