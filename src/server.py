@@ -1168,7 +1168,7 @@ class Store:
         # Per-space embedding via memory_core.EmbeddingProvider when the
         # space is anything but "text" — that lets jina-code (or whatever
         # the user configured) actually fire. The text path keeps using
-        # the legacy `Store.embed` so the embedding cache, binary
+        # `Store.embed_with_identity` so the embedding cache, binary
         # quantization and ST fallback stay wired.
         vector = None
         model_name = self._active_embed_model_name()
