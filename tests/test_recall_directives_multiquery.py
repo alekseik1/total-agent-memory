@@ -156,6 +156,17 @@ def test_session_end_without_summary_or_when_disabled_writes_no_note(dispatcher,
     assert store.db.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0] == before
 
 
+def test_session_end_without_session_id_uses_the_live_sid(dispatcher, store, monkeypatch):
+    """`session_id` is optional (schema `required: []`): the summary row and the
+    note both fall back to this server's SID instead of raising KeyError."""
+    monkeypatch.setattr(server, "SID", "sess-live")
+    ended = dispatcher("session_end", {"project": "p", "summary": "Rotated the staging TLS certificates"})
+    assert ended["note_id"]
+    note = store.db.execute("SELECT session_id FROM knowledge WHERE id=?", (ended["note_id"],)).fetchone()
+    assert note[0] == "sess-live"
+    assert {r[0] for r in store.db.execute("SELECT session_id FROM session_summaries")} == {"sess-live"}
+
+
 # ── user-turn boost ───────────────────────────────────────────────────────
 
 def test_user_turn_detection():
