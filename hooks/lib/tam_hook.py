@@ -1007,12 +1007,16 @@ def session_end(payload: JsonDict, src_dir: Path, recovery_dir: Path, project: s
                                           "--transcript", str(transcript)]):
         actions.append(f"auto_episode_capture started for {transcript.stem}")
     # Writes the session_summaries row (producer="hook") the next session_init resumes from.
-    if transcript is not None and runner(src_dir, "auto_session_end.py",
-                                         ["--session-id", transcript.stem, "--project", project, "--cwd", cwd,
-                                          "--branch", _git(cwd, "branch", "--show-current"),
-                                          "--reason", reason_text, "--user-context", user,
-                                          "--assistant-context", assistant[:AUTOSAVE_ASSISTANT_CHARS]]):
-        actions.append(f"auto_session_end started for {transcript.stem}")
+    # The payload's id first: a transcript found by the cwd fallback may be another session's.
+    # `=` form, so context text starting with "-" is not parsed as an option.
+    if transcript is not None:
+        end_session = str(payload.get("session_id") or transcript.stem)
+        if runner(src_dir, "auto_session_end.py",
+                  ["--session-id", end_session, "--project", project, "--cwd", cwd,
+                   "--branch", _git(cwd, "branch", "--show-current"),
+                   "--reason", reason_text, f"--user-context={user}",
+                   f"--assistant-context={assistant[:AUTOSAVE_ASSISTANT_CHARS]}"]):
+            actions.append(f"auto_session_end started for {end_session}")
     return actions
 
 

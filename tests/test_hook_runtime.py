@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import sqlite3
@@ -287,6 +288,15 @@ FLAT_TRANSCRIPT = [
 ]
 
 
+def _cli_opts(args: list[str]) -> dict[str, str]:
+    """`--key value` and `--key=value` argv pairs as a dict."""
+    opts, rest = {}, iter(args)
+    for arg in rest:
+        key, sep, value = arg.partition("=")
+        opts[key] = value if sep else next(rest)
+    return opts
+
+
 class TestSessionEnd:
     def write_transcript(self, world, entries) -> Path:
         path = world["tmp"] / "abc-123.jsonl"
@@ -350,15 +360,36 @@ class TestSessionEnd:
             runner=lambda _src, script, args: calls.append((script, list(args))) or True)
 
         end_args = dict(calls)["auto_session_end.py"]
-        opts = dict(zip(end_args[::2], end_args[1::2]))
-        assert opts["--session-id"] == "abc-123"
+        opts = _cli_opts(end_args)
+        assert opts["--session-id"] == "s"
         assert opts["--project"] == "proj"
         assert opts["--cwd"] == str(repo)
         assert opts["--branch"] == "feature/x"
         assert opts["--reason"] == "User exited"
+        # `=` form: context text starting with "-" cannot be read as an option.
+        assert any(a.startswith("--user-context=") for a in end_args)
+        assert any(a.startswith("--assistant-context=") for a in end_args)
         assert "now add a regression test" in opts["--user-context"]
         assert "Root cause" in opts["--assistant-context"]
-        assert any("auto_session_end started for abc-123" in a for a in actions)
+        assert any("auto_session_end started for s" in a for a in actions)
+
+    def test_auto_session_end_takes_the_payload_session_not_a_fallback_transcript(self, world, monkeypatch):
+        """Without transcript_path the transcript is the newest one in the cwd's
+        project dir - possibly another session's; the id must come from the payload."""
+        monkeypatch.setenv("HOME", str(world["home"]))
+        cwd = world["tmp"] / "work"
+        cwd.mkdir()
+        project_dir = world["home"] / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+        project_dir.mkdir(parents=True)
+        (project_dir / "other-session.jsonl").write_text(
+            "\n".join(json.dumps(e) for e in NESTED_TRANSCRIPT) + "\n")
+        calls: list[tuple[str, list[str]]] = []
+        tam_hook.session_end(
+            {"session_id": "live-session", "cwd": str(cwd)},
+            ROOT / "src", world["mem"] / "recovery", "proj", "User exited",
+            runner=lambda _src, script, args: calls.append((script, list(args))) or True)
+
+        assert _cli_opts(dict(calls)["auto_session_end.py"])["--session-id"] == "live-session"
 
 
 # ──────────────────────────────────────────────
