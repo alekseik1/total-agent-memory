@@ -1191,7 +1191,11 @@ class Store:
                                 f"per-space embed for space={space} fell back to text")
         if vector is None:
             try:
-                embs = self.embed([f"{content} {context}"])
+                # The identity comes from the chain that ran, not from the
+                # configuration: with Ollama configured but unreachable this
+                # returns SentenceTransformer vectors, which must not be
+                # labelled `nomic-embed-text`.
+                embs, (model_name, provider_name) = self.embed_with_identity([f"{content} {context}"])
             except Exception as exc:  # noqa: BLE001 — provider errors become a backfill entry
                 return None, f"{type(exc).__name__}: {exc}"
             if not embs or not embs[0]:

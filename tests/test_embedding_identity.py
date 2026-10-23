@@ -88,18 +88,21 @@ def test_embed_keeps_its_old_shape_for_existing_callers(store, monkeypatch):
 
 
 def test_a_row_saved_through_the_fallback_says_what_made_it(store, monkeypatch):
-    """End to end: the row in `embeddings`, not just the return value."""
+    """End to end through the record embed path memory_save and the backfill
+    drain share (`_embed_for_record`): the row in `embeddings`, not just the
+    return value."""
+    from embedding_backfill import BackfillOutcome
+
     store._embed_mode = "ollama"
     store._embedder = _Embedder(384)
     monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
-
-    vectors, (model, provider) = store.embed_with_identity(["some knowledge"])
     store.db.execute(
         "INSERT INTO knowledge (id, session_id, type, content, project, created_at) "
         "VALUES (1, 's1', 'fact', 'some knowledge', 'p', '2026-08-30T00:00:00Z')"
     )
-    store._upsert_embedding(1, vectors[0], model, provider=provider)
     store.db.commit()
+
+    assert store._backfill_one(store.db, 1, use_chroma=False) == BackfillOutcome.EMBEDDED
 
     row = store.db.execute(
         "SELECT embed_model, embed_dim, embedding_provider, length(float32_vector)/4 AS real_dim "
