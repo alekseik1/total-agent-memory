@@ -58,7 +58,7 @@ class FlakyEmbedder:
     """Fails until `recover()`; then returns a fixed vector of the store's dimension."""
 
     def __init__(self, store):
-        self.real = store.embed
+        self.real = store.embed_with_identity
         self.healthy = False
         self.calls = 0
 
@@ -68,7 +68,7 @@ class FlakyEmbedder:
     def __call__(self, texts):
         self.calls += 1
         if not self.healthy:
-            return None
+            return None, (None, None)
         return self.real(texts)
 
 
@@ -100,7 +100,7 @@ def _pending(store, rid):
 def test_failed_embedding_is_queued_retried_and_backfilled(make_store, monkeypatch):
     store = make_store()
     flaky = FlakyEmbedder(store)
-    monkeypatch.setattr(store, "embed", flaky)
+    monkeypatch.setattr(store, "embed_with_identity", flaky)
 
     rid = _save(store)
     assert rid is not None and not _has_vector(store, rid)
@@ -132,7 +132,7 @@ def test_backfill_dead_letters_after_max_attempts_and_can_be_retried(make_store,
 
     store = make_store()
     flaky = FlakyEmbedder(store)
-    monkeypatch.setattr(store, "embed", flaky)
+    monkeypatch.setattr(store, "embed_with_identity", flaky)
     rid = _save(store)
     for _ in range(MAX_ATTEMPTS):
         _make_due(store, rid)
@@ -150,7 +150,7 @@ def test_backfill_dead_letters_after_max_attempts_and_can_be_retried(make_store,
 
 def test_backfill_drops_rows_of_records_that_are_no_longer_active(make_store, monkeypatch):
     store = make_store()
-    monkeypatch.setattr(store, "embed", FlakyEmbedder(store))
+    monkeypatch.setattr(store, "embed_with_identity", FlakyEmbedder(store))
     rid = _save(store)
     store.delete_knowledge(rid)
     counts = store.drain_embedding_backfill()
@@ -165,7 +165,7 @@ def test_save_with_working_provider_queues_nothing(make_store):
 
 def test_startup_drains_due_rows_in_the_background(make_store, monkeypatch):
     first = make_store()
-    monkeypatch.setattr(first, "embed", FlakyEmbedder(first))
+    monkeypatch.setattr(first, "embed_with_identity", FlakyEmbedder(first))
     rid = _save(first)
     assert _pending(first, rid) is not None
 
@@ -179,7 +179,7 @@ def test_memory_stats_report_backfill_outbox_errors_and_budget(make_store, monke
     import server
 
     store = make_store()
-    monkeypatch.setattr(store, "embed", FlakyEmbedder(store))
+    monkeypatch.setattr(store, "embed_with_identity", FlakyEmbedder(store))
     _save(store)
     store.error_journal.log_error("save.auto_link", RuntimeError("graph down"), "Auto-link error")
     stats = server.Recall(store).stats()["write_path"]
