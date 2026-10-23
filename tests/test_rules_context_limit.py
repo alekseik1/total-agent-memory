@@ -8,7 +8,8 @@ the cap could never load.
 
 Follow-up (review): MEMORY_RULES_LIMIT parsing must never crash the server
 at import, negative `limit` must be rejected like a bad `phase`, the
-fire_count update must be batched, and the response must expose
+load counter update (shown_count/last_fired; a load is not a fire) must be
+batched, and the response must expose
 `total_matched` so a caller can tell "all matching rules" from "top N".
 """
 
@@ -220,7 +221,7 @@ def test_phase_filter_applied_before_truncation(store):
 
 
 def test_explicit_limit_zero_returns_no_rules(store):
-    """limit=0 → zero rules returned, and no rule's fire_count is incremented."""
+    """limit=0 → zero rules returned, and no rule's load counters move."""
     ids = [_add_rule(store, f"rule {i}") for i in range(5)]
 
     r = store.get_rules_for_context(project="myproj", limit=0)
@@ -229,13 +230,14 @@ def test_explicit_limit_zero_returns_no_rules(store):
 
     for rid in ids:
         row = store.db.execute(
-            "SELECT fire_count FROM rules WHERE id=?", (rid,)).fetchone()
-        assert row["fire_count"] == 0
+            "SELECT shown_count, last_fired FROM rules WHERE id=?", (rid,)).fetchone()
+        assert (row["shown_count"] or 0) == 0
+        assert row["last_fired"] is None
 
 
-def test_negative_limit_returns_error_and_does_not_bump_fire_count(store):
+def test_negative_limit_returns_error_and_does_not_bump_load_counters(store):
     """A negative `limit` returns the same {"error": ...} shape as a bad
-    `phase`, and neither truncates nor bumps fire_count."""
+    `phase`, and neither truncates nor bumps shown_count/last_fired."""
     ids = [_add_rule(store, f"rule {i}") for i in range(5)]
 
     r = store.get_rules_for_context(project="myproj", limit=-1)
@@ -244,8 +246,9 @@ def test_negative_limit_returns_error_and_does_not_bump_fire_count(store):
 
     for rid in ids:
         row = store.db.execute(
-            "SELECT fire_count FROM rules WHERE id=?", (rid,)).fetchone()
-        assert row["fire_count"] == 0
+            "SELECT shown_count, last_fired FROM rules WHERE id=?", (rid,)).fetchone()
+        assert (row["shown_count"] or 0) == 0
+        assert row["last_fired"] is None
 
 
 def test_total_matched_reflects_pre_truncation_count(store):
@@ -259,8 +262,10 @@ def test_total_matched_reflects_pre_truncation_count(store):
     assert r["rules_count"] == 10
 
 
-def test_fire_count_incremented_only_for_returned_rules(store):
-    """A rule cut by `limit` keeps fire_count == 0."""
+def test_load_counters_bumped_only_for_returned_rules(store):
+    """A returned rule gets shown_count + last_fired (the stale-rules report
+    reads last_fired); a rule cut by `limit` gets neither. A load never
+    counts as a fire."""
     ids = [_add_rule(store, f"rule {i}") for i in range(5)]
 
     r = store.get_rules_for_context(project="myproj", limit=3)
@@ -269,11 +274,14 @@ def test_fire_count_incremented_only_for_returned_rules(store):
 
     for rid in ids:
         row = store.db.execute(
-            "SELECT fire_count FROM rules WHERE id=?", (rid,)).fetchone()
+            "SELECT fire_count, shown_count, last_fired FROM rules WHERE id=?", (rid,)).fetchone()
+        assert row["fire_count"] == 0
         if rid in returned_ids:
-            assert row["fire_count"] == 1
+            assert row["shown_count"] == 1
+            assert row["last_fired"] is not None
         else:
-            assert row["fire_count"] == 0
+            assert (row["shown_count"] or 0) == 0
+            assert row["last_fired"] is None
 
 
 def test_self_rules_context_handler_honours_limit_via_real_inject_path(live_store):
@@ -379,9 +387,9 @@ def test_untruncated_response_has_no_rules_index_or_hint(store):
     assert set(r_exact) == {"rules_count", "total_matched", "rules"}
 
 
-def test_index_only_rules_do_not_bump_fire_count(store):
-    """Appearing in `rules_index` is not a hit: only delivered rules fire, which
-    is what keeps self_patterns rule_effectiveness meaningful."""
+def test_index_only_rules_do_not_bump_load_counters(store):
+    """Appearing in `rules_index` is not an exposure: only delivered rules count
+    as shown, which is what keeps self_patterns rule_effectiveness meaningful."""
     ids = _add_ranked_rules(store, 6)
 
     r = store.get_rules_for_context(project="myproj", limit=2)
@@ -389,8 +397,9 @@ def test_index_only_rules_do_not_bump_fire_count(store):
 
     for rid in ids:
         row = store.db.execute(
-            "SELECT fire_count FROM rules WHERE id=?", (rid,)).fetchone()
-        assert row["fire_count"] == (1 if rid in ids[:2] else 0)
+            "SELECT shown_count, last_fired FROM rules WHERE id=?", (rid,)).fetchone()
+        assert (row["shown_count"] or 0) == (1 if rid in ids[:2] else 0)
+        assert (row["last_fired"] is not None) == (rid in ids[:2])
 
 
 def test_rules_index_head_is_first_80_chars_of_content(store):
@@ -493,3 +502,31 @@ def test_self_rules_handler_list_honours_limit_via_real_inject_path(live_store):
     out = json.loads(raw)
     assert out["total"] == 10
     assert out["total_matched"] == 35
+
+
+def test_query_path_without_limit_caps_at_the_default_surface_limit(live_store):
+    """`self_rules_context(query=...)` with no `limit` must not hand None to
+    surface_rules (it does int(limit)); the query path caps at
+    DEFAULT_SURFACE_LIMIT, MEMORY_RULES_LIMIT is a no-query setting."""
+    s, server = live_store
+    for i in range(server.DEFAULT_SURFACE_LIMIT + 5):
+        _add_rule(s, f"run the test suite before every commit {i}")
+
+    raw = asyncio.run(server._do("self_rules_context", {"project": "myproj", "query": "run the test suite"}))
+    out = json.loads(raw)
+    assert 0 < out["rules_count"] <= server.DEFAULT_SURFACE_LIMIT
+    assert all("surface_id" in r for r in out["rules"])
+
+
+def test_no_query_path_honours_memory_rules_limit_and_rules_index(live_store, monkeypatch):
+    """Without `query` the fork cap still applies: MEMORY_RULES_LIMIT caps the
+    result and the cut rules come back in `rules_index`."""
+    s, server = live_store
+    monkeypatch.setattr(server, "RULES_CONTEXT_LIMIT", server._read_rules_limit({"MEMORY_RULES_LIMIT": "4"}))
+    ids = _add_ranked_rules(s, 10)
+
+    raw = asyncio.run(server._do("self_rules_context", {"project": "myproj"}))
+    out = json.loads(raw)
+    assert [x["id"] for x in out["rules"]] == ids[:4]
+    assert [x["id"] for x in out["rules_index"]] == ids[4:]
+    assert out["total_matched"] == 10
