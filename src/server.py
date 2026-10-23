@@ -66,6 +66,7 @@ from memory_core.timestamps import format_utc, utc_now
 from rule_surfaces import (
     DEFAULT_REPORT_MIN_N,
     DEFAULT_SURFACE_LIMIT,
+    MAX_SURFACE_LIMIT,
     RULE_SUSPEND_MAX_UPPER,
     RULE_SUSPEND_MIN_RATED,
     RuleSurfacer,
@@ -3086,12 +3087,13 @@ class Store:
 
         return {"error": f"Unknown action: {action}"}
 
-    def _mark_rules_shown(self, ids, now):
+    def _mark_rules_shown(self, ids, now, *, bump_shown=True):
         # A load is an exposure, not a fire: counting it in fire_count made the
         # rating maths treat every session start as a failed application.
         # last_fired still moves so the stale-rules report sees loaded rules.
+        shown = "shown_count=COALESCE(shown_count, 0)+1, " if bump_shown else ""
         self.db.execute(
-            f"UPDATE rules SET shown_count=COALESCE(shown_count, 0)+1, last_fired=? "
+            f"UPDATE rules SET {shown}last_fired=? "
             f"WHERE id IN ({','.join('?' * len(ids))})",
             (now, *ids))
         self.db.commit()
@@ -3109,16 +3111,18 @@ class Store:
             limit: optional cap on the number of rules returned, applied after
                 the phase filter. Without `query` it defaults to RULES_CONTEXT_LIMIT
                 (MEMORY_RULES_LIMIT env var), which is None (no cap) unless set;
-                with `query` it defaults to DEFAULT_SURFACE_LIMIT. 0 means return
-                no rules. Negative values are rejected with an error.
+                with `query` it defaults to DEFAULT_SURFACE_LIMIT, capped at
+                MAX_SURFACE_LIMIT. 0 means return no rules. Negative values are
+                rejected with an error.
             query: optional task text. When given, rules are ranked by relevance
                 and each one carries a surface_id for self_rules(action='followed').
             session_id: session the surfaces belong to (defaults to the server session).
 
-        Note: without `query`, shown_count/last_fired are bumped ONLY for rules
-        actually returned (post phase-filter, post-limit); a load never bumps
-        fire_count. last_fired feeds self_patterns' stale-rule query, so a narrow
-        `limit`/`MEMORY_RULES_LIMIT` also narrows that telemetry.
+        Note: shown_count/last_fired are bumped ONLY for rules actually returned
+        (post phase-filter, post-limit; on the query path shown_count is bumped
+        by the surface record); a load never bumps fire_count. last_fired feeds
+        self_patterns' stale-rule query, so a narrow `limit`/`MEMORY_RULES_LIMIT`
+        also narrows that telemetry.
 
         When the limit truncates, the response also carries `rules_index`
         (id/priority/category/head for the omitted rules, same ordering) and a
@@ -3135,10 +3139,14 @@ class Store:
             return {"error": f"limit must be >= 0, got {limit}"}
 
         if query is not None and str(query).strip():
-            surfaces = RuleSurfacer(self.db).surface_rules(
+            # surface_rules clamps a limit of 0 up to 1.
+            surfaces = [] if limit == 0 else RuleSurfacer(self.db).surface_rules(
                 str(query), project, session_id or SID or "", "self_rules_context",
                 DEFAULT_SURFACE_LIMIT if limit is None else limit,
                 categories=categories, phase=phase)
+            if surfaces:
+                # _record_surface already bumped shown_count.
+                self._mark_rules_shown([s.rule_id for s in surfaces], utc_now(), bump_shown=False)
             result = {"rules_count": len(surfaces),
                       "rules": [surface.to_dict() for surface in surfaces],
                       "ranking": surfaces[0].ranking if surfaces else "lexical"}
@@ -5723,7 +5731,7 @@ async def _tool_catalogue():
                               "description": "Optional cap on number of rules returned, applied after "
                                              "the phase filter. Defaults to the MEMORY_RULES_LIMIT env "
                                              "var (unset = no cap); with `query`, defaults to "
-                                             f"{DEFAULT_SURFACE_LIMIT}."},
+                                             f"{DEFAULT_SURFACE_LIMIT}, capped at {MAX_SURFACE_LIMIT}."},
                     "query": {"type": "string",
                               "description": "Optional task text: rank rules by relevance and return a "
                                              "surface_id per rule for self_rules(action='followed')."},

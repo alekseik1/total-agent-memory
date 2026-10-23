@@ -2823,7 +2823,7 @@
           "type": "array"
         },
         "limit": {
-          "description": "Optional cap on number of rules returned, applied after the phase filter. Defaults to the MEMORY_RULES_LIMIT env var (unset = no cap); with `query`, defaults to 10.",
+          "description": "Optional cap on number of rules returned, applied after the phase filter. Defaults to the MEMORY_RULES_LIMIT env var (unset = no cap); with `query`, defaults to 10, capped at 50.",
           "minimum": 0,
           "type": "integer"
         },

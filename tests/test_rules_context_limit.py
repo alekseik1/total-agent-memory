@@ -534,3 +534,35 @@ def test_no_query_path_honours_memory_rules_limit_and_rules_index(live_store, mo
     assert [x["id"] for x in out["rules"]] == ids[:4]
     assert [x["id"] for x in out["rules_index"]] == ids[4:]
     assert out["total_matched"] == 10
+
+
+def test_query_path_limit_zero_returns_no_rules_and_shows_none(store):
+    """surface_rules clamps a limit of 0 up to 1; the query path must honour 0."""
+    ids = [_add_rule(store, f"run the test suite before every commit {i}") for i in range(3)]
+
+    r = store.get_rules_for_context(project="myproj", query="run the test suite", limit=0)
+    assert r["rules_count"] == 0
+    assert r["rules"] == []
+
+    for rid in ids:
+        row = store.db.execute(
+            "SELECT shown_count, last_fired FROM rules WHERE id=?", (rid,)).fetchone()
+        assert (row["shown_count"] or 0) == 0
+        assert row["last_fired"] is None
+
+
+def test_query_path_load_sets_last_fired_and_shows_once(store):
+    """The stale-rules report reads last_fired, so a query load must set it;
+    shown_count moves once (by the surface record), not twice."""
+    ids = [_add_rule(store, f"run the test suite before every commit {i}") for i in range(3)]
+
+    r = store.get_rules_for_context(project="myproj", query="run the test suite")
+    returned = {x["id"] for x in r["rules"]}
+    assert returned
+
+    for rid in ids:
+        row = store.db.execute(
+            "SELECT fire_count, shown_count, last_fired FROM rules WHERE id=?", (rid,)).fetchone()
+        assert row["fire_count"] == 0
+        assert (row["shown_count"] or 0) == (1 if rid in returned else 0)
+        assert (row["last_fired"] is not None) == (rid in returned)
