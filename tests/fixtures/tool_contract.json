@@ -1364,6 +1364,11 @@
         },
         "project": {
           "type": "string"
+        },
+        "stale_only": {
+          "default": false,
+          "description": "Only rows whose stored embed_model is not the active one - what a store left mixed by a backend switch or a silent fallback needs. Rows with no embedding at all are not touched.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -2706,6 +2711,7 @@
         "action": {
           "enum": [
             "list",
+            "get",
             "fire",
             "rate",
             "suspend",
@@ -2739,6 +2745,19 @@
         },
         "id": {
           "description": "Rule ID (for fire/rate/suspend/activate/retire)",
+          "type": "integer"
+        },
+        "ids": {
+          "description": "For get: rule ids to fetch in full (max 50 per call; extras are dropped, unknown/inactive ids are skipped).",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "limit": {
+          "description": "For list: optional cap on number of rules returned. Defaults to the MEMORY_RULES_LIMIT env var (unset = no cap).",
+          "minimum": 0,
           "type": "integer"
         },
         "min_n": {
@@ -2803,6 +2822,11 @@
           },
           "type": "array"
         },
+        "limit": {
+          "description": "Optional cap on number of rules returned, applied after the phase filter. Defaults to the MEMORY_RULES_LIMIT env var (unset = no cap); with `query`, defaults to 10.",
+          "minimum": 0,
+          "type": "integer"
+        },
         "phase": {
           "description": "Optional: lazy-load only rules relevant to this phase (core + phase-specific). Omit to get all rules.",
           "enum": [
@@ -2844,6 +2868,9 @@
           "default": false,
           "type": "boolean"
         },
+        "branch": {
+          "type": "string"
+        },
         "highlights": {
           "items": {
             "type": "string"
@@ -2873,6 +2900,7 @@
           "type": "string"
         },
         "session_id": {
+          "description": "Omit it: this server's own session is used. Pass one only to end a session this process does not own (a hook naming the Claude Code session, a subagent) - a session row is created for it if none exists.",
           "type": "string"
         },
         "summary": {
@@ -2882,9 +2910,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "session_id"
-      ],
+      "required": [],
       "type": "object"
     }
   },
