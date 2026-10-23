@@ -210,9 +210,10 @@ def test_lineage_columns_have_exactly_one_owner(tmp_path, monkeypatch):
 def test_repair_lets_upstream_035_and_the_900s_reapply(runner):
     """Reproduces a live database's actual state: migrations 001-034
     applied for real, these five migrations still recorded at 035-039 under
-    their v14.2.0 descriptions, the real 035-037 never run. The repair block
-    must delete the stale 035-039 rows so the real 035-037 re-apply for real
-    (not a copy of their DDL) and these five migrations re-apply under 900-904.
+    their v14.2.0 descriptions, upstream's real 035-039 never run. The repair
+    block must delete the stale 035-039 rows so the real 035-039 re-apply for
+    real (not a copy of their DDL) and these five migrations re-apply under
+    900-904.
     """
     runner._apply_sql_migrations()  # clean baseline: everything applied once
 
@@ -230,10 +231,16 @@ def test_repair_lets_upstream_035_and_the_900s_reapply(runner):
         runner.db.execute(f"DROP TRIGGER {name}")
     runner.db.executescript((ROOT / "migrations" / "032_vector_index_revision.sql").read_text())
     runner.db.execute("DROP INDEX idx_graph_nodes_matchable")
+    # That database predates upstream's real 038/039 too: undo their
+    # non-idempotent ALTERs (and 038's table) so they genuinely re-apply.
+    runner.db.execute("DROP TABLE rule_surfaces")
+    runner.db.execute("ALTER TABLE rules DROP COLUMN shown_count")
+    runner.db.execute("DROP INDEX idx_write_intents_pending")
+    runner.db.execute("ALTER TABLE write_intents DROP COLUMN lease_until")
 
     runner.db.execute(
         "DELETE FROM migrations WHERE version IN "
-        "('035','036','037','900','901','902','903','904')"
+        "('035','036','037','038','039','900','901','902','903','904')"
     )
     for version, description in [
         ("035", "reflection phase errors"),
@@ -271,12 +278,17 @@ def test_repair_lets_upstream_035_and_the_900s_reapply(runner):
     assert [tuple(r) for r in rows] == [
         ("036", "vector change log"),
         ("037", "graph matchable names"),
+        ("038", "rule surfaces"),
+        ("039", "write path reliability"),
     ]
 
     objects = {
         r[0] for r in runner.db.execute("SELECT name FROM sqlite_master").fetchall()
     }
-    assert {"vector_changes", "idx_vector_changes_revision", "idx_graph_nodes_matchable"} <= objects
+    assert {"vector_changes", "idx_vector_changes_revision", "idx_graph_nodes_matchable",
+            "rule_surfaces", "idx_write_intents_pending"} <= objects
+    assert "shown_count" in {r[1] for r in runner.db.execute("PRAGMA table_info(rules)").fetchall()}
+    assert "lease_until" in {r[1] for r in runner.db.execute("PRAGMA table_info(write_intents)").fetchall()}
 
     kid = runner.db.execute(
         "INSERT INTO knowledge (session_id, type, content, created_at) VALUES (?, ?, ?, ?)",
@@ -290,11 +302,11 @@ def test_repair_lets_upstream_035_and_the_900s_reapply(runner):
     assert {"900", "901", "902", "903", "904"} <= _applied(runner)
 
     repaired = runner.db.execute(
-        "SELECT version, description, applied_at FROM migrations WHERE version IN ('036','037')"
+        "SELECT version, description, applied_at FROM migrations WHERE version IN ('036','037','038','039')"
     ).fetchall()
     runner._apply_sql_migrations()
     again = runner.db.execute(
-        "SELECT version, description, applied_at FROM migrations WHERE version IN ('036','037')"
+        "SELECT version, description, applied_at FROM migrations WHERE version IN ('036','037','038','039')"
     ).fetchall()
     assert [tuple(r) for r in again] == [tuple(r) for r in repaired]
 
