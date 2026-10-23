@@ -42,9 +42,10 @@ and versions use [Semantic Versioning](https://semver.org/).
   remainder was reachable only by running a `sqlite3` query by hand, which
   agents skipped and which does not work at all when the DB is not local.
 - `self_rules` gains `action="get"` with `ids` (max 50 per call): returns the
-  full rows for those ids, bumps their `fire_count`/`last_fired`, skips ids
-  that are not active rules, and reports `returned_ids`. Index entries
-  themselves never fire - only rules whose full text reached the agent.
+  full rows for those ids, bumps their `shown_count`/`last_fired` (a fetch is
+  an exposure, not a fire; `fire_count` is untouched), skips ids that are not
+  active rules, and reports `returned_ids`. Index entries themselves are
+  never counted as shown - only rules whose full text reached the agent.
 
 ### Fixed - `self_rules_context` silently dropped active rules
 - `get_rules_for_context` had a hardcoded `LIMIT 20`, so projects with more
@@ -56,8 +57,9 @@ and versions use [Semantic Versioning](https://semver.org/).
   failures. Unrated rules now score as neutral (0.5) and ties break by
   `created_at DESC` (newest first).
 - The `phase` filter ran after the SQL limit, so a phase-tagged rule ranked
-  below the cap could never load. Order is now: fetch (unlimited) → phase
-  filter → `limit` → `fire_count` increment (touches only returned rules).
+  below the cap could never load. Order is now: fetch (unlimited) -> phase
+  filter -> `limit` -> `shown_count`/`last_fired` increment (touches only
+  returned rules; a load never bumps `fire_count`).
 
 ### Fixed - follow-up review findings on the above
 - `MEMORY_RULES_LIMIT=<non-integer>` used to crash the server at import
@@ -66,12 +68,12 @@ and versions use [Semantic Versioning](https://semver.org/).
   instead of raising.
 - `get_rules_for_context` now rejects a negative `limit` with `{"error":
   ...}` before querying, mirroring the existing bad-`phase` guard.
-- The per-row `fire_count`/`last_fired` UPDATE loop is now a single batched
-  `UPDATE ... WHERE id IN (...)` over the returned rule ids (only fires when
-  rows were actually returned) - only returned rules get their telemetry
-  bumped, and those columns feed `self_patterns`' `rule_effectiveness`
-  report and stale-rule query, so a narrow `MEMORY_RULES_LIMIT` also narrows
-  that telemetry.
+- The per-row load-counter UPDATE loop is now a single batched
+  `UPDATE ... WHERE id IN (...)` of `shown_count`/`last_fired` over the
+  returned rule ids (only runs when rows were actually returned) - only
+  returned rules get their telemetry bumped, and `last_fired` feeds
+  `self_patterns`' stale-rule query, so a narrow `MEMORY_RULES_LIMIT` also
+  narrows that telemetry.
 - The response now includes `total_matched` (count after the phase filter,
   before truncation) alongside `rules_count` (count actually returned), so
   callers can tell "all matching rules" from "top N of more".
