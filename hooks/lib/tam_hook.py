@@ -304,7 +304,13 @@ def project_of(payload: JsonDict) -> str:
     if override:
         return override
     cwd = str(payload.get("cwd") or os.getcwd())
-    return os.path.basename(cwd.rstrip("/\\")) or "unknown"
+    # A worktree's directory is named after its branch: name the main repository
+    # via the common git dir, lowercased like the server's _detect_project, so a
+    # hook and a tool call from the same session mint the same project key.
+    common_dir = _git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common_dir and os.path.basename(common_dir) == ".git":
+        return os.path.basename(os.path.dirname(common_dir)).lower()
+    return (os.path.basename(cwd.rstrip("/\\")) or "unknown").lower()
 
 
 def session_of(payload: JsonDict) -> str:
