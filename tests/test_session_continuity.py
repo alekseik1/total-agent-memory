@@ -374,6 +374,36 @@ def test_tool_then_hook_the_real_summary_survives(sc, sc_db, monkeypatch):
     assert _summaries(sc_db, "sess_th") == ["the real summary"]
 
 
+def test_a_hook_after_the_window_does_not_outrank_the_real_summary(sc, sc_db, monkeypatch):
+    """The hook can fire long after the agent's session_end (exit 20 minutes
+    later); a floor inserted then sorts newer and session_init would serve it."""
+    _open_session(sc_db, "sess_late")
+
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    sc.session_end("sess_late", "the real summary", project="p", producer="tool")
+    _at(monkeypatch, "2026-09-21T10:20:00Z")  # +1200s, outside the window
+    r2 = sc.session_end("sess_late", "floor text", project="p", producer="hook")
+
+    assert r2.get("deduped") is True
+    assert sc.session_init(project="p")["summary"] == "the real summary"
+
+
+def test_a_hook_on_the_real_id_does_not_outrank_a_summary_under_an_invented_id(sc, sc_db, monkeypatch):
+    """The agent's call named a session id it made up; the hook names the real
+    one, whose sessions row never closed - the floor still must not win."""
+    _open_session(sc_db, "sess_real")
+
+    _at(monkeypatch, "2026-09-21T10:00:00Z")
+    sc.session_end("made-up-id", "the real summary", project="p", producer="tool")
+    _at(monkeypatch, "2026-09-21T10:00:30Z")
+    r2 = sc.session_end("sess_real", "floor text", project="p", producer="hook")
+
+    assert r2.get("deduped") is True
+    assert sc.session_init(project="p")["summary"] == "the real summary"
+    row = sc_db.execute("SELECT ended_at FROM sessions WHERE id='sess_real'").fetchone()
+    assert row["ended_at"] == r2["ended_at"]  # the skip still closed the session row
+
+
 def test_hook_then_hook_the_first_floor_survives_but_still_closes(sc, sc_db, monkeypatch):
     """/clear and /compact can both fire the hook seconds apart - the second
     floor write must not replace the first (nothing to gain, and overwriting

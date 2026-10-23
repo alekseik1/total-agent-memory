@@ -91,7 +91,25 @@ class SessionContinuity:
         pre-close burst, a cross-project burst) - not a lost or corrupted
         write, since SQLite's own busy_timeout still serializes the actual
         INSERT/UPDATE statements.
+
+        Before all of the above, a hook call skips when the project already
+        has an unconsumed summary that ended after this session started:
+        otherwise a floor written after the window expired, or keyed on the
+        real session id while the agent's call used an invented one, sorts
+        newer than the agent's summary and session_init serves the floor.
+        Without a sessions.started_at for the id this check does nothing.
         """
+        if producer == "hook":
+            covered = self.db.execute(
+                "SELECT ss.id FROM sessions s JOIN session_summaries ss "
+                "ON ss.project = ? AND ss.consumed = 0 "
+                "AND julianday(ss.ended_at) >= julianday(s.started_at) "
+                "WHERE s.id = ? AND s.started_at IS NOT NULL "
+                "ORDER BY ss.ended_at DESC, ss.rowid DESC LIMIT 1",
+                (project, session_id),
+            ).fetchone()
+            if covered:
+                return "skip", covered[0]
         row = self.db.execute(
             "SELECT ended_at FROM sessions WHERE id = ?", (session_id,)
         ).fetchone()
