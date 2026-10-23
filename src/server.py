@@ -3008,11 +3008,7 @@ class Store:
                 f"AND id IN ({','.join('?' * len(ids))}) "
                 f"ORDER BY priority DESC, created_at DESC", ids)
             if rows:
-                self.db.execute(
-                    f"UPDATE rules SET fire_count=fire_count+1, last_fired=?, updated_at=? "
-                    f"WHERE id IN ({','.join('?' * len(rows))})",
-                    (now, now, *(r["id"] for r in rows)))
-                self.db.commit()
+                self._mark_rules_shown([r["id"] for r in rows], now)
             return {"rules": rows, "total": len(rows),
                     "returned_ids": [r["id"] for r in rows]}
 
@@ -3089,6 +3085,16 @@ class Store:
             return {"added": True, "id": cur.lastrowid}
 
         return {"error": f"Unknown action: {action}"}
+
+    def _mark_rules_shown(self, ids, now):
+        # A load is an exposure, not a fire: counting it in fire_count made the
+        # rating maths treat every session start as a failed application.
+        # last_fired still moves so the stale-rules report sees loaded rules.
+        self.db.execute(
+            f"UPDATE rules SET shown_count=COALESCE(shown_count, 0)+1, last_fired=? "
+            f"WHERE id IN ({','.join('?' * len(ids))})",
+            (now, *ids))
+        self.db.commit()
 
     def get_rules_for_context(self, project="general", categories=None, phase=None,
                               query=None, session_id=None, limit=None):
@@ -3175,17 +3181,8 @@ class Store:
             omitted = rows[effective:]
             rows = rows[:effective]
 
-        # A load is an exposure, not a fire: counting it in fire_count made the
-        # rating maths treat every session start as a failed application.
-        # last_fired still moves so the stale-rules report sees loaded rules.
         if rows:
-            now = utc_now()
-            placeholders = ",".join("?" * len(rows))
-            self.db.execute(
-                f"UPDATE rules SET shown_count=COALESCE(shown_count, 0)+1, last_fired=? "
-                f"WHERE id IN ({placeholders})",
-                (now, *(r["id"] for r in rows)))
-            self.db.commit()
+            self._mark_rules_shown([r["id"] for r in rows], utc_now())
         result = {"rules_count": len(rows), "total_matched": total_matched, "rules": rows}
         if omitted:
             # Index entries are NOT counted as shown: only rules whose full text
@@ -5621,7 +5618,7 @@ async def _tool_catalogue():
                         "returned unless `limit` is passed or the MEMORY_RULES_LIMIT env var is set. "
                         "For get: pass `ids` (max 50) to retrieve the full rows behind the "
                         "`rules_index` entries self_rules_context returns when its limit truncates; "
-                        "returned rules get fire_count/last_fired bumped, ids that are not active "
+                        "returned rules get shown_count/last_fired bumped, ids that are not active "
                         "rules are skipped and `returned_ids` says which came back.",
             inputSchema={
                 "type": "object",

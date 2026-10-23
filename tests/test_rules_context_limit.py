@@ -417,9 +417,10 @@ def test_rules_index_head_is_first_80_chars_of_content(store):
     assert "\n" in entry["head"]
 
 
-def test_manage_rule_get_returns_full_content_and_bumps_fire_count(store):
+def test_manage_rule_get_returns_full_content_and_counts_as_shown(store):
     """action="get" is the fetch path behind `rules_index`: full rows back, and
-    the fetched rules fire (the old sqlite3 workaround bumped nothing)."""
+    the fetched rules count as shown like a load (the old sqlite3 workaround
+    bumped nothing). A fetch is an exposure, not a fire."""
     ids = _add_ranked_rules(store, 5)
     wanted = [ids[3], ids[4]]
 
@@ -430,8 +431,10 @@ def test_manage_rule_get_returns_full_content_and_bumps_fire_count(store):
 
     for rid in ids:
         row = store.db.execute(
-            "SELECT fire_count FROM rules WHERE id=?", (rid,)).fetchone()
-        assert row["fire_count"] == (1 if rid in wanted else 0)
+            "SELECT fire_count, shown_count, last_fired FROM rules WHERE id=?", (rid,)).fetchone()
+        assert row["fire_count"] == 0
+        assert (row["shown_count"] or 0) == (1 if rid in wanted else 0)
+        assert (row["last_fired"] is not None) == (rid in wanted)
 
 
 def test_manage_rule_get_skips_unknown_and_retired_ids(store):
@@ -447,7 +450,7 @@ def test_manage_rule_get_skips_unknown_and_retired_ids(store):
 
 
 def test_manage_rule_get_caps_ids_at_50(store):
-    """More than 50 ids → only the first 50 are fetched and fired."""
+    """More than 50 ids -> only the first 50 are fetched and counted as shown."""
     ids = [_add_rule(store, f"rule {i}") for i in range(60)]
 
     r = store.manage_rule("sess-limit-test", "get", ids=ids)
@@ -456,8 +459,9 @@ def test_manage_rule_get_caps_ids_at_50(store):
 
     for rid in ids[50:]:
         row = store.db.execute(
-            "SELECT fire_count FROM rules WHERE id=?", (rid,)).fetchone()
-        assert row["fire_count"] == 0
+            "SELECT shown_count, last_fired FROM rules WHERE id=?", (rid,)).fetchone()
+        assert (row["shown_count"] or 0) == 0
+        assert row["last_fired"] is None
 
 
 def test_manage_rule_get_rejects_missing_or_non_integer_ids(store):
