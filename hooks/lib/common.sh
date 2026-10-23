@@ -160,8 +160,12 @@ hook_project_name() {
     # Resolve the main repository name via the common git dir.
     local common_dir name
     common_dir=$(cd "$cwd" 2>/dev/null && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    # A common dir not named .git (bare clone: repo.git, .bare) names itself,
+    # as in the server's _detect_project.
     if [ -n "$common_dir" ] && [ "$(basename "$common_dir")" = ".git" ]; then
         name=$(basename "$(dirname "$common_dir")")
+    elif [ -n "$common_dir" ]; then
+        name=$(basename "$common_dir")
     else
         name=$(basename "$cwd")
     fi

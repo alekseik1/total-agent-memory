@@ -40,6 +40,7 @@ Claude Code ignores plain stdout of those events.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import logging
 import os
@@ -303,13 +304,20 @@ def project_of(payload: JsonDict) -> str:
     override = os.environ.get("MEMORY_PROJECT")
     if override:
         return override
-    cwd = str(payload.get("cwd") or os.getcwd())
+    return _project_of_cwd(str(payload.get("cwd") or os.getcwd()))
+
+
+@functools.lru_cache(maxsize=None)
+def _project_of_cwd(cwd: str) -> str:
     # A worktree's directory is named after its branch: name the main repository
-    # via the common git dir, lowercased like the server's _detect_project, so a
-    # hook and a tool call from the same session mint the same project key.
+    # via the common git dir, as the server's _detect_project does (lowercased; a
+    # common dir not named .git, as in a bare clone, names itself), so a hook and
+    # a tool call from the same session mint the same project key.
     common_dir = _git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    if common_dir and os.path.basename(common_dir) == ".git":
-        return os.path.basename(os.path.dirname(common_dir)).lower()
+    if common_dir:
+        root = os.path.dirname(common_dir) if os.path.basename(common_dir) == ".git" else common_dir
+        if os.path.basename(root):
+            return os.path.basename(root).lower()
     return (os.path.basename(cwd.rstrip("/\\")) or "unknown").lower()
 
 
