@@ -513,12 +513,12 @@ def test_query_path_without_limit_caps_at_the_default_surface_limit(live_store):
     surface_rules (it does int(limit)); the query path caps at
     DEFAULT_SURFACE_LIMIT, MEMORY_RULES_LIMIT is a no-query setting."""
     s, server = live_store
-    for i in range(server.DEFAULT_SURFACE_LIMIT + 5):
+    for i in range(15):
         _add_rule(s, f"run the test suite before every commit {i}")
 
     raw = asyncio.run(server._do("self_rules_context", {"project": "myproj", "query": "run the test suite"}))
     out = json.loads(raw)
-    assert 0 < out["rules_count"] <= server.DEFAULT_SURFACE_LIMIT
+    assert out["rules_count"] == 10  # DEFAULT_SURFACE_LIMIT, pinned as a literal
     assert all("surface_id" in r for r in out["rules"])
 
 

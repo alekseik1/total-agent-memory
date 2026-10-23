@@ -87,10 +87,10 @@ def test_embed_keeps_its_old_shape_for_existing_callers(store, monkeypatch):
     assert isinstance(out, list) and len(out[0]) == 384
 
 
-def test_a_row_saved_through_the_fallback_says_what_made_it(store, monkeypatch):
-    """End to end through the record embed path memory_save and the backfill
-    drain share (`_embed_for_record`): the row in `embeddings`, not just the
-    return value."""
+def test_a_backfilled_row_says_what_made_it(store, monkeypatch):
+    """End to end through the backfill drain (`_backfill_one`, which embeds via
+    `_embed_for_record` like memory_save): the row in `embeddings`, not just
+    the return value."""
     from embedding_backfill import BackfillOutcome
 
     store._embed_mode = "ollama"

@@ -7,13 +7,14 @@ the two producers' dedup keys for the same close actually match.
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests.test_hook_runtime import tam_hook
+from tests.test_hook_runtime import NESTED_TRANSCRIPT, hook_env, run_hook, tam_hook
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMMON_SH = REPO_ROOT / "hooks" / "lib" / "common.sh"
@@ -57,6 +58,28 @@ def test_session_end_helper_names_the_main_repo_from_a_worktree(git_worktree, tm
 
     assert seen == [main.name.lower()]
     assert seen[0] != worktree.name
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_session_end_hook_logs_the_main_repo_from_a_worktree(git_worktree, tmp_path):
+    """The real hooks/session-end.sh, run from a worktree cwd, hands the
+    helper the main repo's name - checked in what it writes to hooks.log."""
+    main, worktree = git_worktree
+    world = {"home": tmp_path / "home", "mem": tmp_path / "mem"}
+    for path in world.values():
+        path.mkdir()
+    transcript = tmp_path / "abc-123.jsonl"
+    transcript.write_text("\n".join(json.dumps(e) for e in NESTED_TRANSCRIPT) + "\n")
+
+    proc = run_hook(shutil.which("bash"), "session-end.sh", {
+        "hook_event_name": "SessionEnd", "session_id": "end-wt", "cwd": str(worktree),
+        "reason": "prompt_input_exit", "transcript_path": str(transcript)}, hook_env(world, REPO_ROOT))
+
+    assert proc.returncode == 0, proc.stderr
+    log = (world["mem"] / "hooks.log").read_text()
+    assert f"SESSION_END {main.name.lower()}:" in log
+    assert f"SESSION_END {worktree.name}" not in log
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not available")

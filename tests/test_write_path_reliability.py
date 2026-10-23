@@ -59,6 +59,9 @@ class FlakyEmbedder:
 
     def __init__(self, store):
         self.real = store.embed_with_identity
+        # What embed_with_identity returns when no backend answers: no vectors,
+        # still the configured identity.
+        self.identity = (store._active_embed_model_name(), store._embed_mode)
         self.healthy = False
         self.calls = 0
 
@@ -68,7 +71,7 @@ class FlakyEmbedder:
     def __call__(self, texts):
         self.calls += 1
         if not self.healthy:
-            return None, (None, None)
+            return None, self.identity
         return self.real(texts)
 
 
