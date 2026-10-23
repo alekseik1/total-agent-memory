@@ -34,13 +34,15 @@ and versions use [Semantic Versioning](https://semver.org/).
   production error string and once with `bad parameter or other API misuse`.
 
 ### Added - truncated `self_rules_context` now carries the rules it cut
-- When `MEMORY_RULES_LIMIT` (or a per-call `limit`) truncates the result,
-  `get_rules_for_context` adds `rules_index` - `{id, priority, category,
+- When `MEMORY_RULES_LIMIT` (or a per-call `limit`) truncates a result
+  without `query`, `get_rules_for_context` adds `rules_index` - `{id, priority, category,
   head}` for every omitted rule, in the same ordering - plus a `hint`
   pointing at the new fetch action. Both keys are absent when nothing was
   cut, so the untruncated response shape is unchanged. Previously the
   remainder was reachable only by running a `sqlite3` query by hand, which
   agents skipped and which does not work at all when the DB is not local.
+- With `query`, `limit` defaults to `DEFAULT_SURFACE_LIMIT`, is capped at
+  `MAX_SURFACE_LIMIT`, and the response has no `rules_index`/`total_matched`.
 - `self_rules` gains `action="get"` with `ids` (max 50 per call): returns the
   full rows for those ids, bumps their `shown_count`/`last_fired` (a fetch is
   an exposure, not a fire; `fire_count` is untouched), skips ids that are not
@@ -51,7 +53,7 @@ and versions use [Semantic Versioning](https://semver.org/).
 - `get_rules_for_context` had a hardcoded `LIMIT 20`, so projects with more
   than 20 active rules silently lost the rest. Removed the SQL limit; added
   an optional `limit` parameter and a `MEMORY_RULES_LIMIT` env var (default:
-  no cap).
+  no cap) for calls without `query`.
 - Ranking previously sorted `success_rate DESC`, which put unrated new rules
   (0 successes, 0 fails → success_rate 0.0) below rules with recorded
   failures. Unrated rules now score as neutral (0.5) and ties break by
@@ -71,11 +73,12 @@ and versions use [Semantic Versioning](https://semver.org/).
 - The per-row load-counter UPDATE loop is now a single batched
   `UPDATE ... WHERE id IN (...)` of `shown_count`/`last_fired` over the
   returned rule ids (only runs when rows were actually returned) - only
-  returned rules get their telemetry bumped, and `last_fired` feeds
-  `self_patterns`' stale-rule query, so a narrow `MEMORY_RULES_LIMIT` also
-  narrows that telemetry.
-- The response now includes `total_matched` (count after the phase filter,
-  before truncation) alongside `rules_count` (count actually returned), so
+  returned rules get their telemetry bumped: `shown_count` decides which
+  rules appear in `self_patterns`' `rule_effectiveness` report and
+  `last_fired` feeds its stale-rule query, so a narrow `MEMORY_RULES_LIMIT`
+  also narrows that telemetry.
+- Without `query`, the response now includes `total_matched` (count after
+  the phase filter, before truncation) alongside `rules_count` (count actually returned), so
   callers can tell "all matching rules" from "top N of more".
 - The ranking expression (unrated rules score 0.5, tie-break by
   `created_at DESC`) is now a single module-level constant
