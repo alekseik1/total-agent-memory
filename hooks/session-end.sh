@@ -5,7 +5,8 @@
 # 1. Parses the transcript (nested Claude Code JSONL and the legacy flat
 #    format, via src/auto_episode_capture.extract_messages_from_transcript)
 # 2. Writes this session's recovery file (one per session)
-# 3. Starts auto_session_save.py and auto_episode_capture.py in background
+# 3. Starts auto_session_save.py, auto_episode_capture.py and auto_session_end.py
+#    in background
 # 4. Cleans error-fix state
 #
 # SessionEnd output is not shown to the model; progress goes to hooks.log.

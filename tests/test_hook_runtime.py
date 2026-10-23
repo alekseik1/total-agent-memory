@@ -327,13 +327,38 @@ class TestSessionEnd:
             ROOT / "src", world["mem"] / "recovery", "proj", "User exited",
             runner=lambda _src, script, args: calls.append((script, list(args))) or True)
         scripts = [c[0] for c in calls]
-        assert scripts == ["auto_session_save.py", "auto_episode_capture.py"]
+        assert scripts == ["auto_session_save.py", "auto_episode_capture.py", "auto_session_end.py"]
         save_args = calls[0][1]
         assert user in save_args[save_args.index("--user-context") + 1]
         assert assistant in save_args[save_args.index("--assistant-context") + 1]
         episode_args = calls[1][1]
         assert episode_args[episode_args.index("--transcript") + 1] == str(transcript)
         assert any("auto_session_save started" in a for a in actions)
+
+    @pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+    def test_session_end_starts_auto_session_end_with_its_args(self, world):
+        """auto_session_end.py writes the session_summaries row session_init
+        resumes from; only the hook knows the Claude Code session id."""
+        repo = world["tmp"] / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "feature/x"], cwd=repo, check=True)
+        transcript = self.write_transcript(world, NESTED_TRANSCRIPT)
+        calls: list[tuple[str, list[str]]] = []
+        actions = tam_hook.session_end(
+            {"session_id": "s", "cwd": str(repo), "transcript_path": str(transcript)},
+            ROOT / "src", world["mem"] / "recovery", "proj", "User exited",
+            runner=lambda _src, script, args: calls.append((script, list(args))) or True)
+
+        end_args = dict(calls)["auto_session_end.py"]
+        opts = dict(zip(end_args[::2], end_args[1::2]))
+        assert opts["--session-id"] == "abc-123"
+        assert opts["--project"] == "proj"
+        assert opts["--cwd"] == str(repo)
+        assert opts["--branch"] == "feature/x"
+        assert opts["--reason"] == "User exited"
+        assert "now add a regression test" in opts["--user-context"]
+        assert "Root cause" in opts["--assistant-context"]
+        assert any("auto_session_end started for abc-123" in a for a in actions)
 
 
 # ──────────────────────────────────────────────
