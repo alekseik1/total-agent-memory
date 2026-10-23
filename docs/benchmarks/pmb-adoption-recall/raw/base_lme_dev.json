@@ -1,0 +1,104 @@
+{
+ "bench": "lme",
+ "split": "dev",
+ "limit": 0,
+ "cross_rerank": "off",
+ "units": 95,
+ "questions": 95,
+ "defaults": {
+  "fts": 1.0,
+  "semantic": 1.2,
+  "hyde": 1.0,
+  "multi_repr": 1.0,
+  "fuzzy": 0.5,
+  "graph": 0.3,
+  "episode": 0.9,
+  "atomic_facts": 1.0,
+  "directives": 1.0,
+  "multi_query": 0.0
+ },
+ "configs": {
+  "full": {
+   "fts": 1.0,
+   "semantic": 1.2,
+   "hyde": 1.0,
+   "multi_repr": 1.0,
+   "fuzzy": 0.5,
+   "graph": 0.3,
+   "episode": 0.9,
+   "atomic_facts": 1.0,
+   "directives": 1.0,
+   "multi_query": 0.0
+  }
+ },
+ "results": {
+  "full": {
+   "all": {
+    "n": 95,
+    "R@1": 0.4632,
+    "R@5": 0.8316,
+    "R@10": 0.9158,
+    "MRR": 0.6186
+   },
+   "knowledge-update": {
+    "n": 10,
+    "R@1": 0.5,
+    "R@5": 0.9,
+    "R@10": 1.0,
+    "MRR": 0.675
+   },
+   "multi-session": {
+    "n": 25,
+    "R@1": 0.64,
+    "R@5": 0.88,
+    "R@10": 0.96,
+    "MRR": 0.7597
+   },
+   "single-session-assistant": {
+    "n": 13,
+    "R@1": 0.3846,
+    "R@5": 0.7692,
+    "R@10": 1.0,
+    "MRR": 0.547
+   },
+   "single-session-preference": {
+    "n": 5,
+    "R@1": 0.2,
+    "R@5": 0.6,
+    "R@10": 0.6,
+    "MRR": 0.3935
+   },
+   "single-session-user": {
+    "n": 11,
+    "R@1": 0.8182,
+    "R@5": 0.9091,
+    "R@10": 1.0,
+    "MRR": 0.8636
+   },
+   "temporal-reasoning": {
+    "n": 31,
+    "R@1": 0.2581,
+    "R@5": 0.8065,
+    "R@10": 0.8387,
+    "MRR": 0.4659
+   },
+   "tier_fired": {
+    "fts": 1.0,
+    "semantic": 1.0,
+    "hyde": 0.0,
+    "multi_repr": 0.0,
+    "fuzzy": 0.0,
+    "graph": 0.0,
+    "episode": 0.0,
+    "atomic_facts": 0.0,
+    "directives": 0.0,
+    "multi_query": 0.0
+   },
+   "latency_ms": {
+    "p50": 56.0,
+    "p95": 220.1
+   }
+  }
+ },
+ "seconds": 4753.2
+}

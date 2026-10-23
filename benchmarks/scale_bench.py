@@ -171,12 +171,15 @@ def open_vectors(d: Path, total: int, mode: str) -> np.memmap:
 def cmd_embed(args) -> None:
     from fastembed import TextEmbedding
 
+    sys.path.insert(0, str(SRC))
+    from memory_core.fastembed_loader import load_model
+
     d = Path(args.dir)
     d.mkdir(parents=True, exist_ok=True)
     meta = d / "vectors.json"
     done = json.loads(meta.read_text())["done"] if meta.exists() else 0
     vecs = open_vectors(d, args.total, "r+" if vectors_path(d).exists() else "w+")
-    model = TextEmbedding(EMBED_MODEL)
+    model = load_model(TextEmbedding, EMBED_MODEL)
     started = time.perf_counter()
     first = done
     while done < args.total:

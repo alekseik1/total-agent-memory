@@ -28,6 +28,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import enrichment_worker as ew
 
+# Upper bound for waiting on the background worker; generous because shared
+# CI runners can stall a thread for hundreds of milliseconds.
+WORKER_WAIT_TIMEOUT_SEC = 10.0
+
 # ──────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────
@@ -394,9 +398,12 @@ def test_start_worker_launches_thread_when_enabled(monkeypatch, db, seed_record)
     monkeypatch.setenv("MEMORY_ENRICH_TICK_SEC", "0.02")
 
     drained = []
+    ticked_twice = threading.Event()
 
     def fake_run(db_, store=None, **kw):
         drained.append(time.monotonic())
+        if len(drained) >= 2:
+            ticked_twice.set()
         return {"claimed": 0, "done": 0, "retried": 0, "failed": 0}
 
     monkeypatch.setattr(ew, "run_pending", fake_run)
@@ -404,12 +411,13 @@ def test_start_worker_launches_thread_when_enabled(monkeypatch, db, seed_record)
     t = ew.start_worker(fake_store)
     assert t is not None
     try:
-        # Give the thread a couple of ticks
-        time.sleep(0.1)
-        assert len(drained) >= 2
+        # The worker must keep ticking: a second drain proves the loop repeats.
+        assert ticked_twice.wait(WORKER_WAIT_TIMEOUT_SEC), (
+            f"worker drained {len(drained)} time(s) in {WORKER_WAIT_TIMEOUT_SEC}s"
+        )
     finally:
         t.stop()
-        t.join(timeout=1)
+        t.join(timeout=WORKER_WAIT_TIMEOUT_SEC)
         assert not t.is_alive()
 
 

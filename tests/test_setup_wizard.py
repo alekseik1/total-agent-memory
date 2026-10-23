@@ -4,13 +4,14 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import signal
 import sqlite3
 import stat
 import subprocess
 import sys
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import httpx
 
@@ -106,7 +107,7 @@ def test_personal_interactive_registers_clients_hides_key_and_writes_record(tmp_
     assert len(script.hidden) == 1 and 'hidden' in script.hidden[0]
     settings = world.json('.claude/settings.json')
     commands = [h['command'] for blocks in settings['hooks'].values() for b in blocks for h in b['hooks']]
-    assert f"{world.home}/.claude/hooks/session-start.sh" in commands
+    assert shlex.quote(str(world.home / '.claude' / 'hooks' / 'session-start.sh')) in commands
     assert os.access(world.home / '.claude' / 'hooks' / 'session-start.sh', os.X_OK)
     assert not (world.home / '.claude' / 'skills').exists()
     assert SUPPORT_URL not in out
@@ -202,7 +203,8 @@ def test_ctrl_c_during_apply_waits_for_a_complete_write(tmp_path, monkeypatch):
     def interrupted_write(change):
         calls.append(change.path)
         if len(calls) == 1:
-            os.kill(os.getpid(), signal.SIGINT)
+            # raise_signal runs the installed handler; on Windows os.kill(own pid) terminates the process.
+            signal.raise_signal(signal.SIGINT)
         real_write(change)
 
     monkeypatch.setattr(clients, 'write', interrupted_write)
@@ -295,7 +297,9 @@ def test_company_interactive_creates_admin_departments_providers_and_service(tmp
     Accounts(registry).redeem_invite('alice', invite, PASSWORD, 'ip')
     assert out.count(invite) == 1 and SECRET not in out
     unit = (root / 'deploy' / 'tam-team.service').read_text()
-    assert f'--root {root}' in unit and '--host 0.0.0.0 --port 3999' in unit and 'Restart=on-failure' in unit
+    assert '--host 0.0.0.0 --port 3999' in unit and 'Restart=on-failure' in unit
+    if os.name == 'posix':  # systemd units are Linux-only; a Windows data path is never rendered into one
+        assert f'--root {root}' in unit
     assert 'https://memory.acme.test/dashboard/' in out and 'https://memory.acme.test/mcp/' in out
     assert out.count(SUPPORT_URL) == 1 and SUPPORT_LINE in out
     assert not list(root.parent.glob('.tam-setup-*'))
@@ -342,7 +346,8 @@ def test_company_compose_hands_over_to_the_web_wizard(tmp_path):
     assert code == 0, out
     env_file = world.home / 'srv' / 'deploy' / 'compose.env'
     assert 'TAM_TEAM_PORT=3999' in env_file.read_text()
-    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    if os.name == 'posix':
+        assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
     assert 'setup code' in out and not (world.home / 'srv' / 'identity.db').exists()
 
 
@@ -362,15 +367,16 @@ def test_company_continuous_backup_to_s3_writes_litestream_service(tmp_path):
     assert code == 0, out
     root = (world.home / 'srv').resolve()
     config = (root / 'deploy' / 'litestream.yml').read_text()
-    assert f'dir: "{root}"' in config and f'dir: "{root / "workspaces"}"' in config
+    assert f'dir: {json.dumps(str(root))}' in config and f'dir: {json.dumps(str(root / "workspaces"))}' in config
     assert 'url: "s3://acme-tam/prod/workspaces"' in config and 'retention: "72h"' in config
     env = (root / 'deploy' / 'replication.env').read_text()
     assert 'TAM_TEAM_REPLICA_URL=s3://acme-tam/prod\n' in env and 'TAM_TEAM_REPLICA_ENDPOINT=https://s3.acme.test' in env
-    for name in ('litestream.yml', 'replication.env'):
-        assert stat.S_IMODE((root / 'deploy' / name).stat().st_mode) == 0o600
     unit = (root / 'deploy' / 'tam-team-litestream.service').read_text()
-    assert f'EnvironmentFile={root}/deploy/replica-credentials.env' in unit
-    assert f'ExecStart=litestream replicate -config {root}/deploy/litestream.yml' in unit
+    if os.name == 'posix':  # NTFS has no POSIX mode bits; systemd units are Linux-only
+        for name in ('litestream.yml', 'replication.env'):
+            assert stat.S_IMODE((root / 'deploy' / name).stat().st_mode) == 0o600
+        assert f'EnvironmentFile={root}/deploy/replica-credentials.env' in unit
+        assert f'ExecStart=litestream replicate -config {root}/deploy/litestream.yml' in unit
     assert 'AWS_SECRET_ACCESS_KEY=...' in out and 'replication status' in out
     assert 'Continuous backup' in out and 's3://acme-tam/prod' in out
     assert json.loads(world.record.read_text())['company']['backup_replica'] == 's3://acme-tam/prod'
@@ -541,13 +547,14 @@ def test_personal_install_offers_add_company_server(tmp_path):
     assert code == CANCELLED and 'Company server (from --mode)' in out
 
 
-def test_hook_commands_survive_a_home_with_spaces(tmp_path):
-    home = tmp_path / "Jane Doe"
+def test_hook_commands_survive_a_home_with_spaces():
+    # POSIX hosts get POSIX paths whatever machine runs the test.
+    home = PurePosixPath("/Users/Jane Doe")
     host = clients.Host(home, "Darwin", {}, lambda _name: None)
     command = extras._command(host, home / ".claude" / "hooks" / "session-start.sh")
-    assert command == f"'{home}/.claude/hooks/session-start.sh'"
-    plain = clients.Host(tmp_path / "jane", "Linux", {}, lambda _name: None)
-    assert extras._command(plain, tmp_path / "jane" / "x.sh") == str(tmp_path / "jane" / "x.sh")
+    assert command == "'/Users/Jane Doe/.claude/hooks/session-start.sh'"
+    plain = clients.Host(PurePosixPath("/home/jane"), "Linux", {}, lambda _name: None)
+    assert extras._command(plain, PurePosixPath("/home/jane/x.sh")) == "/home/jane/x.sh"
 
 
 def test_upgrade_points_at_plain_text_keys_and_reconfigure_moves_them(tmp_path, caplog):
@@ -561,3 +568,12 @@ def test_upgrade_points_at_plain_text_keys_and_reconfigure_moves_them(tmp_path, 
     assert code == 0, out
     assert SECRET not in (world.home / '.claude.json').read_text()
     assert saved_settings(world)['OPENAI_API_KEY'] == SECRET
+
+
+def test_codex_home_never_reaches_tests_or_their_subprocesses():
+    # Regression: run from inside Codex (which sets CODEX_HOME), the installer tests wrote a test's
+    # temporary memory directory into the developer's real ~/.codex/config.toml. conftest drops it.
+    assert 'CODEX_HOME' not in os.environ
+    child = subprocess.run([sys.executable, '-c', "import os; print(os.environ.get('CODEX_HOME', ''))"],
+                           capture_output=True, text=True, timeout=30, check=True)
+    assert child.stdout.strip() == ''

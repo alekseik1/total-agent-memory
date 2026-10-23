@@ -109,6 +109,13 @@ HOOK_SESSION_END="$INSTALL_DIR/hooks/session-end.sh"
 HOOK_STOP="$INSTALL_DIR/hooks/on-stop.sh"
 HOOK_BASH="$INSTALL_DIR/hooks/memory-trigger.sh"
 HOOK_WRITE="$INSTALL_DIR/hooks/auto-capture.sh"
+# Ambient memory: prompt recall, rule reminders, the agent action log and Codex
+# turns. They run `docker exec -i <container> python -m ambient ...` because the
+# store lives in the container's volume.
+HOOK_PROMPT="$INSTALL_DIR/hooks/user-prompt-submit.sh"
+HOOK_RULES="$INSTALL_DIR/hooks/rule-reminder.sh"
+HOOK_ACTIONS="$INSTALL_DIR/hooks/post-tool-use.sh"
+HOOK_CODEX="$INSTALL_DIR/hooks/codex-notify.sh"
 
 # Hooks read TAM_DOCKER=1 at runtime and switch to `docker exec`.
 # We wrap each via a small launcher that exports the env var.
@@ -116,7 +123,8 @@ HOOK_WRITE="$INSTALL_DIR/hooks/auto-capture.sh"
 # hooks that haven't been updated yet (see hooks/lib/common.sh).
 LAUNCHER_DIR="$INSTALL_DIR/hooks/_docker-launchers"
 mkdir -p "$LAUNCHER_DIR"
-for src in "$HOOK_SESSION" "$HOOK_SESSION_END" "$HOOK_STOP" "$HOOK_BASH" "$HOOK_WRITE"; do
+for src in "$HOOK_SESSION" "$HOOK_SESSION_END" "$HOOK_STOP" "$HOOK_BASH" "$HOOK_WRITE" \
+           "$HOOK_PROMPT" "$HOOK_RULES" "$HOOK_ACTIONS" "$HOOK_CODEX"; do
     name=$(basename "$src")
     dest="$LAUNCHER_DIR/$name"
     cat > "$dest" <<LAUNCHER
@@ -149,16 +157,29 @@ def L(name):
 h["SessionStart"]  = [{"matcher": "", "hooks": [L("session-start.sh")]}]
 h["SessionEnd"]    = [{"matcher": "", "hooks": [L("session-end.sh")]}]
 h["Stop"]          = [{"matcher": "", "hooks": [L("on-stop.sh")]}]
+h["UserPromptSubmit"] = [{"matcher": "", "hooks": [L("user-prompt-submit.sh")]}]
+h["PreToolUse"]    = [{"matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit", "hooks": [L("rule-reminder.sh")]}]
 h["PostToolUse"]   = [
     {"matcher": "Bash",       "hooks": [L("memory-trigger.sh")]},
     {"matcher": "Write|Edit", "hooks": [L("auto-capture.sh")]},
+    {"matcher": "",           "hooks": [L("post-tool-use.sh")]},
+]
+# Claude Code reports a failed call through PostToolUseFailure, not PostToolUse.
+h["PostToolUseFailure"] = [
+    {"matcher": "Bash", "hooks": [L("memory-trigger.sh")]},
+    {"matcher": "",     "hooks": [L("post-tool-use.sh")]},
 ]
 
 with open(settings_path, "w") as f:
     json.dump(settings, f, indent=2)
 
-print("  OK: Hooks registered (SessionStart, SessionEnd, Stop, PostToolUse:Bash/Write|Edit)")
+print("  OK: Hooks registered (SessionStart, SessionEnd, Stop, UserPromptSubmit, PreToolUse:Bash|Edit|Write, "
+      "PostToolUse:Bash/Write|Edit/*, PostToolUseFailure:Bash/*)")
 PY
+
+# Codex CLI has its own config; the installer only prepares the launcher.
+echo "  Codex CLI (optional): add to ~/.codex/config.toml"
+echo "    notify = [\"$LAUNCHER_DIR/codex-notify.sh\"]"
 
 # -- 6. Summary --
 echo ""

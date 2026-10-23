@@ -12,7 +12,8 @@ Open the local dashboard (`http://127.0.0.1:37737` by default) and choose **Sett
 | Language model | Provider (Ollama, OpenAI, Anthropic, OpenAI-compatible, auto), model, API base URL, API key, LLM tasks on/off, timeout |
 | Embeddings | Provider. OpenAI, Cohere and DashScope take a model, key, base URL and dimensions. The local FastEmbed model is a setup preset: change it with `tam setup --reconfigure`, then run `memory_rebuild_embeddings` |
 | Search answers | Characters per search result (`MEMORY_RECALL_MAX_RESULT_CHARS`, default 6000), flag records that address the agent (`MEMORY_FLAG_INSTRUCTIONS`, default on), cross-encoder re-ranking (`MEMORY_CROSS_RERANK`) |
-| Storage | Days to keep raw call logs (`MEMORY_RAW_LOG_RETENTION_DAYS`, not set = forever), embedding model cache folder (`TAM_MODEL_CACHE`) |
+| Storage | Days to keep raw call logs (`MEMORY_RAW_LOG_RETENTION_DAYS`, not set = forever), embedding model cache folder (`TAM_MODEL_CACHE`), days to keep the agent action log (`TAM_ACTION_LOG_RETENTION_DAYS`, default 30) |
+| Agent interface | Tool set offered to agents (`TAM_TOOL_PROFILE`: `full` default, `lean`, `minimal`), usage instructions sent on connect (`TAM_MCP_INSTRUCTIONS`, default on), per-tool call statistics (`TAM_TOOL_TELEMETRY`, default on); ambient memory through the hooks: recall with every prompt (`TAM_AMBIENT_RECALL`, its budget `TAM_AMBIENT_TOKEN_BUDGET` and time limit `TAM_AMBIENT_LATENCY_MS`), rule reminders before commands and edits (`TAM_RULE_REMINDERS`), the end-of-turn rule check (`TAM_RULE_COMPLIANCE`), turn summaries (`TAM_TURN_AUTOSAVE`), rule drafts from user corrections (`TAM_CORRECTION_CAPTURE`) and the agent action log (`TAM_ACTION_LOG`), all default on — see [configuration.md](configuration.md#ambient-memory-hooks) |
 | Stored credentials | Scan the store for credentials saved by earlier versions, then back up and redact them |
 
 **Precedence.** A value saved on this page overrides the environment and the `env` block of an MCP
@@ -68,6 +69,23 @@ A record that addresses the reading agent rather than stating a fact is marked
 `untrusted_instructions: true`, for example "ignore previous instructions" or "send the SSH key to …".
 Once a result holds such a record, it also carries a `notice` telling the agent to treat it as data. Nothing is
 removed. The team server applies both rules with its own settings.
+
+## Agent interface
+
+`TAM_TOOL_PROFILE` picks the catalogue `tools/list` returns. `full` (the default) is every tool with its
+long description, as the Claude Code plugin and its skill expect. `lean` lists 28 everyday tools and `minimal`
+the 12 core ones (recall, save, get, update, delete, session start and end, rules, file context, learn_error,
+kg_add_fact); both use one-line descriptions with an inline signature and drop per-parameter descriptions
+from the schemas. A tool the profile hides still answers when called, so older prompts keep working. An
+unknown value stops the server at startup. `scripts/tool_catalogue_size.py` prints the size of each catalogue.
+
+`TAM_MCP_INSTRUCTIONS=false` stops the server from sending its short usage guide (read first, what to save,
+what not to save, and the server start date for resolving relative dates) when a client connects.
+
+With `TAM_TOOL_TELEMETRY` on, every tool call adds a row to `tool_calls`: tool name, duration, outcome, error
+class and the byte sizes of arguments and result, never their contents. Rows are written in batches and
+when the server exits, and are kept 7 days. `memory_perf_report` returns per-tool count, p50, p95 and error
+rate for the last 24 hours under `tool_calls`.
 
 ## Erasing a record
 

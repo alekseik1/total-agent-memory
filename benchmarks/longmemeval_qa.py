@@ -152,10 +152,13 @@ def open_store(store_dir: Path):
 
 def retrieve(srv, question: dict, variant: Variant) -> tuple[list[dict], str, float]:
     started = time.perf_counter()
+    # The benchmark fixes the moment of asking: relative dates in the question
+    # ("last month", "three weeks ago") are counted from question_date, not from today.
     raw = asyncio.run(srv._do("memory_recall", {
         "query": question["question"], "project": f"lme_{question['question_id']}",
         "limit": variant.limit, "mode": "context", "neighbors": variant.neighbors,
         "context_max_chars": variant.context_chars, "detail": "full",
+        "as_of": question["question_date"],
     }))
     elapsed = (time.perf_counter() - started) * 1000
     text = raw[0].text if isinstance(raw, list) else raw

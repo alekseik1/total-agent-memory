@@ -127,7 +127,8 @@ def russian_stem(word: str) -> str:
 
 
 def _fts_phrase(text: str) -> str:
-    return '"' + text.replace('"', '""') + '"'
+    # FTS5 reads an embedded NUL as end of input ("unterminated string").
+    return '"' + text.replace("\x00", "").replace('"', '""') + '"'
 
 
 def fts_match_query(query: str) -> str:

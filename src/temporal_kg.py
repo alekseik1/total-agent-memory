@@ -12,6 +12,9 @@ Design:
 - Invalidation closes an assertion (sets valid_to) and optionally links to
   the superseding assertion; graph_edges is updated in lockstep.
 - Subjects/objects can reference graph_nodes.id or be free-form strings.
+- Predicates match by alias group (src/predicate_vocab.py): `city`,
+  `current_city` and `lives_in` are one relation for dedup, invalidation and
+  filters, while each assertion keeps the predicate it was stated with.
 """
 
 from __future__ import annotations
@@ -38,6 +41,38 @@ def _normalize_timestamp(value: str) -> str:
 
 def _new_id() -> str:
     return uuid.uuid4().hex
+
+
+def predicate_forms(predicate: str) -> tuple[str, ...]:
+    """Stored predicate values equivalent to ``predicate`` (itself first).
+
+    An unreadable vocabulary degrades to exact matching and is journaled, so
+    a broken file never blocks a write.
+    """
+    try:
+        from predicate_vocab import get_vocabulary
+        return get_vocabulary().match_forms(predicate)
+    except Exception as error:  # noqa: BLE001 — vocabulary problems must not block the KG
+        LOG(f"predicate vocabulary unavailable, exact match for {predicate!r}: {error}")
+        from error_journal import log_error
+        log_error("temporal_kg.predicate_vocab", error, "predicate vocabulary unavailable")
+        return (predicate,)
+
+
+def canonical_predicate(predicate: str) -> str:
+    """Canonical relation name for ``predicate`` (normalized form when unknown)."""
+    try:
+        from predicate_vocab import get_vocabulary
+        return get_vocabulary().canonical(predicate)
+    except Exception as error:  # noqa: BLE001 — same degradation as predicate_forms
+        LOG(f"predicate vocabulary unavailable, exact predicate {predicate!r}: {error}")
+        from error_journal import log_error
+        log_error("temporal_kg.predicate_vocab", error, "predicate vocabulary unavailable")
+        return predicate
+
+
+def _in_clause(column: str, values: tuple[str, ...]) -> str:
+    return f"{column} IN ({','.join('?' for _ in values)})"
 
 
 class TemporalKG:
@@ -70,6 +105,8 @@ class TemporalKG:
         If `invalidate_previous` is True (default) and a currently-valid
         assertion with same (subject, predicate) but different object exists,
         it is closed with valid_to = now and superseded_by = new assertion.
+        Predicates compare by alias group (`city` == `lives_in`); the new
+        assertion stores `predicate` exactly as given.
 
         Returns the new assertion id.
         """
@@ -81,27 +118,29 @@ class TemporalKG:
         recorded_at = _now()
         now = _normalize_timestamp(valid_from) if valid_from else recorded_at
         new_id = _new_id()
+        forms = predicate_forms(predicate)
+        same_predicate = _in_clause("predicate", forms)
 
         cur = self.db.cursor()
         try:
-            # Dedup: if a currently-valid assertion with EXACT same (s,p,o) exists,
-            # just return its id (idempotent).
+            # Dedup: if a currently-valid assertion with the same (s, p, o) exists
+            # (p by alias group), just return its id (idempotent).
             # Without valid_from: the same open assertion. With it: the same assertion at that time.
             existing = cur.execute(
-                """SELECT id FROM fact_assertions
-                   WHERE subject = ? AND predicate = ? AND object = ? AND project = ?
+                f"""SELECT id FROM fact_assertions
+                   WHERE subject = ? AND {same_predicate} AND object = ? AND project = ?
                    AND julianday(valid_from) = julianday(?) LIMIT 1""",
-                (subject, predicate, object, project, now),
+                (subject, *forms, object, project, now),
             ).fetchone() if valid_from else cur.execute(
-                """SELECT id FROM fact_assertions
-                   WHERE subject = ? AND predicate = ? AND object = ? AND project = ?
+                f"""SELECT id FROM fact_assertions
+                   WHERE subject = ? AND {same_predicate} AND object = ? AND project = ?
                    AND valid_to IS NULL LIMIT 1""",
-                (subject, predicate, object, project),
+                (subject, *forms, object, project),
             ).fetchone()
             if existing:
                 return existing[0]
 
-            # Insert new assertion
+            # Insert new assertion; the predicate is stored as the caller stated it.
             cur.execute(
                 """INSERT INTO fact_assertions
                    (id, subject, predicate, object, subject_name, object_name,
@@ -112,12 +151,12 @@ class TemporalKG:
             )
 
             if invalidate_previous:
-                # Close any currently-valid assertion with same (s,p) but different object
+                # Close any assertion of the same (s, p-group) valid at `now`.
                 to_close = cur.execute(
-                    """SELECT id FROM fact_assertions
-                       WHERE subject = ? AND predicate = ? AND id != ?
+                    f"""SELECT id FROM fact_assertions
+                       WHERE subject = ? AND {same_predicate} AND id != ?
                        AND (valid_to IS NULL OR julianday(valid_to) > julianday(?)) AND project = ? AND julianday(valid_from) <= julianday(?)""",
-                    (subject, predicate, new_id, now, project, now),
+                    (subject, *forms, new_id, now, project, now),
                 ).fetchall()
                 for (old_id,) in to_close:
                     cur.execute(
@@ -129,10 +168,12 @@ class TemporalKG:
                     )
 
             if invalidate_previous:
+                # Out-of-order insert: a later assertion already exists, so this
+                # one is valid only until that one starts.
                 newer = cur.execute(
-                    "SELECT id, valid_from FROM fact_assertions WHERE subject=? AND predicate=? "
+                    f"SELECT id, valid_from FROM fact_assertions WHERE subject=? AND {same_predicate} "
                     "AND project=? AND julianday(valid_from)>julianday(?) ORDER BY julianday(valid_from) LIMIT 1",
-                    (subject, predicate, project, now),
+                    (subject, *forms, project, now),
                 ).fetchone()
                 if newer is not None:
                     cur.execute("UPDATE fact_assertions SET valid_to=?, superseded_by=? WHERE id=?",
@@ -159,14 +200,15 @@ class TemporalKG:
         Returns the number of assertions closed.
         """
         now = _normalize_timestamp(at) if at else _now()
+        forms = predicate_forms(predicate)
         cur = self.db.cursor()
         try:
             cur.execute(
-                """UPDATE fact_assertions
+                f"""UPDATE fact_assertions
                    SET valid_to = ?, invalidation_reason = ?
-                   WHERE subject = ? AND predicate = ? AND object = ?
+                   WHERE subject = ? AND {_in_clause("predicate", forms)} AND object = ?
                    AND valid_to IS NULL AND project = ? AND julianday(valid_from) <= julianday(?)""",
-                (now, reason, subject, predicate, object, project, now),
+                (now, reason, subject, *forms, object, project, now),
             )
             closed = cur.rowcount
             self.db.commit()
@@ -237,8 +279,9 @@ class TemporalKG:
             conditions.append("subject = ?")
             params.append(subject)
         if predicate is not None:
-            conditions.append("predicate = ?")
-            params.append(predicate)
+            forms = predicate_forms(predicate)
+            conditions.append(_in_clause("predicate", forms))
+            params.extend(forms)
         if object is not None:
             conditions.append("object = ?")
             params.append(object)
@@ -270,8 +313,9 @@ class TemporalKG:
         conditions = ["subject = ?"]
         params: list[Any] = [subject]
         if predicate is not None:
-            conditions.append("predicate = ?")
-            params.append(predicate)
+            forms = predicate_forms(predicate)
+            conditions.append(_in_clause("predicate", forms))
+            params.extend(forms)
         if project is not None:
             conditions.append("project = ?")
             params.append(project)
@@ -301,9 +345,10 @@ class TemporalKG:
         removed: valid at t1 but not at t2 (retracted facts).
         changed: same (subject, predicate) but different object.
         """
-        at_t1 = {(r["subject"], r["predicate"], r["object"]): r
+        # Key by canonical predicate so `city` -> `lives_in` reads as a change.
+        at_t1 = {(r["subject"], canonical_predicate(r["predicate"]), r["object"]): r
                  for r in self.query_at(t1, project=project, limit=100000)}
-        at_t2 = {(r["subject"], r["predicate"], r["object"]): r
+        at_t2 = {(r["subject"], canonical_predicate(r["predicate"]), r["object"]): r
                  for r in self.query_at(t2, project=project, limit=100000)}
 
         added: list[dict[str, Any]] = []

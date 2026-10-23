@@ -583,9 +583,11 @@ Statusline обновляется на КАЖДОМ ответе Claude
          ▼
    SOUL Rule (поведенческое правило)
    - Загружается на старте сессии
-   - fire_count отслеживает применение
-   - rate(success=true/false) оценивает
-   - Auto-suspend: success_rate < 0.2 после 10+ fires
+   - shown_count считает загрузки, fire_count — реальное применение
+   - rate(success=true/false) оценивает; success_rate = success / (success + fail)
+   - Auto-suspend: 5+ оценок и верхняя граница Wilson 95% для success_rate < 0.4
+   - self_rules_context(query=...) ранжирует правила и выдаёт surface_id;
+     self_rules(action='followed'|'report') — учёт следования и отчёт
 
    Пример текущего правила (P7):
    "Always include ALTER TABLE migration

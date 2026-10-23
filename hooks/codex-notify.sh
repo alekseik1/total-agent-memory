@@ -1,25 +1,41 @@
 #!/usr/bin/env bash
 #
-# Codex CLI notify hook — reminder to save knowledge after agent turns
+# Codex CLI notify hook — captures every finished Codex turn into TAM
 #
-# This hook is OPTIONAL. Codex hooks are experimental.
-# Memory works without hooks — AGENTS.md instructions are sufficient.
+# Codex runs the notify program with the notification JSON as its last
+# argument ({"type":"agent-turn-complete","thread-id":...,"cwd":...,
+# "input-messages":[...],"last-assistant-message":...}). Each finished turn
+# becomes one `codex_turn` row in the agent action log and, unless
+# TAM_TURN_AUTOSAVE=false, one auto-saved turn summary
+# (tam_hook.py codex-notify, src/ambient/codex.py). Other notification types
+# are ignored. Older wrappers that pipe the JSON on stdin keep working.
 #
-# Add to ~/.codex/config.toml:
-#   notify = ["/path/to/claude-total-memory/hooks/codex-notify.sh"]
+# Optional; register it in ~/.codex/config.toml:
+#   notify = ["/path/to/total-agent-memory/hooks/codex-notify.sh"]
+#
+# Env: TAM_HOOK_NOTIFY=0 turns the macOS notification off.
 
-# Read JSON payload from stdin
-INPUT=$(cat 2>/dev/null || echo "{}")
+if [ $# -gt 0 ]; then
+    HOOK_SKIP_STDIN=1
+fi
+HOOK_PARSE_FIELDS=0
+# shellcheck source=lib/common.sh
+source "$(dirname "$0")/lib/common.sh"
 
-# Detect project from cwd in payload
-CWD=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('cwd',''))" 2>/dev/null || echo "")
-if [ -n "$CWD" ]; then
-    PROJECT=$(basename "$CWD")
+if [ $# -gt 0 ]; then
+    PAYLOAD="${!#}"
 else
-    PROJECT=$(basename "$(pwd)" 2>/dev/null || echo "unknown")
+    PAYLOAD="$HOOK_INPUT"
 fi
+[ -z "$PAYLOAD" ] && exit 0
 
-# macOS notification
-if [ "$(uname)" = "Darwin" ]; then
-    osascript -e "display notification \"Remember: memory_save & self_reflect\" with title \"Total Memory — $PROJECT\"" 2>/dev/null
-fi
+hook_helper codex-notify --src "$HOOK_SRC_DIR" --memory-dir "$CLAUDE_MEMORY_DIR" --payload "$PAYLOAD" \
+    </dev/null >>"$HOOK_LOG_FILE" 2>&1
+
+case "$PAYLOAD" in
+    *'"agent-turn-complete"'*)
+        PROJECT=$(basename "$PWD")
+        hook_notify "Turn captured in TAM memory" "Total Memory — $PROJECT" "default"
+        ;;
+esac
+exit 0

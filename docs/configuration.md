@@ -39,6 +39,57 @@ Environment variables (all optional):
 | `MEMORY_LOG_EMBED_MODEL` | _empty → TEXT_ | Model for `embedding_space=log`. |
 | `MEMORY_CONFIG_EMBED_MODEL` | _empty → TEXT_ | Model for `embedding_space=config`. |
 | `MEMORY_DEFAULT_EMBEDDING_SPACE` | `text` | Space for unclassified content. |
+| `MEMORY_RECALL_TIER_WEIGHTS` | `fts=1,semantic=1.2,hyde=1,multi_repr=1,fuzzy=0.5,graph=0.3,episode=0.9,atomic_facts=1,directives=1,multi_query=0,query_entity=0` | **14.8.0** — weights of the recall tiers in the rank fusion; name only the tiers to change. `0` switches a tier off (it is not run). `memory_explain_search` shows the weights in use; `benchmarks/tier_ablation.py` measures them. **14.9.0** adds `query_entity` (records linked to graph entities named in the query), off by default: on LoCoMo with an entity graph it lost 0.1–0.4 points of held-out R@10 ([details](benchmarks/pmb-adoption-recall/RESULTS.md#5-query_entity-tier)). While it is 0, the relational router's post-rerank entity injection runs instead. |
+| `MEMORY_GRAPH_HUB_DEGREE` | `200` | **14.8.0** — a graph node linked to more records than this is ignored by the graph tier (it would connect everything to everything). |
+| `MEMORY_RECALL_USER_TURN_BOOST` | `1.3` | **14.8.0** — for advice-shaped queries ("recommend", "how should I", "посоветуй") the fused score of records that are the user's own turns (`[date] user: ...`) is multiplied by this factor; the preference behind a request is in what the user said, not in the assistant's reply. `1.0` switches it off. |
+| `MEMORY_SESSION_NOTES` | `on` | **14.8.0** — `session_end` also saves its summary, next steps and pitfalls as a `note` record so later recalls find them. |
+| `MEMORY_LLM_FALLBACK_PROVIDERS` | _unset_ | **14.8.0** — comma-separated providers tried, in order, when the configured one does not answer its availability probe (`ollama`, `openai`, `openai-compatible`, `anthropic`). Applies to every LLM phase. |
+| `MEMORY_LLM_FALLBACK_MAX_CALLS` | `500` | **14.8.0** — how many times per process a phase may resolve to a fallback provider before it stays on the configured one. |
+| `MEMORY_CONSOLIDATION_BUDGET_SEC` | `120` | **14.8.0** — wall clock the hourly reflection job spends consolidating idle projects (episodes, duplicate merging, decay). `0` switches the sweep off. |
+| `MEMORY_CONSOLIDATION_MAX_PROJECTS` | `3` | **14.8.0** — idle projects consolidated per reflection run, oldest first. |
+| `MEMORY_RECALL_TOUCH_FLUSH_MS` | `250` | **14.9.0** — usage statistics (`recall_count`, `last_recalled`) are buffered and written in one transaction by a background thread this often, so a search never takes the write lock. Minimum `10`; a malformed value is logged and the default used. |
+| `MEMORY_RECALL_SINGLEFLIGHT` | `on` | **14.9.0** — concurrent recalls with the same project, normalised query (case and whitespace folded), limit and options share one execution; each waiter gets a copy of the result and records its own usage. `off` runs every call on its own. |
+| `MEMORY_RECALL_SINGLEFLIGHT_WAIT_SECONDS` | `30` | **14.9.0** — how long a waiter waits for the shared execution before running its own search (also when the leader fails). |
+| `MEMORY_RECALL_FTS_CROSSLINGUAL_DAMP` | `0.3` | **14.9.0** — when none of the query's content words occurs in the full-text vocabulary (a question in one language over records in another), the full-text tier's fusion weight is multiplied by this factor. `1.0` switches it off; values above 1 are treated as 1. |
+| `MEMORY_RECALL_INTENT_BOOSTS` | `decision=1.3,lesson=1.3,howto=1.3` | **14.9.0** — a question about a decision ("what did we decide", "почему выбрали"), a lesson or rule ("lessons learned", "best practices", "какие грабли") or a fix ("how did we fix", "workaround", "как починить") multiplies the fused score of `decision`, `lesson` + `convention` or `solution` records by this factor. Name only the intents to change; `1.0` switches one off. An unknown intent or a value ≤ 0 is logged and the defaults are used. |
+| `MEMORY_RECALL_COMPOUND_SLOTS` | `on` | **14.9.0** — a compound query ("X; Y", "X? Y?", "X, also Y", "X, а также Y", "X, and what …") is split, each part is searched on its own, and each part's best record is guaranteed a place in the top results. About 20 ms on the queries it fires on ([details](benchmarks/pmb-adoption-recall/RESULTS.md#4-compound-queries-guaranteed-slots)). |
+| `MEMORY_DECAY_EXEMPT_TYPES` | `decision,convention,lesson` | **14.9.0** — record types whose recency decay stops at `MEMORY_DECAY_EXEMPT_FLOOR`: they stay in force until something supersedes them. Comma-separated; an empty value exempts no type. |
+| `MEMORY_DECAY_EXEMPT_FLOOR` | `0.85` | **14.9.0** — lowest decay factor of the exempt types, `0`–`1`. An invalid value is logged in the error journal and the default used. |
+| `MEMORY_CRITICAL_DAILY_BUDGET` | `5` | **14.9.0** — `importance=critical` saves per project per UTC day; further ones are stored as `high`, and the reply carries `importance_note`. Conventions and rules are exempt. `0` = unlimited. Lowered saves are logged in `importance_budget_log`; `memory_stats` shows today's use under `write_path`. |
+| `MEMORY_HIGH_DAILY_BUDGET` | `0` | **14.9.0** — the same for `importance=high` (stored as `medium` beyond the budget). `0` = unlimited. |
+| `MEMORY_OUTBOX_ENABLED` | `true` | Write-intent journal of every save: an intent is opened before the record is written and closed after it; one left open by a crash is replayed when the store next opens. `false` disables it. |
+| `MEMORY_OUTBOX_GRACE_SEC` | `60` | Age a pending intent must reach before it is replayed, so saves still in flight are left alone. |
+| `MEMORY_OUTBOX_MAX_ATTEMPTS` | `3` | Replays before an intent is marked `failed`. |
+| `MEMORY_OUTBOX_LEASE_SEC` | `600` | **14.9.0** — a reconciler leases the intents it replays for this long, so two reconcilers never replay the same intent; a crashed reconciler's lease expires and the intent becomes claimable again. |
+| `MEMORY_PREDICATE_VOCAB_PATH` | `vocabularies/predicate_aliases.txt` | **14.9.0** — vocabulary that groups knowledge-graph predicates stating one relation (`city`, `current_city`, `location`, `живет_в` → `lives_in`); a new object under any form of a group supersedes the current one under another. One group per line, canonical form first, comma-separated; `#` starts a comment. A missing or contradictory file is an error. |
+| `MEMORY_PREDICATE_VOCAB_EXTRA` | _unset_ | **14.9.0** — further vocabulary files merged into the first, separated by the OS path separator (`:` on macOS and Linux, `;` on Windows). |
+| `TAM_TOOL_PROFILE` | `full` | **14.9.0** — the catalogue `tools/list` returns: `full` (every tool, long descriptions), `lean` (28 everyday tools) or `minimal` (12 core tools), the last two with one-line descriptions. Hidden tools still answer when called; an unknown value stops the server at startup. See [LOCAL_SETTINGS.md](LOCAL_SETTINGS.md#agent-interface). |
+| `TAM_MCP_INSTRUCTIONS` | `true` | **14.9.0** — send a short usage guide (read first, what to save and what not to, the server start date) in the MCP `instructions` field when a client connects. |
+| `TAM_TOOL_TELEMETRY` | `true` | **14.9.0** — record one `tool_calls` row per tool call (tool, duration, outcome, error class, argument and result sizes in bytes, never their contents), kept 7 days; `memory_perf_report` shows count, p50, p95 and error rate per tool. |
+
+### Ambient memory (hooks)
+
+Memory that works while the agent never calls a memory tool. All of these are read by the hooks on every
+call, from the environment or — taking precedence — from the local dashboard (`<memory dir>/settings.json`).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TAM_AMBIENT_RECALL` | `true` | UserPromptSubmit adds the rules matching the prompt and a short background block (warm through the [shared daemon](shared-daemon.md), FTS-only without it) as `additionalContext`. Nothing already injected in the session is repeated. |
+| `TAM_AMBIENT_TOKEN_BUDGET` | `400` | Upper bound per prompt, in tokens (about 4 characters each; `50`–`5000`). Rules take at most half. |
+| `TAM_AMBIENT_LATENCY_MS` | `1500` | Time limit of the prompt recall (`100`–`4000`). The daemon call gets what is left minus 0.3 s for the FTS fallback; SQLite queries are interrupted at the limit. The prompt is never blocked or failed. |
+| `TAM_RULE_REMINDERS` | `true` | PreToolUse (Bash, Edit, Write, MultiEdit, NotebookEdit): a rule whose text matches the command or the edited path plus new text — first of all a prohibition the action seems to break — is shown to the agent. Same rule at most once per 15 minutes per session. Never a permission decision. |
+| `TAM_RULE_COMPLIANCE` | `true` | Stop: the turn's logged actions are checked against the rules shown to the session. A broken prohibition ("never X" and X appears) is reported to the user; each new verdict counts in the rule's heuristic `auto_success_count` / `auto_fail_count` only (listed by `self_rules_context` and `self_rules(action='list')`). Explicit ratings, `success_rate`, `success_lower_bound` (95% Wilson lower bound of the explicit ratings) and auto-suspension never see them; showing a rule never touches `fire_count`. |
+| `TAM_TURN_AUTOSAVE` | `true` | Stop (and Codex notify): a turn that edited files or ran commands is saved as a short `fact` (`source='auto'`, tags `auto-saved`, `turn-autosave`) and queued for embedding. `tam forget-auto` hard-deletes these and the SessionEnd auto-saves. |
+| `TAM_CORRECTION_CAPTURE` | `true` | UserPromptSubmit: a prompt that corrects the agent ("I already told you…", "how many times", "я же говорил", "сколько раз", profanity, an all-caps prompt, or "again" plus a negated action) becomes a *draft* insight (`category='user_correction'`, tags `draft`, `user-correction`; low importance and confidence) that `self_insight` lists and that becomes promotable to a rule only after real upvotes. A similar correction in the same project within 90 minutes raises the existing draft instead; the same prompt counts once per session. Regex only, part of the prompt hook's time limit. |
+| `TAM_ACTION_LOG` | `true` | PostToolUse / PostToolUseFailure log each tool call in `agent_actions`: tool, a short secret-redacted summary (the command, or the path plus the start of the new text; MCP tools keep argument names only), exit status. Read-only lookups (Read, Glob, Grep, LS, Todo*) are not logged. |
+| `TAM_ACTION_LOG_RETENTION_DAYS` | `30` | Action log rows older than this are deleted on every write and by `memory_forget`; the log is also capped at 100 000 rows. |
+
+`tam forget-auto [--project P] [--include-actions] [--dry-run] [--json]` removes the auto-saved records (with
+their vectors, FTS rows and raw-log copies) and, with `--include-actions`, the action log. Codex CLI turns
+reach the same log through `hooks/codex-notify.sh` (`notify = [".../hooks/codex-notify.sh"]` in
+`~/.codex/config.toml`). On Docker installs (`TAM_DOCKER=1`, set by the launchers
+`install-docker.sh` writes) the hooks run these commands inside the container with `docker exec -i
+tam-mcp python -m ambient <command>`, forwarding the `TAM_*` settings above.
 
 ### v10 + earlier
 
@@ -60,6 +111,10 @@ Environment variables (all optional):
 | `DASHBOARD_ALLOWED_HOSTS` | — | Extra host names the dashboard answers to, comma-separated. Loopback names always work; any other `Host` (for example the server's LAN name when reached through Docker) gets `421` unless listed here. Protects against DNS rebinding. |
 | `MCP_HTTP_ALLOWED_HOSTS` | — | Extra host names the MCP HTTP transport (`MCP_TRANSPORT=http`) answers to, comma-separated. Loopback names and a non-wildcard `MCP_HTTP_HOST` always work; any other `Host` gets `421` and a foreign `Origin` gets `403` (DNS-rebinding protection). In Docker (`0.0.0.0`), list the name clients use to reach the container. |
 | `MEMORY_MCP_PORT` | `3737` | HTTP MCP transport port (Docker path) |
+| `TAM_DAEMON_PORT` | `0` | Opt-in shared warm daemon (`tam daemon` / `tam proxy`): loopback port, 0 = any free port. See [shared-daemon.md](shared-daemon.md) |
+| `TAM_DAEMON_IDLE_EXIT_MIN` | `60` | Shared daemon exits after this many idle minutes; `0` = never |
+| `TAM_DAEMON_START_TIMEOUT_SEC` | `30` | How long `tam proxy` / `tam daemon start` wait for the daemon's health check |
+| `TAM_DAEMON_STOP_TIMEOUT_SEC` | `20` | Graceful-stop window before the daemon is signalled |
 | `MEMORY_ASYNC_ENRICHMENT` | `false` | **v10.1** — move quality gate / contradiction / entity dedup / episodic / wiki to a background worker. See [Performance tuning](#performance-tuning) |
 | `MEMORY_ENRICH_TICK_SEC` | `0.1` | Worker tick interval (clamp `0.01..5`) |
 | `MEMORY_ENRICH_BATCH` | `5` | Rows claimed per tick (clamp `1..50`) |

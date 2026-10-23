@@ -16,6 +16,7 @@ Features: BM25 scoring, 3-level progressive disclosure, decay scoring, fuzzy sea
 """
 
 import asyncio
+import atexit
 import json
 import logging
 import math
@@ -27,6 +28,7 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import time
 import urllib.parse
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
@@ -57,7 +59,21 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool, ToolAnnotations
 
 import recall_output
+import server_instructions
+import tool_profiles
+import tool_telemetry
 from memory_core.timestamps import format_utc, utc_now
+from rule_surfaces import (
+    DEFAULT_REPORT_MIN_N,
+    DEFAULT_SURFACE_LIMIT,
+    RULE_SUSPEND_MAX_UPPER,
+    RULE_SUSPEND_MIN_RATED,
+    RuleSurfacer,
+    SurfaceNotFound,
+    backfill_lower_bounds,
+    record_rule_outcome,
+    should_suspend,
+)
 from secret_redaction import redact_secrets, redact_value
 from tam_db.contracts import Backend, StoreDatabase
 
@@ -80,6 +96,12 @@ try:
     HAS_FASTEMBED = True
 except ImportError:
     HAS_FASTEMBED = False
+else:
+    # fastembed imports onnxruntime, whose telemetry starts with it; switch it off
+    # before anything else runs (see memory_core.fastembed_loader).
+    from memory_core.fastembed_loader import disable_onnxruntime_telemetry
+
+    disable_onnxruntime_telemetry()
 
 try:
     import httpx
@@ -164,6 +186,8 @@ DECAY_HALF_LIFE = int(os.environ.get("DECAY_HALF_LIFE", "90"))  # days
 ARCHIVE_AFTER_DAYS = int(os.environ.get("ARCHIVE_AFTER_DAYS", "180"))
 PURGE_AFTER_DAYS = int(os.environ.get("PURGE_AFTER_DAYS", "365"))
 OBSERVATION_RETENTION_DAYS = int(os.environ.get("OBSERVATION_RETENTION_DAYS", "30"))
+# Lock wait for connections opened next to the store's own (background drains).
+SIDE_CONNECTION_BUSY_TIMEOUT_SEC = 5.0
 # Bounds SQLite WAL file growth: without a limit, checkpoints reuse space in
 # place but never shrink the file back down, so it sits at its high-water
 # mark indefinitely under sustained write load (measured: a 334MB WAL next
@@ -382,7 +406,18 @@ class Store:
         self._schema()
         self._migrate()
         self._apply_sql_migrations()
+        self._backfill_rule_lower_bounds()
         self._check_fts()
+
+    def _backfill_rule_lower_bounds(self):
+        """Migration 040 adds rules.success_lower_bound; SQLite has no sqrt, so rated rules get it here."""
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(rules)")}
+        if "success_lower_bound" not in columns:
+            LOG("rules.success_lower_bound missing (migration 040 not applied); bounds not backfilled")
+            return
+        filled = backfill_lower_bounds(self.db)
+        if filled:
+            LOG(f"Backfilled success_lower_bound for {filled} rated rule(s)")
 
     def _init_services(self):
         self.chroma = None
@@ -441,10 +476,19 @@ class Store:
         # live DB without re-embedding.
         self._check_embed_dim_compat()
 
+        # Swallowed best-effort failures go to error_log as well as stderr.
+        import error_journal as _error_journal
+        self.error_journal = _error_journal.ErrorJournal(self.db)
+        _error_journal.install(self.error_journal)
+
         # v10 — replay any save_knowledge intents that were created but
         # never committed (process crash mid-save). Idempotent: dedup
         # path swallows re-inserts of the same content.
         self._reconcile_outbox_at_startup()
+
+        # Records saved while the embedding provider was down get their
+        # vectors in the background (own connection, never blocks startup).
+        self._embedding_backfill_thread = self._start_backfill_on_startup()
 
         # v10.1 — Async enrichment worker (inbox/outbox style). When
         # MEMORY_ASYNC_ENRICHMENT=true, the heavy LLM-bound stages of
@@ -519,7 +563,7 @@ class Store:
         try:
             return provider.embed(list(texts))
         except Exception as e:  # noqa: BLE001
-            LOG(f"Embed provider error: {e}")
+            self._swallowed("embed.provider", e, "Embed provider error")
             return None
 
     def _active_embed_model_name(self):
@@ -728,7 +772,7 @@ class Store:
                     results.append(data["embedding"])
             return results
         except Exception as e:
-            LOG(f"Ollama embed error: {e}")
+            self._swallowed("embed.ollama", e, "Ollama embed error")
             return None
 
     def _fastembed_embed(self, texts):
@@ -738,7 +782,7 @@ class Store:
             embeddings = list(self.fastembed.embed(texts))
             return [emb.tolist() if hasattr(emb, 'tolist') else list(emb) for emb in embeddings]
         except Exception as e:
-            LOG(f"FastEmbed error: {e}")
+            self._swallowed("embed.fastembed", e, "FastEmbed error")
             return None
 
     def embed(self, texts):
@@ -952,8 +996,9 @@ class Store:
         embedding_space: str = "text",
         content_type: str = "text",
         language: str | None = None,
+        db=None,
     ):
-        """Store binary + float32 vectors for a knowledge record.
+        """Store binary + float32 vectors for a knowledge record (over ``db``, default the store's).
 
         v11.0 §J — every row now carries `embedding_provider`, `embedding_space`,
         `content_type` and `language`. New callers pass them as keyword args;
@@ -963,9 +1008,10 @@ class Store:
         binary_blob = self._quantize_binary(embedding)
         float32_blob = self._float32_to_blob(embedding)
         now = utc_now()
+        conn = self.db if db is None else db
         if self.is_postgres:
             from memory_core.pg_vector_search import vector_literal
-            self.db.execute("""
+            conn.execute("""
                 INSERT OR REPLACE INTO embeddings (
                     knowledge_id, binary_vector, float32_vector,
                     embed_model, embed_dim, created_at,
@@ -978,7 +1024,7 @@ class Store:
                 provider, embedding_space, content_type, language, vector_literal(embedding),
             ))
             return
-        self.db.execute("""
+        conn.execute("""
             INSERT OR REPLACE INTO embeddings (
                 knowledge_id, binary_vector, float32_vector,
                 embed_model, embed_dim, created_at,
@@ -1018,13 +1064,21 @@ class Store:
         except Exception:
             pass
 
+    def _swallowed(self, component: str, exc: BaseException, message: str) -> None:
+        """A best-effort stage failed and the save goes on: stderr plus error_log."""
+        LOG(f"{message}: {exc}")
+        journal = getattr(self, "error_journal", None)
+        if journal is not None:
+            journal.log_error(component, exc, message)
+
     def _reconcile_outbox_at_startup(self):
         """v10 — replay any save_knowledge intents from a previous crash.
 
-        Runs on every Store.__init__ after migrations apply. Idempotent
-        thanks to the dedup path (`_find_duplicate`): a replayed payload
-        whose record was already inserted returns the existing id (replays
-        never replace) and the intent is closed as 'superseded'.
+        Runs on every Store.__init__ after migrations apply. Intents are
+        leased atomically, so concurrent processes never replay the same one;
+        an intent whose record was already inserted (crash before
+        mark_committed) is closed without a replay, and its embedding is
+        queued for backfill when the crash also skipped that.
         """
         try:
             import outbox
@@ -1034,7 +1088,7 @@ class Store:
             # databases that haven't applied migration 017 yet don't crash.
             try:
                 self.db.execute("SELECT 1 FROM write_intents LIMIT 1").fetchone()
-            except Exception:
+            except sqlite3.Error:
                 return
 
             def _replay(payload):
@@ -1060,15 +1114,214 @@ class Store:
                 # On dedup, return None so reconcile records 'dedup' status.
                 return None if was_dedup else rid
 
-            counts = outbox.reconcile_pending(self.db, replay_fn=_replay)
+            counts = outbox.reconcile_pending(self.db, replay_fn=_replay,
+                                              on_recovered=self._ensure_embedding_queued)
             if any(counts.values()):
                 LOG(
                     f"Outbox reconcile at startup: "
                     f"replayed={counts['replayed']} dedup={counts['dedup']} "
+                    f"recovered={counts['recovered']} "
                     f"failed={counts['failed']} skipped={counts['skipped']}"
                 )
         except Exception as exc:
-            LOG(f"outbox reconcile skipped: {exc}")
+            self._swallowed("outbox.reconcile", exc, "outbox reconcile skipped")
+
+    # ── Embedding backfill (records saved while the provider was down) ──
+
+    def _embedding_backfill(self, db=None):
+        from embedding_backfill import EmbeddingBackfill
+        return EmbeddingBackfill(self.db if db is None else db)
+
+    def _enqueue_embedding_backfill(self, knowledge_id: int, reason: str) -> None:
+        try:
+            if self._embedding_backfill().enqueue(knowledge_id, reason):
+                LOG(f"embedding unavailable for id={knowledge_id}; queued for backfill ({reason})")
+        except sqlite3.Error as exc:
+            self._swallowed("embedding_backfill.enqueue", exc,
+                            f"could not queue id={knowledge_id} for embedding backfill")
+
+    def _ensure_embedding_queued(self, knowledge_id: int) -> None:
+        """Queue ``knowledge_id`` for backfill when its active row has no vector."""
+        row = self.db.execute(
+            "SELECT k.status, e.knowledge_id FROM knowledge k "
+            "LEFT JOIN embeddings e ON e.knowledge_id = k.id WHERE k.id = ?", (knowledge_id,)).fetchone()
+        if row is not None and row[0] == "active" and row[1] is None:
+            self._enqueue_embedding_backfill(knowledge_id, "recovered by outbox reconcile without a vector")
+
+    def _embed_for_record(self, content, context, source_format, embedding=None):
+        """Vector for a record, classified into its embedding space.
+
+        Returns ``(record_vector, error)``: a dict with the vector and its
+        storage metadata, or ``(None, reason)`` when no provider produced one.
+        """
+        try:
+            from memory_core.classifier import classify as _v11_classify
+            from memory_core.embedding_spaces import resolve_space as _v11_resolve_space
+            _cls = _v11_classify(content, source_format=source_format)
+            content_type, language = _cls.type, _cls.language
+            space = _v11_resolve_space(_cls.type, _cls.language)
+        except Exception as _cls_err:  # noqa: BLE001 — classifier is optional; text space is always valid
+            self._swallowed("save.classifier", _cls_err, "classifier failed, using text defaults")
+            content_type, language, space = "text", None, "text"
+
+        # Per-space embedding via memory_core.EmbeddingProvider when the
+        # space is anything but "text" — that lets jina-code (or whatever
+        # the user configured) actually fire. The text path keeps using
+        # the legacy `Store.embed` so the embedding cache, binary
+        # quantization and ST fallback stay wired.
+        vector = None
+        model_name = self._active_embed_model_name()
+        provider_name = self._embed_mode or "fastembed"
+        if embedding is not None:
+            # A precomputed vector is always in the text space of the active model.
+            vector = [float(x) for x in embedding]
+            space = "text"
+        elif space != "text":
+            try:
+                from memory_core.embeddings import EmbeddingProvider as _V11Embed
+                if getattr(self, "_v11_embed_provider", None) is None:
+                    self._v11_embed_provider = _V11Embed()
+                v = self._v11_embed_provider.embed_query(f"{content} {context}", space=space)
+                if v:
+                    vector = v
+                    model_name = self._v11_embed_provider.active_model(space)
+                    provider_name = "fastembed"  # EmbeddingProvider is FastEmbed-first
+            except Exception as _emb_err:  # noqa: BLE001 — fall back to the text space below
+                self._swallowed("save.embed_space", _emb_err,
+                                f"per-space embed for space={space} fell back to text")
+        if vector is None:
+            try:
+                embs = self.embed([f"{content} {context}"])
+            except Exception as exc:  # noqa: BLE001 — provider errors become a backfill entry
+                return None, f"{type(exc).__name__}: {exc}"
+            if not embs or not embs[0]:
+                return None, f"embedding provider ({self._embed_mode or 'none'}) returned no vector"
+            vector = embs[0]
+            # Honest record-keeping: the row IS in `text` model space when
+            # the per-space encoder failed — degrade gracefully.
+            space = "text"
+        return {"vector": vector, "model": model_name, "provider": provider_name, "space": space,
+                "content_type": content_type, "language": language}, None
+
+    def _persist_record_embedding(self, rid, record_vector, *, ktype, project, sid, created_at,
+                                  content, db=None, use_chroma=None):
+        """Store a record's vector (embeddings table, then Chroma when it is the active index)."""
+        self._upsert_embedding(
+            rid, record_vector["vector"], record_vector["model"],
+            provider=record_vector["provider"],
+            embedding_space=record_vector["space"],
+            content_type=record_vector["content_type"],
+            language=record_vector["language"],
+            db=db,
+        )
+        (self.db if db is None else db).commit()
+        if use_chroma is None:
+            use_chroma = bool(self._chroma_client) and not self._check_binary_search()
+        if not use_chroma:
+            return
+        try:
+            coll = self._chroma_collection_for(record_vector["space"])
+            if coll is not None:
+                coll.upsert(
+                    ids=[str(rid)], embeddings=[record_vector["vector"]], documents=[content],
+                    metadatas=[{
+                        "type": ktype, "project": project, "status": "active",
+                        "session_id": sid, "created_at": created_at, "confidence": 1.0,
+                        # v11 §J multi-embedding-space metadata
+                        "embedding_provider": record_vector["provider"],
+                        "embedding_model": record_vector["model"],
+                        "embedding_dimension": len(record_vector["vector"]),
+                        "embedding_space": record_vector["space"],
+                        "content_type": record_vector["content_type"],
+                        "language": record_vector["language"] or "",
+                    }])
+        except Exception as _ce:  # noqa: BLE001 — chroma raises its own types; the SQL vector is stored
+            self._swallowed("save.chroma_upsert", _ce, "chroma per-space upsert failed")
+
+    def _backfill_one(self, db, knowledge_id, use_chroma):
+        """Embed one queued record over ``db``; raises EmbeddingUnavailable on failure."""
+        from embedding_backfill import BackfillOutcome, EmbeddingUnavailable
+        row = db.execute(
+            "SELECT k.content, k.context, k.type, k.project, k.session_id, k.created_at, "
+            "k.source_format, k.status, e.knowledge_id FROM knowledge k "
+            "LEFT JOIN embeddings e ON e.knowledge_id = k.id WHERE k.id = ?", (knowledge_id,)).fetchone()
+        if row is None or row[7] != "active":
+            return BackfillOutcome.GONE
+        if row[8] is not None:
+            return BackfillOutcome.EMBEDDED
+        record_vector, error = self._embed_for_record(row[0], row[1] or "", row[6] or "auto")
+        if record_vector is None:
+            raise EmbeddingUnavailable(error)
+        self._persist_record_embedding(knowledge_id, record_vector, ktype=row[2], project=row[3],
+                                       sid=row[4], created_at=row[5], content=row[0], db=db,
+                                       use_chroma=use_chroma)
+        return BackfillOutcome.EMBEDDED
+
+    def drain_embedding_backfill(self, limit=None, *, db=None, journal=None, use_chroma=None):
+        """Embed due records from ``embedding_pending``; returns the drain counts.
+
+        Runs over ``db`` (default: the store connection). Called by the
+        reflection runner every cycle and by the startup thread.
+        """
+        from embedding_backfill import DEFAULT_DRAIN_LIMIT
+        conn = self.db if db is None else db
+        sink = journal if journal is not None else getattr(self, "error_journal", None)
+        if use_chroma is None:
+            use_chroma = bool(self._chroma_client) and not self._check_binary_search()
+        result = self._embedding_backfill(conn).drain(
+            lambda kid: self._backfill_one(conn, kid, use_chroma),
+            limit=DEFAULT_DRAIN_LIMIT if limit is None else limit,
+            on_error=sink.log_error if sink is not None else None,
+        )
+        return result.as_dict()
+
+    def _open_side_connection(self):
+        """A second connection to the same database, for work off the main thread."""
+        if self.is_postgres:
+            from tam_db import pg_connection
+            conn = pg_connection.connect(self.database)
+        else:
+            conn = sqlite3.connect(str(self.db_path), timeout=SIDE_CONNECTION_BUSY_TIMEOUT_SEC)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _start_backfill_on_startup(self):
+        """Drain due backfill rows in a daemon thread when there are any."""
+        import threading
+
+        from embedding_backfill import STARTUP_DRAIN_LIMIT
+        from memory_core.exit_join import join_at_exit
+        try:
+            due = self._embedding_backfill().counts()["due"]
+        except sqlite3.Error as exc:
+            self._swallowed("embedding_backfill.startup", exc, "embedding backfill counts unavailable")
+            return None
+        if not due:
+            return None
+        use_chroma = bool(self._chroma_client) and not self._check_binary_search()
+
+        def _run():
+            import error_journal as _ej
+            try:
+                conn = self._open_side_connection()
+            except Exception as exc:  # noqa: BLE001 — the reflection runner retries later
+                LOG(f"embedding backfill at startup skipped (no connection): {exc}")
+                return
+            journal = _ej.ErrorJournal(conn)
+            try:
+                counts = self.drain_embedding_backfill(STARTUP_DRAIN_LIMIT, db=conn, journal=journal,
+                                                       use_chroma=use_chroma)
+                LOG(f"embedding backfill at startup: {counts}")
+            except Exception as exc:  # noqa: BLE001 — thread boundary: record and stop
+                LOG(f"embedding backfill at startup failed: {exc}")
+                journal.log_error("embedding_backfill.startup", exc, "embedding backfill at startup failed")
+            finally:
+                conn.close()
+
+        thread = threading.Thread(target=_run, name="tam-embedding-backfill", daemon=True)
+        thread.start()
+        join_at_exit(thread)  # it embeds through onnxruntime; see memory_core/exit_join.py
+        return thread
 
     def _search_spaces(self, query, *, project=None, spaces=None, limit=10, kind="all", branch=None):
         from memory_core.embeddings import EmbeddingProvider
@@ -1592,23 +1845,31 @@ class Store:
                 if repeats(content, row["content"]):
                     return row["id"]
         except Exception as e:
-            LOG(f"Dedup FTS error: {e}")
+            self._swallowed("save.dedup_fts", e, "Dedup FTS error")
         return None
 
     # ── Decay Scoring ──
 
     @staticmethod
-    def _decay_factor(last_confirmed_str: str, half_life_days: int = 90) -> float:
-        """Exponential decay: score *= e^(-days / half_life). Range [0.01, 1.0]."""
+    def _decay_factor(last_confirmed_str: str, half_life_days: int = 90, ktype: str | None = None) -> float:
+        """Exponential decay: score *= e^(-days / half_life). Range [0.01, 1.0].
+
+        Types listed in decay_policy (decision, convention, lesson by default)
+        never drop below the configured floor: they stay in force until
+        superseded, however old they are.
+        """
+        import decay_policy
+        floor = decay_policy.floor_for(ktype)
         if not last_confirmed_str:
-            return 0.5
+            return 0.5 if floor is None else max(0.5, floor)
         try:
             lc = datetime.fromisoformat(last_confirmed_str.replace("Z", "+00:00"))
             now = datetime.now(lc.tzinfo) if lc.tzinfo else datetime.now(timezone.utc).replace(tzinfo=None)
             days = (now - lc.replace(tzinfo=None)).days if not lc.tzinfo else (now - lc).days
-            return max(0.01, math.exp(-days * math.log(2) / half_life_days))
+            factor = max(0.01, math.exp(-days * math.log(2) / half_life_days))
         except Exception:
-            return 0.5
+            factor = 0.5
+        return factor if floor is None else max(factor, floor)
 
     # ── CRUD ──
 
@@ -1694,7 +1955,7 @@ class Store:
                     )
                     self.db.commit()
                 except Exception as e:
-                    LOG(f"privacy_counters update error: {e}")
+                    self._swallowed("save.privacy_counters", e, "privacy_counters update error")
         except Exception as e:
             raise ValueError("Private content redaction failed; nothing was persisted") from e
 
@@ -1707,7 +1968,7 @@ class Store:
                 if filter_name:
                     LOG(f"autofilter detected: {filter_name}")
             except Exception as e:
-                LOG(f"autofilter error: {e}")
+                self._swallowed("save.autofilter", e, "autofilter error")
         filter_stats = None
         if filter_name:
             try:
@@ -1729,7 +1990,7 @@ class Store:
                 else:
                     LOG(f"filter '{filter_name}' not found at {cfg_path}")
             except Exception as e:
-                LOG(f"filter '{filter_name}' failed: {e}")
+                self._swallowed("save.content_filter", e, f"filter '{filter_name}' failed")
 
         # Privacy stripping
         content, redacted_c = self._sanitize_content(content)
@@ -1756,7 +2017,7 @@ class Store:
                     session_id=sid, content=content, ktype=ktype, project=project,
                 )
             except (sqlite3.Error, ValueError, TypeError) as e:
-                LOG(f"outbox create_intent skipped: {e}")
+                self._swallowed("save.outbox_intent", e, "outbox create_intent skipped")
                 intent = None
 
         # v10 — Coreference rewrite (opt-in). Expands pronouns/deictics in
@@ -1773,7 +2034,7 @@ class Store:
                 LOG(f"coref rewritten record (latency_ms={cr.latency_ms})")
                 content = cr.content
         except Exception as e:
-            LOG(f"coref resolver skipped: {e}")
+            self._swallowed("save.coref", e, "coref resolver skipped")
 
         # v10 — Canonical-vocabulary tag normalisation. Free-form input tags
         # are mapped to their canonical form (with the original kept alongside
@@ -1783,7 +2044,7 @@ class Store:
             from canonical_tags import normalise_tags as _norm_tags
             tags = _norm_tags(tags or [])
         except Exception as e:
-            LOG(f"canonical_tags normalisation skipped: {e}")
+            self._swallowed("save.canonical_tags", e, "canonical_tags normalisation skipped")
             tags = list(tags or [])
 
         # v10 — Pre-write entity dedup. Tags that are NOT canonical topics
@@ -1807,7 +2068,7 @@ class Store:
                     if new_tags != tags:
                         tags = new_tags
         except Exception as e:
-            LOG(f"entity_dedup skipped: {e}")
+            self._swallowed("save.entity_dedup", e, "entity_dedup skipped")
 
         # v10.1 — Async enrichment switch. When MEMORY_ASYNC_ENRICHMENT=true,
         # we skip the synchronous quality gate (and the contradiction
@@ -1819,7 +2080,8 @@ class Store:
         try:
             import enrichment_worker as _ew
             _async_enrich = _ew._enabled()
-        except Exception:
+        except Exception as e:
+            self._swallowed("save.async_enrichment_flag", e, "async enrichment flag unreadable, running inline")
             _async_enrich = False
 
         # v10 — Quality gate (Beever-style "6-Month Test"). Synchronous,
@@ -1859,8 +2121,8 @@ class Store:
                         try:
                             import outbox as _ob
                             _ob.mark_superseded(self.db, intent, None)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self._swallowed("save.outbox_mark", e, "outbox mark_superseded skipped")
                     return None, False, was_redacted, private_sections, quality_meta
                 # Non-drop decisions ('skip'/'error'/'pass') only journal
                 # when MEMORY_QUALITY_LOG_ALL=1; helper handles the gating.
@@ -1870,7 +2132,7 @@ class Store:
                 )
             except Exception as e:
                 # Quality gate must never break the underlying save.
-                LOG(f"quality_gate error (continuing): {e}")
+                self._swallowed("save.quality_gate", e, "quality_gate error (continuing)")
 
         # repeat='replace': a repeat of a stored statement replaces it, so the
         # statement carries the time it was last made: after "A", "B", "A" the
@@ -1893,14 +2155,23 @@ class Store:
                     try:
                         import outbox as _ob
                         _ob.mark_superseded(self.db, intent, dup_id)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self._swallowed("save.outbox_mark", e, "outbox mark_superseded skipped")
                 return dup_id, True, was_redacted, private_sections, quality_meta
 
         # Validate importance enum; fall back to 'medium' on bad input.
         importance_value = (importance or "medium").lower()
         if importance_value not in ("critical", "high", "medium", "low"):
             importance_value = "medium"
+        # Per-project daily budget for critical/high saves (importance_budget.py).
+        budget_decision = None
+        try:
+            import importance_budget as _ib
+            budget_decision = _ib.apply_budget(self.db, project=project, ktype=ktype,
+                                               importance=importance_value)
+            importance_value = budget_decision.applied
+        except (sqlite3.Error, ValueError) as e:
+            self._swallowed("save.importance_budget", e, "importance budget check skipped")
 
         cur = self.db.execute("""
             INSERT INTO knowledge (session_id,type,content,context,project,tags,source,confidence,
@@ -1909,8 +2180,17 @@ class Store:
             VALUES (?,?,?,?,?,?,'explicit',1.0,?,?,0,?,?,?,?,?)
         """, (sid, ktype, content, context, project, json.dumps(tags or []), now, now,
               branch or "", importance_value, agent_id, parent_agent_id, source_format))
-        self.db.commit()
         rid = cur.lastrowid
+        if budget_decision is not None and budget_decision.clamped:
+            try:
+                _ib.record_clamp(self.db, budget_decision, knowledge_id=rid, project=project,
+                                 ktype=ktype, created_at=now)
+            except sqlite3.Error as e:
+                self._swallowed("save.importance_budget", e, "importance budget audit row not written")
+            LOG(f"importance budget: id={rid} {budget_decision.requested} -> {budget_decision.applied}")
+            quality_meta = dict(quality_meta or {})
+            quality_meta["importance_budget"] = budget_decision.as_dict()
+        self.db.commit()
 
         if replaces:
             self.db.execute(
@@ -1923,7 +2203,7 @@ class Store:
                 try:
                     self.chroma.delete(ids=[str(replaces)])
                 except Exception as e:  # noqa: BLE001 — chroma raises its own types; cleanup must not fail the save
-                    LOG(f"Chroma delete of replaced id={replaces} failed: {e}")
+                    self._swallowed("save.chroma_delete", e, f"Chroma delete of replaced id={replaces} failed")
             LOG(f"Repeat: id={rid} replaces id={replaces}")
 
         # v2.1.145 agent lineage — when both agent and parent ids are present
@@ -1944,105 +2224,26 @@ class Store:
                     invalidate_previous=False,  # subagent lineage is immutable
                 )
             except Exception as _kg_err:
-                LOG(f"agent-lineage kg_add_fact skipped: {_kg_err}")
+                self._swallowed("save.agent_lineage", _kg_err, "agent-lineage kg_add_fact skipped")
 
-        # v11 §J Phase 5b — classify FIRST, then embed via the
-        # per-space provider so code chunks really go through the code
-        # model (jina-embeddings-v2-base-code, 768d) and text/log/config
-        # go through the text model (MiniLM, 384d). Different sizes ⇒
-        # different Chroma collections (handled below).
-        try:
-            from memory_core.classifier import classify as _v11_classify
-            from memory_core.embedding_spaces import (
-                model_for_space as _v11_model_for_space,
-            )
-            from memory_core.embedding_spaces import (
-                resolve_space as _v11_resolve_space,
-            )
-            _cls = _v11_classify(content, source_format=source_format)
-            _v11_content_type = _cls.type
-            _v11_language = _cls.language
-            _v11_space = _v11_resolve_space(_cls.type, _cls.language)
-        except Exception as _cls_err:
-            LOG(f"classifier failed, using text defaults: {_cls_err}")
-            _v11_content_type = "text"
-            _v11_language = None
-            _v11_space = "text"
-
-        # Per-space embedding via memory_core.EmbeddingProvider when the
-        # space is anything but "text" — that lets jina-code (or whatever
-        # the user configured) actually fire. The text path keeps using
-        # the legacy `Store.embed` so the embedding cache, binary
-        # quantization and ST fallback stay wired.
-        embs: list[list[float]] | None = None
-        model_name = self._active_embed_model_name()
-        _v11_provider_name = self._embed_mode or "fastembed"
-        if embedding is not None:
-            # A precomputed vector is always in the text space of the active model.
-            embs = [[float(x) for x in embedding]]
-            _v11_space = "text"
-        elif _v11_space != "text":
-            try:
-                from memory_core.embeddings import EmbeddingProvider as _V11Embed
-                if not hasattr(self, "_v11_embed_provider") or self._v11_embed_provider is None:
-                    self._v11_embed_provider = _V11Embed()
-                v = self._v11_embed_provider.embed_query(
-                    f"{content} {context}", space=_v11_space,
-                )
-                if v:
-                    embs = [v]
-                    model_name = self._v11_embed_provider.active_model(_v11_space)
-                    _v11_provider_name = "fastembed"  # EmbeddingProvider is FastEmbed-first
-            except Exception as _emb_err:
-                LOG(f"per-space embed for space={_v11_space} fell back to text: {_emb_err}")
-                embs = None  # fall through to legacy text path
-        if embs is None:
-            # The identity comes back from the chain that ran, not from the
-            # configuration: with Ollama configured but unreachable this path
-            # returns SentenceTransformer vectors, and labelling them
-            # `nomic-embed-text` put 384-dim rows under a 768-dim model name.
-            embs, (model_name, _v11_provider_name) = self.embed_with_identity(
-                [f"{content} {context}"]
-            )
-            if embs and _v11_space != "text":
-                # Honest record-keeping: the row IS in `text` model space
-                # because per-space encoder failed — degrade gracefully.
-                _v11_space = "text"
-        if embs:
-            self._upsert_embedding(
-                rid, embs[0], model_name,
-                provider=_v11_provider_name,
-                embedding_space=_v11_space,
-                content_type=_v11_content_type,
-                language=_v11_language,
-            )
-            self.db.commit()
-            if self._chroma_client and not self._check_binary_search():
-                try:
-                    coll = self._chroma_collection_for(_v11_space)
-                    if coll is not None:
-                        coll.upsert(
-                            ids=[str(rid)], embeddings=embs, documents=[content],
-                            metadatas=[{
-                                "type": ktype, "project": project, "status": "active",
-                                "session_id": sid, "created_at": now, "confidence": 1.0,
-                                # v11 §J multi-embedding-space metadata
-                                "embedding_provider": _v11_provider_name,
-                                "embedding_model": model_name,
-                                "embedding_dimension": len(embs[0]),
-                                "embedding_space": _v11_space,
-                                "content_type": _v11_content_type,
-                                "language": _v11_language or "",
-                            }])
-                except Exception as _ce:
-                    LOG(f"chroma per-space upsert failed: {_ce}")
+        # v11 §J Phase 5b — classify FIRST, then embed via the per-space
+        # provider (code -> code model, text/log/config -> text model). When
+        # no provider produces a vector the record stays saved (text search
+        # works) and goes to embedding_pending; the backfill drain retries it.
+        record_vector, embed_error = self._embed_for_record(content, context, source_format, embedding)
+        embs = [record_vector["vector"]] if record_vector is not None else None
+        if record_vector is not None:
+            self._persist_record_embedding(rid, record_vector, ktype=ktype, project=project, sid=sid,
+                                           created_at=now, content=content)
+        else:
+            self._enqueue_embedding_backfill(rid, embed_error or "no vector")
         # Auto-link to knowledge graph
         try:
             from graph.auto_link import auto_link_knowledge
             auto_link_knowledge(self.db, rid, content, project,
                                 tags if isinstance(tags, list) else json.loads(tags or "[]"))
         except Exception as e:
-            LOG(f"Auto-link error: {e}")
+            self._swallowed("save.auto_link", e, "Auto-link error")
 
         # v10 — Episodic link: spawn an Event node and connect every
         # entity-typed graph node linked to this record via MENTIONED_IN.
@@ -2055,7 +2256,7 @@ class Store:
                 _ep.record_save_event(self.db, knowledge_id=rid,
                                       project=project, session_id=sid)
             except Exception as e:
-                LOG(f"episodic event creation skipped: {e}")
+                self._swallowed("save.episodic", e, "episodic event creation skipped")
 
         if self.background_queues:
             # Enqueue for async deep triple extraction (processed by reflection agent)
@@ -2063,21 +2264,21 @@ class Store:
                 from triple_extraction_queue import TripleExtractionQueue
                 TripleExtractionQueue(self.db).enqueue(rid)
             except Exception as e:
-                LOG(f"Triple-enqueue error: {e}")
+                self._swallowed("save.triple_enqueue", e, "Triple-enqueue error")
 
             # Enqueue for async deep metadata enrichment (entities/intent/topics)
             try:
                 from deep_enrichment_queue import DeepEnrichmentQueue
                 DeepEnrichmentQueue(self.db).enqueue(rid)
             except Exception as e:
-                LOG(f"Deep-enrich-enqueue error: {e}")
+                self._swallowed("save.deep_enrich_enqueue", e, "Deep-enrich-enqueue error")
 
             # Enqueue for async multi-representation embedding generation (GEM-RAG)
             try:
                 from representations_queue import RepresentationsQueue
                 RepresentationsQueue(self.db).enqueue(rid)
             except Exception as e:
-                LOG(f"Repr-enqueue error: {e}")
+                self._swallowed("save.repr_enqueue", e, "Repr-enqueue error")
 
         # Ping the reflection runner (watched by LaunchAgent). The runner
         # debounces: within the debounce window, multiple saves coalesce into
@@ -2086,7 +2287,7 @@ class Store:
             trigger_path = MEMORY_DIR / ".reflect-pending"
             trigger_path.touch()
         except Exception as e:
-            LOG(f"Reflect-trigger touch failed: {e}")
+            self._swallowed("save.reflect_trigger", e, "Reflect-trigger touch failed")
 
         # Persist filter savings metric if a filter ran
         if filter_stats:
@@ -2108,7 +2309,7 @@ class Store:
                 )
                 self.db.commit()
             except Exception as e:
-                LOG(f"filter_savings log error: {e}")
+                self._swallowed("save.filter_savings", e, "filter_savings log error")
 
         # Backfill the audit log row with the freshly minted knowledge_id so
         # 'pass' rows in quality_gate_log can be joined back to records.
@@ -2122,7 +2323,7 @@ class Store:
                 )
                 self.db.commit()
             except Exception as e:
-                LOG(f"quality_gate_log backfill error: {e}")
+                self._swallowed("save.quality_gate_log", e, "quality_gate_log backfill error")
 
         # v10 — Persist entity-dedup decisions to audit log now that the
         # knowledge_id is known. Skipped in async mode — the worker
@@ -2135,7 +2336,7 @@ class Store:
                     knowledge_id=rid, project=project,
                 )
             except Exception as e:
-                LOG(f"entity_dedup audit log skipped: {e}")
+                self._swallowed("save.entity_dedup_audit", e, "entity_dedup audit log skipped")
 
         # v10 — Auto-contradiction detection. For decision/solution saves,
         # run a semantic search against existing same-type records in the
@@ -2187,7 +2388,7 @@ class Store:
                                     f"{counts['superseded']} record(s) on save id={rid}"
                                 )
             except Exception as e:
-                LOG(f"contradiction_detector skipped: {e}")
+                self._swallowed("save.contradiction_detector", e, "contradiction_detector skipped")
 
         # v10 — Outbox: mark intent as committed now that all the side
         # effects (insert, embed, queues, contradiction sweep) are done.
@@ -2196,7 +2397,7 @@ class Store:
                 import outbox as _ob
                 _ob.mark_committed(self.db, intent, rid)
             except Exception as e:
-                LOG(f"outbox mark_committed skipped: {e}")
+                self._swallowed("save.outbox_mark", e, "outbox mark_committed skipped")
 
         # v10 — Project wiki auto-refresh. Off by default; opt in via
         # `MEMORY_WIKI_AUTO_REFRESH_EVERY_N=10` to regenerate the
@@ -2212,7 +2413,7 @@ class Store:
                     output_dir=str(MEMORY_DIR / "wikis"),
                 )
             except Exception as e:
-                LOG(f"project_wiki auto-refresh skipped: {e}")
+                self._swallowed("save.project_wiki", e, "project_wiki auto-refresh skipped")
 
         # v10.1 — In async mode, hand off the heavy work to the worker.
         # Quality meta is reported as 'pending' so the MCP client knows
@@ -2232,13 +2433,20 @@ class Store:
                     importance=importance_value,
                     skip_quality=skip_quality,
                 )
+                budget_note = (quality_meta or {}).get("importance_budget")
                 quality_meta = {
                     "decision": "pending",
                     "reason": "queued for async enrichment",
                 }
+                if budget_note:
+                    quality_meta["importance_budget"] = budget_note
             except Exception as e:
-                LOG(f"enrichment enqueue failed (sync fallback would re-run heavy stages): {e}")
+                self._swallowed("save.enrichment_enqueue", e,
+                                "enrichment enqueue failed (sync fallback would re-run heavy stages)")
 
+        journal = getattr(self, "error_journal", None)
+        if journal is not None:
+            journal.flush()
         return rid, replaces is not None, was_redacted, private_sections, quality_meta
 
     def supersede_values(self, rid, content, ktype, project):
@@ -2283,16 +2491,21 @@ class Store:
             try:
                 self.chroma.delete(ids=[str(i) for i in retired])
             except Exception as e:  # noqa: BLE001 — chroma raises its own types; cleanup must not fail the save
-                LOG(f"Chroma delete of superseded ids={retired} failed: {e}")
+                self._swallowed("save.chroma_delete", e, f"Chroma delete of superseded ids={retired} failed")
         return retired
 
     def bump_recall(self, ids):
-        """Strengthen memories that are recalled (spaced repetition effect)."""
+        """Record one recall of each id now, in one transaction.
+
+        `Recall.search` does not call this: it buffers usage and writes it in
+        the background (`Recall.usage_buffer`).
+        """
         now = utc_now()
-        for kid in ids:
-            self.db.execute(
-                "UPDATE knowledge SET recall_count=recall_count+1, last_recalled=? WHERE id=?",
-                (now, kid))
+        rows = [(now, kid) for kid in ids]
+        if not rows:
+            return
+        self.db.executemany(
+            "UPDATE knowledge SET recall_count=recall_count+1, last_recalled=? WHERE id=?", rows)
         self.db.commit()
 
     # ── Consolidation ──
@@ -2375,7 +2588,25 @@ class Store:
                         pass
             self.db.commit()
 
-        return {"archived": archived, "purged": purged}
+        return {"archived": archived, "purged": purged, "actions_pruned": self.prune_agent_actions()}
+
+    def prune_agent_actions(self, *, dry_run=False):
+        """Agent action log rows past TAM_ACTION_LOG_RETENTION_DAYS (or the row cap): count or delete them."""
+        from ambient.actions import ActionLog
+        from ambient.settings import AmbientSettings
+
+        if not self._has_table("agent_actions"):
+            return 0
+        retention = AmbientSettings.load(MEMORY_DIR).action_log_retention_days
+        if dry_run:
+            cutoff = format_utc(datetime.now(timezone.utc) - timedelta(days=retention))
+            return self.db.execute("SELECT COUNT(*) FROM agent_actions WHERE ts < ?", (cutoff,)).fetchone()[0]
+        return ActionLog(self.db).prune(retention)
+
+    def _has_table(self, name):
+        # PostgreSQL workspaces answer through the sqlite_master compat view.
+        return self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                               (name,)).fetchone() is not None
 
     # ── Export ──
 
@@ -2399,12 +2630,15 @@ class Store:
             JOIN knowledge a ON a.id=rel.from_id JOIN knowledge b ON b.id=rel.to_id
             WHERE a.status='active' AND b.status='active'
             AND (? IS NULL OR (a.project=? AND b.project=?))""", (project, project, project))
+        from ambient.actions import ActionLog
+
         return {
             "version": "2.1",
             "exported_at": utc_now(),
             "knowledge": rows,
             "sessions": sessions,
             "relations": relations,
+            "agent_actions": ActionLog(self.db).export(project) if self._has_table("agent_actions") else [],
         }
 
     # ── Version History ──
@@ -2455,7 +2689,7 @@ class Store:
                 try:
                     collection.delete(ids=[str(kid)])
                 except Exception as error:  # noqa: BLE001 — SQL soft deletion still excludes this record
-                    LOG(f"Chroma delete failed for knowledge_id={kid} space={space}: {error}")
+                    self._swallowed("delete.chroma", error, f"Chroma delete failed for knowledge_id={kid} space={space}")
         return rec
 
     # ── Relations ──
@@ -2787,33 +3021,38 @@ class Store:
 
         elif action == "rate":
             rid = kw["id"]
-            if kw.get("success"):
-                self.db.execute(
-                    "UPDATE rules SET success_count=success_count+1, updated_at=? WHERE id=?",
-                    (now, rid))
-            else:
-                self.db.execute(
-                    "UPDATE rules SET fail_count=fail_count+1, updated_at=? WHERE id=?",
-                    (now, rid))
-            self.db.commit()
-            # Recalculate success_rate
-            self.db.execute(
-                "UPDATE rules SET success_rate=CASE WHEN (success_count+fail_count)>0 "
-                "THEN CAST(success_count AS REAL)/CAST(success_count+fail_count AS REAL) "
-                "ELSE 0.0 END WHERE id=?", (rid,))
-            self.db.commit()
-            rec = self.q1("SELECT * FROM rules WHERE id=?", (rid,))
-            # Auto-suspend ineffective rules
-            rated_n = ((rec["success_count"] or 0) + (rec["fail_count"] or 0)) if rec else 0
-            if rec and rated_n >= 10 and rec["success_rate"] < 0.2:
+            # success_rate is over rated outcomes only: loads (shown_count) and
+            # fires are not ratings, so they must not dilute it.
+            outcome = record_rule_outcome(self.db, rid, bool(kw.get("success")), now)
+            if outcome is None:
+                return {"rated": True, "id": rid, "success_rate": None}
+            success, fail, rate = outcome.success_count, outcome.fail_count, outcome.success_rate
+            ci_upper = outcome.upper_bound
+            if outcome.status == "active" and should_suspend(success, fail):
                 self.db.execute(
                     "UPDATE rules SET status='suspended', updated_at=? WHERE id=?",
                     (now, rid))
                 self.db.commit()
-                return {"rated": True, "auto_suspended": True,
-                        "reason": "success_rate < 0.2 after 10+ ratings"}
-            return {"rated": True, "id": rid,
-                    "success_rate": rec["success_rate"] if rec else None}
+                return {"rated": True, "id": rid, "auto_suspended": True,
+                        "success_rate": rate, "ci_upper": ci_upper,
+                        "reason": f"95% upper bound of success rate < {RULE_SUSPEND_MAX_UPPER} "
+                                  f"after {success + fail} ratings"}
+            return {"rated": True, "id": rid, "success_rate": rate, "ci_upper": ci_upper}
+
+        elif action == "followed":
+            try:
+                mark = RuleSurfacer(self.db).mark_followed(
+                    kw["surface_id"], kw.get("followed"), kw.get("note", ""),
+                    kw.get("applicable", True))
+            except SurfaceNotFound as exc:
+                return {"error": str(exc), "surface_id": kw["surface_id"]}
+            return {"recorded": True, **mark.to_dict()}
+
+        elif action == "report":
+            min_n = kw.get("min_n", DEFAULT_REPORT_MIN_N)
+            if not isinstance(min_n, int) or min_n < 1:
+                return {"error": f"min_n must be a positive integer, got {min_n!r}"}
+            return RuleSurfacer(self.db).effectiveness_report(kw.get("project"), min_n).to_dict()
 
         elif action == "suspend":
             self.db.execute("UPDATE rules SET status='suspended', updated_at=? WHERE id=?",
@@ -2847,7 +3086,8 @@ class Store:
 
         return {"error": f"Unknown action: {action}"}
 
-    def get_rules_for_context(self, project="general", categories=None, phase=None, limit=None):
+    def get_rules_for_context(self, project="general", categories=None, phase=None,
+                              query=None, session_id=None, limit=None):
         """Get active rules relevant to current context.
 
         Args:
@@ -2857,14 +3097,18 @@ class Store:
                 core rules (no 'phase:*' tag) plus rules tagged 'phase:<phase>'.
                 Expected values: van|plan|creative|build|reflect|archive.
             limit: optional cap on the number of rules returned, applied after
-                the phase filter. Defaults to RULES_CONTEXT_LIMIT (MEMORY_RULES_LIMIT
-                env var), which is None (no cap) unless set. 0 means return no rules.
-                Negative values are rejected with an error.
+                the phase filter. Without `query` it defaults to RULES_CONTEXT_LIMIT
+                (MEMORY_RULES_LIMIT env var), which is None (no cap) unless set;
+                with `query` it defaults to DEFAULT_SURFACE_LIMIT. 0 means return
+                no rules. Negative values are rejected with an error.
+            query: optional task text. When given, rules are ranked by relevance
+                and each one carries a surface_id for self_rules(action='followed').
+            session_id: session the surfaces belong to (defaults to the server session).
 
-        Note: fire_count/last_fired are bumped ONLY for rules actually returned
-        (post phase-filter, post-limit). Those columns feed self_patterns'
-        rule_effectiveness report and its stale-rule query, so a narrow
-        `limit`/`MEMORY_RULES_LIMIT` also narrows that effectiveness telemetry.
+        Note: without `query`, shown_count/last_fired are bumped ONLY for rules
+        actually returned (post phase-filter, post-limit); a load never bumps
+        fire_count. last_fired feeds self_patterns' stale-rule query, so a narrow
+        `limit`/`MEMORY_RULES_LIMIT` also narrows that telemetry.
 
         When the limit truncates, the response also carries `rules_index`
         (id/priority/category/head for the omitted rules, same ordering) and a
@@ -2879,6 +3123,18 @@ class Store:
             }
         if limit is not None and limit < 0:
             return {"error": f"limit must be >= 0, got {limit}"}
+
+        if query is not None and str(query).strip():
+            surfaces = RuleSurfacer(self.db).surface_rules(
+                str(query), project, session_id or SID or "", "self_rules_context",
+                DEFAULT_SURFACE_LIMIT if limit is None else limit,
+                categories=categories, phase=phase)
+            result = {"rules_count": len(surfaces),
+                      "rules": [surface.to_dict() for surface in surfaces],
+                      "ranking": surfaces[0].ranking if surfaces else "lexical"}
+            if phase is not None:
+                result["phase_filter"] = phase
+            return result
 
         scopes = ["'global'", f"'project:{project}'"]
         if categories:
@@ -2915,19 +3171,22 @@ class Store:
             omitted = rows[effective:]
             rows = rows[:effective]
 
+        # A load is an exposure, not a fire: counting it in fire_count made the
+        # rating maths treat every session start as a failed application.
+        # last_fired still moves so the stale-rules report sees loaded rules.
         if rows:
             now = utc_now()
             placeholders = ",".join("?" * len(rows))
             self.db.execute(
-                f"UPDATE rules SET fire_count=fire_count+1, last_fired=?, updated_at=? "
+                f"UPDATE rules SET shown_count=COALESCE(shown_count, 0)+1, last_fired=? "
                 f"WHERE id IN ({placeholders})",
-                (now, now, *(r["id"] for r in rows)))
+                (now, *(r["id"] for r in rows)))
             self.db.commit()
         result = {"rules_count": len(rows), "total_matched": total_matched, "rules": rows}
         if omitted:
-            # Index entries are NOT fired: only rules whose full text reached the
-            # agent count as "applied", otherwise rule_effectiveness telemetry
-            # would credit every truncated rule with a hit it never got.
+            # Index entries are NOT counted as shown: only rules whose full text
+            # reached the agent count, otherwise the effectiveness report would
+            # credit every truncated rule with an exposure it never got.
             result["rules_index"] = [
                 {"id": r["id"], "priority": r["priority"],
                  "category": r["category"], "head": r["content"][:80]}
@@ -3015,9 +3274,13 @@ class Store:
 
         if view in ("rule_effectiveness", "full_report"):
             stats = self.q(f"""
-                SELECT id, content, scope, priority, fire_count,
-                       success_count, fail_count, success_rate, status
-                FROM rules WHERE fire_count > 0 {pf} ORDER BY success_rate DESC
+                SELECT id, content, scope, priority, fire_count, shown_count,
+                       success_count, fail_count, success_rate, success_lower_bound,
+                       auto_success_count, auto_fail_count, status
+                FROM rules
+                WHERE (fire_count > 0 OR shown_count > 0 OR success_count + fail_count > 0
+                       OR auto_success_count + auto_fail_count > 0) {pf}
+                ORDER BY success_rate DESC
             """, pp)
             stale = self.q("""
                 SELECT id, content, last_fired FROM rules
@@ -3057,22 +3320,114 @@ class Store:
 # Retrieval
 # ═══════════════════════════════════════════════════════════
 
+class _TierOff(Exception):
+    """Raised inside a tier's try-block to skip it when its weight is 0."""
+
+
+def _parse_as_of(value):
+    """`as_of` of memory_recall: a datetime, an ISO date/datetime string, or None (= now)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            from dateutil import parser as _dateparser
+            parsed = _dateparser.parse(text, fuzzy=True)
+        except (ImportError, ValueError, OverflowError) as error:
+            raise ValueError(f"as_of must be an ISO date or datetime, got {value!r}") from error
+    return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+
+
 class Recall:
+    # Busy timeout of the usage-statistics connection; the same as the Store connection's.
+    USAGE_CONNECTION_BUSY_TIMEOUT_MS = 5000
+
     def __init__(self, store: Store):
+        import threading
+
+        from memory_core.singleflight import SingleFlight
+
         self.s = store
         self._bounded_reranker = None
+        self._usage_buffer = None
+        self._usage_buffer_lock = threading.Lock()
+        self._flights = SingleFlight("recall")
+
+    # ── usage statistics (recall_count, last_recalled), written off the read path ──
+
+    def _open_usage_connection(self):
+        """A connection of its own for the usage flusher, of the same class as the Store's."""
+        db_class = type(self.s.db)
+        if self.s.is_postgres:
+            from tam_db import pg_connection
+            return pg_connection.connect(self.s.database, factory=db_class)
+        if not issubclass(db_class, sqlite3.Connection):
+            db_class = sqlite3.Connection
+        connection = sqlite3.connect(str(self.s.db_path), check_same_thread=False, factory=db_class)
+        connection.execute(f"PRAGMA busy_timeout={self.USAGE_CONNECTION_BUSY_TIMEOUT_MS}")
+        return connection
+
+    def usage_buffer(self):
+        """The coalescing buffer that writes recall usage statistics (created on first use)."""
+        with self._usage_buffer_lock:
+            if self._usage_buffer is None:
+                from config import get_recall_touch_flush_ms
+                from memory_core.recall_touch import RecallTouchBuffer
+                self._usage_buffer = RecallTouchBuffer(
+                    self._open_usage_connection, flush_interval=get_recall_touch_flush_ms() / 1000.0)
+            return self._usage_buffer
+
+    def _record_usage(self, ids) -> None:
+        ids = [int(kid) for kid in ids]
+        if ids:
+            self.usage_buffer().touch(ids)
+
+    def flush_usage(self) -> int:
+        """Write buffered usage statistics now; returns the number of records written."""
+        buffer = self._usage_buffer
+        return buffer.flush() if buffer is not None else 0
+
+    def close(self) -> None:
+        """Write buffered usage statistics and release the flusher's connection."""
+        buffer = self._usage_buffer
+        if buffer is not None:
+            buffer.close()
+
+    def _data_revision(self):
+        """`(total_changes, data_version)` the result caches are valid for; None when unknown.
+
+        On SQLite the version comes from the usage flusher's connection, which
+        sees every commit but its own, so usage statistics leave the caches
+        valid. None (do not use the caches) while a flush holds that connection.
+        """
+        db = self.s.db
+        if not self.s.is_postgres:
+            try:
+                buffer = self.usage_buffer()
+                version = buffer.data_version()
+            except sqlite3.Error as error:
+                from memory_core.telemetry import counters
+                counters.bump("recall_revision_fallbacks")
+                logging.getLogger(__name__).warning("Usage connection unavailable; cache revision from the Store",
+                                                    extra={"error": str(error)})
+            else:
+                if version is not None:
+                    return db.total_changes, ("usage", version)
+                if not buffer.closed:
+                    return None
+        return db.total_changes, db.execute("PRAGMA data_version").fetchone()[0]
 
     # ── RRF: Reciprocal Rank Fusion ──────────────────────────
     # Default tier weights: semantic gets slight boost, fuzzy is penalized
     RRF_K = 60  # standard RRF constant
-    RRF_WEIGHTS = {
-        "fts": 1.0,
-        "semantic": 1.2,
-        "hyde": 1.0,
-        "fuzzy": 0.5,
-        "graph": 0.8,
-        "episode": 0.9,
-    }
+    # Kept as a class attribute for callers that read it; the live weights come
+    # from config.get_recall_tier_weights() (MEMORY_RECALL_TIER_WEIGHTS) or the
+    # `tier_weights` argument of search().
+    from config import DEFAULT_RECALL_TIER_WEIGHTS as RRF_WEIGHTS
 
     @staticmethod
     def _rrf_fuse(tier_rankings, weights, k=60, *, score_weight=None):
@@ -3104,6 +3459,31 @@ class Recall:
                 )
         return scores
 
+    # Candidate generators live in memory_core.retrieval_tiers; these thin
+    # wrappers keep the call sites inside _search_impl readable.
+    from memory_core.retrieval_tiers import GRAPH_HUB_TYPES, GRAPH_MAX_SEED_NODES
+
+    def _shared_entity_neighbours(self, seed_ids, seed_scores, *, limit):
+        from memory_core.retrieval_tiers import shared_entity_neighbours
+        return shared_entity_neighbours(self.s, seed_ids, seed_scores, limit=limit)
+
+    def _lexical_candidates(self, text, *, project, ktype, branch, limit):
+        from memory_core.retrieval_tiers import lexical_candidates
+        return lexical_candidates(self.s, text, project=project, ktype=ktype, branch=branch, limit=limit)
+
+    def _directive_candidates(self, query, *, project, branch, limit, can_embed):
+        from memory_core.retrieval_tiers import directive_candidates
+        return directive_candidates(self.s, query, project=project, branch=branch, limit=limit, can_embed=can_embed)
+
+    def _query_entity_candidates(self, query, *, project, ktype, branch, limit):
+        from memory_core.retrieval_tiers import query_entity_candidates
+        return query_entity_candidates(self.s, query, project=project, ktype=ktype, branch=branch, limit=limit)
+
+    def _multi_query_candidates(self, parts, *, project, ktype, branch, limit, can_embed, spaces):
+        from memory_core.retrieval_tiers import multi_query_candidates
+        return multi_query_candidates(self.s, parts, fuse=self._rrf_fuse, project=project, ktype=ktype,
+                                      branch=branch, limit=limit, can_embed=can_embed, spaces=spaces)
+
     def _should_use_advanced_rag(self):
         """Check if advanced RAG (HyDE + reranker) is available and enabled."""
         if not HAS_RERANKER:
@@ -3128,7 +3508,7 @@ class Recall:
 
     def search(self, query, project=None, ktype="all", limit=10, detail="full", branch=None, fusion="rrf",
                rerank=False, diverse=False, embedding_space=None, _explain=False,
-               record_usage=True, defer_cross_rerank=False):
+               record_usage=True, defer_cross_rerank=False, tier_weights=None, as_of=None):
         # v11 Phase 5 — total wall-clock for this search; recorded into
         # `memory_core.telemetry.counters['search_total_ms']`.
         try:
@@ -3139,19 +3519,80 @@ class Recall:
             def _v11_op_timer(_name):  # type: ignore[no-redef]
                 return nullcontext()
 
-        with _v11_op_timer("search_total_ms"):
-            return self._search_impl(
-                query, project=project, ktype=ktype, limit=limit, detail=detail,
-                branch=branch, fusion=fusion, rerank=rerank, diverse=diverse,
-                embedding_space=embedding_space, _explain=_explain,
-                record_usage=record_usage, defer_cross_rerank=defer_cross_rerank,
-            )
+        def execute(usage: bool):
+            with _v11_op_timer("search_total_ms"):
+                return self._search_impl(
+                    query, project=project, ktype=ktype, limit=limit, detail=detail,
+                    branch=branch, fusion=fusion, rerank=rerank, diverse=diverse,
+                    embedding_space=embedding_space, _explain=_explain,
+                    record_usage=usage, defer_cross_rerank=defer_cross_rerank,
+                    tier_weights=tier_weights, as_of=as_of,
+                )
+
+        from config import get_recall_singleflight_enabled, get_recall_singleflight_wait_seconds
+        if not get_recall_singleflight_enabled():
+            return execute(record_usage)
+        # Concurrent identical recalls share one execution. Usage is recorded per
+        # caller, so it is left out of the key and recorded below for waiters.
+        key = (project, " ".join(str(query or "").casefold().split()), limit, ktype, detail, branch, fusion,
+               bool(rerank), bool(diverse), self._space_key(embedding_space), bool(_explain),
+               bool(defer_cross_rerank), tuple(sorted((str(k), float(v)) for k, v in (tier_weights or {}).items())),
+               str(as_of) if as_of is not None else None)
+        result, shared = self._flights.run(key, lambda: execute(record_usage),
+                                           timeout=get_recall_singleflight_wait_seconds())
+        if not shared:
+            return result
+        import copy
+
+        from memory_core.retrieval import flatten_results
+        result = copy.deepcopy(result)
+        if record_usage:
+            self._record_usage(item["id"] for item in flatten_results(result))
+        return result
+
+    # Environment switches _search_impl reads on every call; their raw values join the cache key.
+    RESULT_AFFECTING_ENV = (
+        "MEMORY_USE_LLM_IN_HOT_PATH", "USE_ADVANCED_RAG", "MEMORY_TEMPORAL_INDEX", "MEMORY_TEMPORAL_FILTER",
+        "MEMORY_EPISODE_TIER", "MEMORY_BOUNDED_RERANK", "MEMORY_SMART_ROUTER", "MEMORY_SMART_ROUTER_FORCE",
+        "MEMORY_RELATIONAL_BOOST", "MEMORY_GRAPH_EXPAND", "MEMORY_GRAPH_HUB_DEGREE", "MEMORY_RECALL_EXCLUDE",
+        "MEMORY_RECALL_EXCLUDED_TAGS",
+    )
+
+    @classmethod
+    def _pipeline_signature(cls) -> str:
+        """Cache-key fragment of the ranking knobs read from the environment on every search."""
+        from config import (
+            get_recall_compound_slots,
+            get_recall_fts_crosslingual_damp,
+            get_recall_intent_boosts,
+            get_user_turn_boost,
+        )
+        boosts = get_recall_intent_boosts()
+        return "|".join((
+            f"utb={get_user_turn_boost():g}",
+            "ib=" + ",".join(f"{name}={boosts[name]:g}" for name in sorted(boosts)),
+            f"cs={int(get_recall_compound_slots())}",
+            f"fd={get_recall_fts_crosslingual_damp():g}",
+            *(f"{name}={os.environ.get(name, '')}" for name in cls.RESULT_AFFECTING_ENV),
+        ))
+
+    @staticmethod
+    def _space_key(embedding_space):
+        if embedding_space is None or isinstance(embedding_space, str):
+            return embedding_space
+        return tuple(sorted(str(space) for space in embedding_space))
 
     def _search_impl(self, query, project=None, ktype="all", limit=10, detail="full",
                      branch=None, fusion="rrf", rerank=False, diverse=False,
                      embedding_space=None, _explain=False, record_usage=True,
-                     defer_cross_rerank=False):
+                     defer_cross_rerank=False, tier_weights=None, as_of=None):
         """Underlying implementation; wrapped by `search` for telemetry.
+
+        `as_of` (ISO date/datetime or datetime) is the moment relative dates in
+        the query ("last month", "three weeks ago") are counted from; None = now.
+
+        `tier_weights` (dict tier -> weight) overrides the environment's
+        MEMORY_RECALL_TIER_WEIGHTS for this call; a weight of 0 skips the tier.
 
         `defer_cross_rerank=True` (team server workers) skips the cross-encoder
         stage and returns the whole fused window instead of `limit` records,
@@ -3169,6 +3610,8 @@ class Recall:
         per-tier breakdowns; this is the data path used by the
         `memory_explain_search` MCP tool.
         """
+        import copy
+
         from memory_core.cross_rerank import shared_reranker
         from memory_core.retrieval import SearchScope
         scope = SearchScope(project=project, kind=ktype, branch=branch,
@@ -3180,9 +3623,8 @@ class Recall:
         pool = max(limit, (cross.window + 1) // 2) if cross_active else limit
         deferred = defer_cross_rerank and cross_active
         keep = max(limit, cross.window) if deferred else limit
-        cacheable = not self.s.db.in_transaction
-        revision = (self.s.db.total_changes,
-                    self.s.db.execute("PRAGMA data_version").fetchone()[0])
+        revision = self._data_revision()
+        cacheable = not self.s.db.in_transaction and revision is not None
         if not cacheable or getattr(self, "_cache_revision", None) != revision:
             if self.s.cache is not None:
                 self.s.cache.invalidate()
@@ -3198,6 +3640,38 @@ class Recall:
             _v11_spaces = sorted({
                 str(s).strip().lower() for s in embedding_space if str(s).strip()
             }) or None
+        from config import get_recall_tier_weights, tier_weight_signature
+        weights = get_recall_tier_weights()
+        if tier_weights:
+            weights.update({str(name): float(value) for name, value in tier_weights.items()})
+        _weights_sig = tier_weight_signature(weights)
+        anchor = _parse_as_of(as_of)
+
+        def _tier_on(name: str) -> bool:
+            return weights.get(name, 1.0) > 0
+
+        explain_sub_queries: list[str] = []
+        query_vector_cache: dict[str, list[float] | None] = {}
+        from memory_core.query_shapes import is_advice_query, is_historical_value_query, is_user_turn
+        advice_query = is_advice_query(query)
+        # "What was it before?" wants the earlier of several values first (Stage 4.9).
+        historical_query = is_historical_value_query(query)
+        # "What did we decide", "lessons learned", "how did we fix": the record types that
+        # answer the intent get a multiplier on the fused score (config.RECALL_INTENT_TYPES).
+        from config import recall_type_boosts
+        from memory_core.query_shapes import query_intents
+        intents = query_intents(query)
+        type_boosts = recall_type_boosts(intents)
+        type_boosted: list[int] = []
+        user_turn_boosted: list[int] = []
+
+        def _query_vector():
+            """The query embedding, computed once per search."""
+            if "q" not in query_vector_cache:
+                vectors = self.s.embed([query]) if can_embed else None
+                query_vector_cache["q"] = vectors[0] if vectors else None
+            return query_vector_cache["q"]
+
         # v9 A2 L1: fast-path query cache. Keyed by full filter set so that
         # different projects / ktypes / branches / spaces don't collide.
         _v9 = getattr(self.s, "v9_cache", None)
@@ -3206,31 +3680,41 @@ class Recall:
             "fusion": fusion, "rerank": rerank, "diverse": diverse,
             # v11 Phase 6b — embedding_space affects candidate pool, must be in cache key.
             "embedding_space": ",".join(_v11_spaces) if _v11_spaces else None,
-            "cross_rerank": f"{cross.model}/{cross.window}/{cross.weight}/{cross.context_chars}" if cross_active else None,
+            # `ready`: a result fused before the encoder loaded is not served once it can re-rank.
+            "cross_rerank": (f"{cross.model}/{cross.window}/{cross.weight}/{cross.context_chars}/{int(cross.ready)}"
+                             if cross_active else None),
+            "tier_weights": _weights_sig,
+            "as_of": anchor.isoformat() if anchor else None,
+            "pipeline": self._pipeline_signature(),
         }
+        cache_key = None
+        if cacheable and not deferred and not _explain and self.s.cache is not None:
+            cache_key = self.s.cache.make_key(query=query, project=project, ktype=ktype,
+                                               limit=limit, detail=detail, branch=branch,
+                                               fusion=fusion, rerank=rerank, diverse=diverse,
+                                               embedding_space=",".join(_v11_spaces) if _v11_spaces else None,
+                                               tier_weights=_weights_sig, cross_rerank=_v9_filters["cross_rerank"],
+                                               pipeline=_v9_filters["pipeline"], as_of=_v9_filters["as_of"])
         # _explain bypasses both caches: the payload includes ephemeral
         # tier rankings that are not part of the cached representation.
         if cacheable and not deferred and not _explain and _v9 is not None and _v9.l1.enabled:
             hit = _v9.recall_get(query, mode="search", k=limit, filters=_v9_filters)
             if hit is not None:
+                # Callers edit the result they get (memory_recall filters groups in place).
+                hit = copy.deepcopy(hit)
                 if record_usage:
                     from memory_core.retrieval import flatten_results
-                    self.s.bump_recall([item["id"] for item in flatten_results(hit)])
-                self._cache_revision = (self.s.db.total_changes, revision[1])
+                    self._record_usage(item["id"] for item in flatten_results(hit))
                 return hit
 
-        # Check cache first (include fusion param in cache key)
-        if cacheable and not deferred and not _explain and self.s.cache is not None:
-            cache_key = self.s.cache.make_key(query=query, project=project, ktype=ktype,
-                                               limit=limit, detail=detail, branch=branch,
-                                               fusion=fusion, rerank=rerank, diverse=diverse,
-                                               embedding_space=",".join(_v11_spaces) if _v11_spaces else None)
+        # Check cache first (the key covers every option that changes the ranking)
+        if cache_key is not None:
             cached = self.s.cache.get(cache_key)
             if cached is not None:
+                cached = copy.deepcopy(cached)
                 if record_usage:
                     from memory_core.retrieval import flatten_results
-                    self.s.bump_recall([item["id"] for item in flatten_results(cached)])
-                self._cache_revision = (self.s.db.total_changes, revision[1])
+                    self._record_usage(item["id"] for item in flatten_results(cached))
                 return cached
 
         # Stage 0 (optional): Query rewriting via Haiku.
@@ -3269,6 +3753,8 @@ class Recall:
         from memory_core.query_terms import fts_match_query
         fts_q = fts_match_query(query)
         try:
+            if not _tier_on("fts"):
+                raise _TierOff("fts")
             conds = ["knowledge_fts MATCH ?", "k.status='active'"]
             params = [fts_q]
             joins = ""
@@ -3343,14 +3829,38 @@ class Recall:
                     tier_scores.setdefault("fts", {})[int(r["id"])] = float(bm25_raw)
             if fts_tier:
                 tier_rankings["fts"] = fts_tier
+        except _TierOff:
+            pass
         except Exception:
             from memory_core.telemetry import counters
             counters.bump("retrieval_fts_errors")
             logging.getLogger(__name__).exception("FTS retrieval failed", extra={"tier": "fts"})
 
+        # Cross-lingual damp: when no content word of the query is in the full-text index,
+        # the fts matches rest on function words; the tier's fusion weight is lowered.
+        fts_damped = False
+        if tier_rankings.get("fts"):
+            from config import get_recall_fts_crosslingual_damp
+            damp = get_recall_fts_crosslingual_damp()
+            if damp < 1.0:
+                from memory_core.fts_vocab import vocabulary_overlap
+                try:
+                    overlap = vocabulary_overlap(self.s.db, query, is_postgres=self.s.is_postgres)
+                except sqlite3.Error as error:
+                    from memory_core.telemetry import counters
+                    counters.bump("retrieval_fts_vocab_errors")
+                    logging.getLogger(__name__).warning("FTS vocabulary check unavailable",
+                                                        extra={"tier": "fts", "error": str(error)})
+                else:
+                    if overlap is False:
+                        weights["fts"] = weights.get("fts", 1.0) * damp
+                        fts_damped = True
+                        from memory_core.telemetry import counters
+                        counters.bump("retrieval_fts_damped")
+
         from memory_core.atomic_facts import FactRepository
         try:
-            atomic_hits = FactRepository(self.s.db).search(query, scope, pool * 3)
+            atomic_hits = FactRepository(self.s.db).search(query, scope, pool * 3) if _tier_on("atomic_facts") else []
             if atomic_hits:
                 tier_rankings["atomic_facts"] = [hit["id"] for hit in atomic_hits]
                 for hit in atomic_hits:
@@ -3370,7 +3880,7 @@ class Recall:
         self.s._semantic_diagnostics = []
         semantic_tier = self.s._search_spaces(
             query, project=project, spaces=_v11_spaces, limit=pool * 3, kind=ktype, branch=branch,
-        ) if can_embed else []
+        ) if can_embed and _tier_on("semantic") else []
         from memory_core.retrieval import fetch_active_records
         semantic_records = fetch_active_records(
             self.s.db, [kid for kid, _ in semantic_tier if kid not in results],
@@ -3387,7 +3897,7 @@ class Recall:
             if _explain:
                 tier_scores.setdefault("semantic", {})[kid] = float(similarity)
 
-        if (can_embed and use_advanced and query_info and query_info.get("expand")
+        if (can_embed and _tier_on("hyde") and use_advanced and query_info and query_info.get("expand")
                 and (not _v11_spaces or "text" in _v11_spaces)):
             try:
                 hyde_vector = hyde_expand(query, project)
@@ -3425,16 +3935,11 @@ class Recall:
         try:
             from multi_repr_search import has_representations, search_with_winners
 
-            if can_embed and has_representations(self.s.db):
-                # Reuse query embedding if already computed above; else compute now
-                try:
-                    q_emb = embs[0]  # noqa: F821 — defined in upstream can_embed branch
-                except (NameError, UnboundLocalError):
-                    q_emb_list = self.s.embed([query])
-                    q_emb = q_emb_list[0] if q_emb_list else None
+            if can_embed and _tier_on("multi_repr") and has_representations(self.s.db):
+                q_emb = _query_vector()
                 if q_emb:
                     repr_hits, repr_winners = search_with_winners(
-                        self.s.db, q_emb, project=project, n_candidates=100, top_n=pool * 3
+                        self.s.db, q_emb, project=project, n_candidates=0, top_n=pool * 3
                     )
                     if repr_hits:
                         repr_records = fetch_active_records(
@@ -3468,7 +3973,7 @@ class Recall:
             LOG(f"multi_repr tier error: {e}")
 
         # ── Tier 3: Fuzzy search (catches typos and partial matches) ──
-        if len(results) < pool:
+        if len(results) < pool and _tier_on("fuzzy"):
             from memory_core.telemetry import op_timer
             with op_timer("retrieval_fuzzy_ms"):
                 try:
@@ -3510,7 +4015,8 @@ class Recall:
 
         # ── Tier 4: Graph expansion ──
         graph_candidates = [kid for kid in results if results[kid]["via"] != ["atomic_facts"]]
-        top5 = sorted(graph_candidates or results, key=lambda x: results[x]["score"], reverse=True)[:5]
+        top5 = (sorted(graph_candidates or results, key=lambda x: results[x]["score"], reverse=True)[:5]
+                if _tier_on("graph") else [])
         graph_tier = []
         if use_advanced and query_info and query_info.get("deep_graph"):
             # Multi-hop graph traversal (2 hops for architecture queries)
@@ -3524,7 +4030,8 @@ class Recall:
                     if _explain:
                         tier_scores.setdefault("graph", {})[int(did)] = float(sc)
         else:
-            # Standard 1-hop expansion
+            # Standard 1-hop expansion: explicit links (memory_relate) plus the
+            # knowledge graph — records that share an entity node with a seed.
             for kid in top5:
                 for r in self.s.q("""
                     SELECT k.* FROM relations rel
@@ -3537,19 +4044,73 @@ class Recall:
                         graph_tier.append((r["id"], graph_score))
                         if _explain:
                             tier_scores.setdefault("graph", {})[int(r["id"])] = float(graph_score)
+            try:
+                shared = self._shared_entity_neighbours(
+                    top5, {kid: results[kid]["score"] for kid in top5}, limit=limit)
+                shared_records = fetch_active_records(self.s.db, [kid for kid, _ in shared if kid not in results])
+                for kid, graph_score in shared:
+                    if kid in results:
+                        if "graph" not in results[kid]["via"]:
+                            results[kid]["via"].append("graph")
+                            results[kid]["score"] += graph_score
+                    else:
+                        row = shared_records.get(kid)
+                        if not row:
+                            continue
+                        results[kid] = {"r": row, "score": graph_score, "via": ["graph"]}
+                    graph_tier.append((kid, graph_score))
+                    if _explain:
+                        tier_scores.setdefault("graph", {})[int(kid)] = float(graph_score)
+            except sqlite3.Error as error:
+                from memory_core.telemetry import counters
+                counters.bump("retrieval_graph_errors")
+                logging.getLogger(__name__).warning("Graph tier unavailable",
+                                                    extra={"tier": "graph", "error": str(error)})
 
         if graph_tier:
             graph_tier.sort(key=lambda x: x[1], reverse=True)
             tier_rankings["graph"] = [doc_id for doc_id, _ in graph_tier]
 
+        # ── Tier 5: query entities — records linked to graph entities the query names ──
+        # Every entity found in the query counts, weighted by how specific it is; records
+        # naming several of them rank first (memory_core.retrieval_tiers.query_entity_candidates).
+        if _tier_on("query_entity"):
+            try:
+                entity_tier = self._query_entity_candidates(query, project=project, ktype=ktype, branch=branch,
+                                                            limit=pool * 3)
+                entity_records = fetch_active_records(self.s.db, [kid for kid, _ in entity_tier if kid not in results])
+                kept_entities: list[int] = []
+                for kid, entity_score in entity_tier:
+                    if kid in results:
+                        if "query_entity" not in results[kid]["via"]:
+                            results[kid]["via"].append("query_entity")
+                    else:
+                        row = entity_records.get(kid)
+                        if not row:
+                            continue
+                        results[kid] = {"r": row, "score": entity_score, "via": ["query_entity"]}
+                    kept_entities.append(kid)
+                    if _explain:
+                        tier_scores.setdefault("query_entity", {})[int(kid)] = float(entity_score)
+                if kept_entities:
+                    tier_rankings["query_entity"] = kept_entities
+            except sqlite3.Error as error:
+                from memory_core.telemetry import counters
+                counters.bump("retrieval_query_entity_errors")
+                logging.getLogger(__name__).warning("Query-entity tier unavailable",
+                                                    extra={"tier": "query_entity", "error": str(error)})
+
         # Tier 6: Episode retrieval (v11 W1-A) — coherent (when/who/where/what)
         # windows over fact rows. Each EpisodeHit expands to its constituent
         # knowledge_ids weighted by the episode's fused score.
-        if os.environ.get("MEMORY_EPISODE_TIER", "true").strip().lower() in ("1", "true", "yes", "on"):
+        if (_tier_on("episode")
+                and os.environ.get("MEMORY_EPISODE_TIER", "true").strip().lower() in ("1", "true", "yes", "on")):
             try:
                 from memory_core.episodes.retriever import retrieve_episodes
                 episode_tier: list[tuple[int, float]] = []
                 def ep_embed(txt):
+                    if txt == query:
+                        return _query_vector()
                     vecs = self.s.embed([txt])
                     if not vecs:
                         return None
@@ -3595,6 +4156,71 @@ class Recall:
                 pass
             except Exception as e:
                 LOG(f"episode tier error: {e}")
+
+        # ── Tier 7: directives — conventions of the project for advice-shaped queries ──
+        # "How should I name branches?" shares no words with "branches: feature/<ticket>-<slug>";
+        # the convention records are searched on their own and fused with their own weight.
+        if _tier_on("directives"):
+            try:
+                if advice_query:
+                    directive_tier = self._directive_candidates(
+                        query, project=project, branch=branch, limit=pool, can_embed=can_embed)
+                    directive_records = fetch_active_records(
+                        self.s.db, [kid for kid, _ in directive_tier if kid not in results])
+                    kept: list[int] = []
+                    for kid, score in directive_tier:
+                        if kid in results:
+                            if "directives" not in results[kid]["via"]:
+                                results[kid]["via"].append("directives")
+                        else:
+                            row = directive_records.get(kid)
+                            if not row:
+                                continue
+                            results[kid] = {"r": row, "score": score, "via": ["directives"]}
+                        kept.append(kid)
+                        if _explain:
+                            tier_scores.setdefault("directives", {})[int(kid)] = float(score)
+                    if kept:
+                        tier_rankings["directives"] = kept
+            except sqlite3.Error as error:
+                from memory_core.telemetry import counters
+                counters.bump("retrieval_directives_errors")
+                logging.getLogger(__name__).warning("Directives tier unavailable",
+                                                    extra={"tier": "directives", "error": str(error)})
+
+        # ── Tier 8: multi-query — each side of an ordering / comparison question ──
+        if _tier_on("multi_query"):
+            try:
+                from memory_core.query_shapes import sub_queries
+                parts = sub_queries(query)
+                if parts:
+                    multi_tier = self._multi_query_candidates(
+                        parts, project=project, ktype=ktype, branch=branch, limit=pool, can_embed=can_embed,
+                        spaces=_v11_spaces)
+                    multi_records = fetch_active_records(
+                        self.s.db, [kid for kid, _ in multi_tier if kid not in results])
+                    kept = []
+                    for kid, score in multi_tier:
+                        if kid in results:
+                            if "multi_query" not in results[kid]["via"]:
+                                results[kid]["via"].append("multi_query")
+                        else:
+                            row = multi_records.get(kid)
+                            if not row:
+                                continue
+                            results[kid] = {"r": row, "score": score, "via": ["multi_query"]}
+                        kept.append(kid)
+                        if _explain:
+                            tier_scores.setdefault("multi_query", {})[int(kid)] = float(score)
+                    if kept:
+                        tier_rankings["multi_query"] = kept
+                    if _explain:
+                        explain_sub_queries = parts
+            except sqlite3.Error as error:
+                from memory_core.telemetry import counters
+                counters.bump("retrieval_multi_query_errors")
+                logging.getLogger(__name__).warning("Multi-query tier unavailable",
+                                                    extra={"tier": "multi_query", "error": str(error)})
 
         for kid in list(results):
             if not scope.allows(results[kid]["r"], self.s.db):
@@ -3717,7 +4343,7 @@ class Recall:
             # was returned, not whether it helped, so boosting by it promoted
             # whatever generic rows matched common words (-4.7 pts R@10 on
             # LoCoMo within one pass of an agent's own queries).
-            item["decay_factor"] = Store._decay_factor(lc, hl)
+            item["decay_factor"] = Store._decay_factor(lc, hl, item["r"].get("type"))
             # v10 — importance boost (defaults to neutral 1.0 for legacy rows
             # without the column or with NULL/unknown values).
             imp = (item["r"].get("importance") or "medium").lower()
@@ -3738,14 +4364,15 @@ class Recall:
                 hl = get_repr_half_life_days(item["matched_repr"])
             else:
                 hl = get_parent_half_life_days()
-            return Store._decay_factor(lc, hl)
+            return Store._decay_factor(lc, hl, item["r"].get("type"))
 
         # ── Score fusion: RRF or legacy ──
         if use_rrf and tier_rankings:
             # Compute RRF scores with per-tier decay folded in
             rrf_scores = self._rrf_fuse(
-                tier_rankings, {**self.RRF_WEIGHTS, "atomic_facts":
-                    0.0 if any(ids for tier, ids in tier_rankings.items() if tier != "atomic_facts") else 1.0},
+                tier_rankings, {**weights, "atomic_facts":
+                    0.0 if any(ids for tier, ids in tier_rankings.items() if tier != "atomic_facts")
+                    else weights.get("atomic_facts", 1.0)},
                 self.RRF_K,
                 score_weight=_tier_score_weight,
             )
@@ -3753,26 +4380,40 @@ class Recall:
             # Apply importance boost on the fused score (per-tier decay is
             # already inside rrf_scores). Drift penalty already lowered
             # `item["score"]` upstream — keep it in sync for additive paths.
+            # Advice-shaped query: the user's own turns carry the preference.
+            user_turn_boost = 1.0
+            if advice_query:
+                from config import get_user_turn_boost
+                user_turn_boost = get_user_turn_boost()
             for doc_id, rrf_sc in rrf_scores.items():
                 if doc_id in results:
                     item = results[doc_id]
                     boost = item["importance_boost"]
+                    if user_turn_boost != 1.0 and is_user_turn(item["r"].get("content") or ""):
+                        boost *= user_turn_boost
+                        user_turn_boosted.append(int(doc_id))
+                    type_boost = type_boosts.get(item["r"].get("type") or "", 1.0)
+                    if type_boost != 1.0:
+                        boost *= type_boost
+                        type_boosted.append(int(doc_id))
                     item["rrf_score"] = rrf_sc * boost * (0.3 if item.get("drift") else 1.0)
                     item["score"] *= item["decay_factor"] * boost
 
             # Documents not in any tier ranking (shouldn't happen, but safety net)
             for doc_id, item in results.items():
                 if "rrf_score" not in item:
-                    multiplier = item["decay_factor"] * item["importance_boost"]
+                    multiplier = (item["decay_factor"] * item["importance_boost"]
+                                  * type_boosts.get(item["r"].get("type") or "", 1.0))
                     item["score"] *= multiplier
                     item["rrf_score"] = item["score"] * 0.5  # penalized fallback
 
             # Sort by fused RRF score
             ranked = sorted(results.values(), key=lambda x: x.get("rrf_score", 0), reverse=True)[:pool * 2]
         else:
-            # Legacy: apply decay + importance to additive scores
+            # Legacy: apply decay + importance (+ intent type boost) to additive scores
             for item in results.values():
-                item["score"] *= item["decay_factor"] * item["importance_boost"]
+                item["score"] *= (item["decay_factor"] * item["importance_boost"]
+                                  * type_boosts.get(item["r"].get("type") or "", 1.0))
             ranked = sorted(results.values(), key=lambda x: x["score"], reverse=True)[:pool * 2]
 
         # Stage 4.3 (optional): Temporal-index hard filter.
@@ -3806,7 +4447,7 @@ class Recall:
                                 "score": item.get("rrf_score", item.get("score", 0)),
                                 "_orig": item}
                                for item in ranked]
-                    reordered = temporal_rerank(query, adapted)
+                    reordered = temporal_rerank(query, adapted, anchor=anchor)
                     ranked = [e["_orig"] for e in reordered]
             except Exception as e:
                 LOG(f"Temporal filter failed, keeping RRF order: {e}")
@@ -3835,17 +4476,20 @@ class Recall:
                 ranked = cross.rerank(query, ranked, lambda item: item["r"].get("content", ""),
                                       wait=get_cross_rerank_mode() == "on",
                                       context_of=with_neighbours if cross.context_chars else None,
-                                      recency_of=recency)
+                                      recency_of=None if historical_query else recency)
             except Exception as e:  # noqa: BLE001 — onnxruntime raises its own types; keep the fused order
                 from memory_core.telemetry import counters as _cross_counters
                 LOG(f"cross-rerank failed, keeping fused order: {e}")
                 _cross_counters.bump("cross_rerank_errors")
 
         # Stage 4.9: a record never ranks above its own later value update, in every language and
-        # with the cross-encoder off too (memory_core.cross_rerank.keep_updates_below).
+        # with the cross-encoder off too (memory_core.cross_rerank.keep_updates_below). A question
+        # about the earlier value ("what did we use before?", "что было раньше") gets the reverse:
+        # the older values of each updated statement first.
         if len(ranked) > 1:
             from memory_core.cross_rerank import order_value_updates
-            ranked = order_value_updates(ranked, lambda item: item["r"].get("content", ""), recency)
+            ranked = order_value_updates(ranked, lambda item: item["r"].get("content", ""), recency,
+                                         older_first=historical_query)
 
         # Stage 5 (optional): CrossEncoder re-ranking
         # CE is trained on MS-MARCO (web search) — helps for precision in large bases,
@@ -3896,8 +4540,11 @@ class Recall:
         try:
             import query_router as _qr_router
             router_classification = _qr_router.classify_query(query)
+            # The query_entity tier ranks entity-linked records inside the fusion; this
+            # post-rerank injection only runs when that tier is switched off.
             if (router_classification.kind == "relational"
-                    and router_classification.entities):
+                    and router_classification.entities
+                    and not _tier_on("query_entity")):
                 graph_rows = _qr_router.graph_search(
                     self.s.db,
                     entities=router_classification.entities,
@@ -3963,14 +4610,53 @@ class Recall:
 
         ranked = [item for item in ranked if scope.allows(item["r"], self.s.db)][:keep]
 
+        # Compound slots: "X and how do we Y" asks for two records; each part is searched
+        # on its own and its best record is guaranteed a place in the top `limit`
+        # (MEMORY_RECALL_COMPOUND_SLOTS; memory_core.retrieval_tiers.guarantee_slots).
+        compound_parts_used: list[str] = []
+        compound_slotted: list[int] = []
+        from config import get_recall_compound_slots
+        if get_recall_compound_slots() and not deferred:
+            from memory_core.query_shapes import compound_parts
+            parts = compound_parts(query)
+            if parts:
+                try:
+                    from memory_core.retrieval_tiers import compound_part_winners, guarantee_slots
+                    winners = compound_part_winners(self.s, parts, fuse=self._rrf_fuse, project=project,
+                                                    ktype=ktype, branch=branch, can_embed=can_embed,
+                                                    spaces=_v11_spaces)
+                    by_id = {item["r"]["id"]: item for item in ranked}
+                    fetched = fetch_active_records(self.s.db, [kid for kid in winners if kid not in by_id])
+                    for kid, row in fetched.items():
+                        if scope.allows(row, self.s.db):
+                            by_id[kid] = {"r": row, "score": 0.0, "rrf_score": 0.0, "via": ["compound_slot"],
+                                          "decay_factor": 1.0, "importance_boost": 1.0}
+                    winners = [kid for kid in winners if kid in by_id]
+                    before = [item["r"]["id"] for item in ranked[:limit]]
+                    order = guarantee_slots([item["r"]["id"] for item in ranked], winners, limit)
+                    ranked = [by_id[kid] for kid in order][:keep]
+                    compound_parts_used = parts
+                    compound_slotted = [kid for kid in winners if kid not in before]
+                    for kid in compound_slotted:
+                        if "compound_slot" not in by_id[kid]["via"]:
+                            by_id[kid]["via"].append("compound_slot")
+                    if compound_slotted:
+                        from memory_core.telemetry import counters
+                        counters.bump("retrieval_compound_slotted", len(compound_slotted))
+                except sqlite3.Error as error:
+                    from memory_core.telemetry import counters
+                    counters.bump("retrieval_compound_errors")
+                    logging.getLogger(__name__).warning("Compound slots unavailable",
+                                                        extra={"stage": "compound_slots", "error": str(error)})
+
         # Usage statistics (recall_count, last_recalled) for the dashboard and
-        # consolidation; they do not affect ranking. Callers that measure
-        # retrieval — benchmarks, evals, memory_explain_search — pass
-        # record_usage=False so their runs leave no trace in those statistics.
+        # consolidation; they do not affect ranking. Buffered and written by a
+        # background thread (memory_core.recall_touch), so a recall takes no
+        # write lock. Callers that measure retrieval — benchmarks, evals,
+        # memory_explain_search — pass record_usage=False so their runs leave
+        # no trace in those statistics.
         if record_usage:
-            returned_ids = [item["r"]["id"] for item in ranked]
-            if returned_ids:
-                self.s.bump_recall(returned_ids)
+            self._record_usage(item["r"]["id"] for item in ranked)
 
         total_tokens = 0
         grouped = {}
@@ -4018,7 +4704,7 @@ class Recall:
                     "created_at": r.get("created_at", ""), "session_id": r.get("session_id", ""),
                     "score": round(item["score"], 3), "via": item["via"],
                     "recall_count": r.get("recall_count", 0),
-                    "decay": round(Store._decay_factor(r.get("last_confirmed", ""), DECAY_HALF_LIFE), 3),
+                    "decay": round(Store._decay_factor(r.get("last_confirmed", ""), DECAY_HALF_LIFE, r.get("type")), 3),
                 }
                 if "rrf_score" in item:
                     entry["rrf_score"] = round(item["rrf_score"], 6)
@@ -4051,7 +4737,7 @@ class Recall:
                     "created_at": r.get("created_at", ""), "session_id": r.get("session_id", ""),
                     "score": round(item["score"], 3), "via": item["via"],
                     "recall_count": r.get("recall_count", 0),
-                    "decay": round(Store._decay_factor(r.get("last_confirmed", ""), DECAY_HALF_LIFE), 3),
+                    "decay": round(Store._decay_factor(r.get("last_confirmed", ""), DECAY_HALF_LIFE, r.get("type")), 3),
                     "branch": r.get("branch", ""),
                     "embedding_space": _v11_es,
                 }
@@ -4088,12 +4774,9 @@ class Recall:
 
         # Cache the result. _explain payloads are NOT cached — they include
         # ephemeral tier rankings tied to a single execution.
-        if cacheable and not deferred and not _explain and self.s.cache is not None:
-            cache_key = self.s.cache.make_key(query=query, project=project, ktype=ktype,
-                                               limit=limit, detail=detail, branch=branch,
-                                               fusion=fusion, rerank=rerank, diverse=diverse,
-                                               embedding_space=",".join(_v11_spaces) if _v11_spaces else None)
-            self.s.cache.put(cache_key, result, project=project)
+        # The same key as the lookup above (it used to omit tier_weights, so no lookup ever hit).
+        if cacheable and cache_key is not None:
+            self.s.cache.put(cache_key, copy.deepcopy(result), project=project)
 
         # v9 A2 L1: mirror into fast LRU tagged with the ids this result touched.
         if cacheable and not deferred and not _explain and _v9 is not None and _v9.l1.enabled:
@@ -4104,7 +4787,7 @@ class Recall:
                         _id = _item.get("id")
                         if isinstance(_id, int):
                             _ids.append(_id)
-                _v9.recall_set(query, result, mode="search", k=limit,
+                _v9.recall_set(query, copy.deepcopy(result), mode="search", k=limit,
                                filters=_v9_filters, memory_ids=_ids)
             except Exception:
                 pass
@@ -4138,6 +4821,19 @@ class Recall:
                 "graph": _tier_pairs("graph", "score"),
                 "fuzzy": _tier_pairs("fuzzy", "ratio"),
                 "hyde": _tier_pairs("hyde", "score"),
+                "directives": _tier_pairs("directives", "score"),
+                "multi_query": _tier_pairs("multi_query", "score"),
+                "query_entity": _tier_pairs("query_entity", "score"),
+                "sub_queries": explain_sub_queries,
+                "advice_query": advice_query,
+                "historical_query": historical_query,
+                "compound_parts": compound_parts_used,
+                "compound_slotted": compound_slotted,
+                "fts_damped": fts_damped,
+                "intents": sorted(intents),
+                "type_boosts": type_boosts,
+                "type_boosted": sorted(type_boosted),
+                "user_turn_boosted": sorted(user_turn_boosted),
                 "merged": merged,
                 "rerank_applied": bool(rerank and HAS_RERANKER),
                 "embedding_space": (
@@ -4145,6 +4841,7 @@ class Recall:
                     else (list(_v11_spaces) if _v11_spaces else None)
                 ),
                 "tiers_used": list(tier_rankings.keys()),
+                "tier_weights": {name: weights.get(name, 1.0) for name in sorted(set(weights) | set(tier_rankings))},
             }
 
         return result
@@ -4350,9 +5047,30 @@ class Recall:
                 "embeddings_count": embed_count,
             },
             "self_improvement": self._si_stats(s),
+            "write_path": self._write_path_stats(s),
             "observations": self._obs_stats(s),
             "cache": s.cache.stats() if s.cache is not None else {"enabled": False},
         }
+
+    @staticmethod
+    def _write_path_stats(s):
+        """Embedding backfill queue, outbox intents, recent swallowed errors, importance budget."""
+        import importance_budget
+        import outbox
+
+        out = {}
+        try:
+            out["embedding_backfill"] = s._embedding_backfill().counts()
+        except sqlite3.Error as error:
+            out["embedding_backfill"] = {"error": str(error)}
+        out["outbox"] = outbox.get_status_counts(s.db)
+        journal = getattr(s, "error_journal", None)
+        out["errors_24h"] = journal.recent_counts() if journal is not None else {}
+        try:
+            out["importance_budget"] = importance_budget.today_summary(s.db)
+        except (sqlite3.Error, ValueError) as error:
+            out["importance_budget"] = {"error": str(error)}
+        return out
 
     @staticmethod
     def _obs_stats(s):
@@ -4387,7 +5105,7 @@ class Recall:
                     "active": s.db.execute("SELECT COUNT(*) FROM rules WHERE status='active'").fetchone()[0],
                     "suspended": s.db.execute("SELECT COUNT(*) FROM rules WHERE status='suspended'").fetchone()[0],
                     "avg_success_rate": round(
-                        s.db.execute("SELECT AVG(success_rate) FROM rules WHERE status='active' AND fire_count>0").fetchone()[0] or 0, 2),
+                        s.db.execute("SELECT AVG(success_rate) FROM rules WHERE status='active' AND success_count+fail_count>0").fetchone()[0] or 0, 2),
                 },
             }
         except Exception:
@@ -4406,7 +5124,12 @@ except Exception:
 # serverInfo the client displays. The name tracked the pre-v7 package name
 # until 13.0.4, and the version was never passed at all, so every client
 # rendered an empty string.
-app = Server("total-agent-memory", version=_SERVER_VERSION)
+app = Server(
+    "total-agent-memory",
+    version=_SERVER_VERSION,
+    # Built once per process: the date in it is the server start date.
+    instructions=server_instructions.build(os.environ, datetime.now().astimezone().date()),
+)
 store: Store = None
 recall: Recall = None
 SID: str = None
@@ -4441,6 +5164,7 @@ _READ_ONLY_TOOLS = frozenset({
     "memory_stats", "memory_temporal_query", "memory_timeline",
     "search_intents", "self_patterns", "self_rules_context",
     "task_phases_list", "workflow_predict",
+    "memory_exploration_recall",
 })
 
 # Destructive: removes or overwrites knowledge a user cannot trivially restore.
@@ -4455,6 +5179,7 @@ _IDEMPOTENT_TOOLS = frozenset({
     "memory_delete", "memory_forget", "memory_rebuild_embeddings",
     "memory_rebuild_fts", "memory_warmup", "memory_graph_index",
     "memory_wiki_generate", "rule_set_phase", "memory_entity_resolve", "memory_report",
+    "memory_exploration_record",
 })
 
 
@@ -4472,11 +5197,18 @@ def _annotate(tool: Tool) -> Tool:
     return tool
 
 
+def _tool_profile() -> tool_profiles.ToolProfile:
+    """The TAM_TOOL_PROFILE in effect; an unknown value raises ToolProfileError."""
+    return tool_profiles.resolve_profile(os.environ)
+
+
 async def list_tools():
-    return [_annotate(t) for t in await _tool_catalogue()]
+    tools = [_annotate(t) for t in await _tool_catalogue()]
+    return tool_profiles.apply_profile(tools, _tool_profile())
 
 
 async def _tool_catalogue():
+    import exploration_memo
     from memory_reports import tool as report_tool
     return [
         Tool(
@@ -4511,6 +5243,14 @@ async def _tool_catalogue():
                         "description": "Evidence mode: missing relation; subject must occur in the original question."},
                     "neighbors": {"type": "integer", "default": 2,
                                   "description": "Timeline/context modes: records before/after each hit; context accepts 0–3."},
+                    "fill_budget": {"type": "boolean", "default": False,
+                                    "description": "Context mode: search deeper (up to 100 hits) and keep whole hits in rank order "
+                                                   "until context_max_chars is used, instead of excerpting the top `limit` hits "
+                                                   "to fit. Neighbours default to 0 here; pass `neighbors` to keep each hit "
+                                                   "with the records around it."},
+                    "as_of": {"type": "string",
+                              "description": "ISO date or datetime that relative dates in the query ('last month', "
+                                             "'three weeks ago', 'yesterday') are counted from. Default: now."},
                     "detail": {"type": "string", "enum": ["compact", "summary", "full", "auto"], "default": "full",
                                "description": "Level of detail: 'compact' ~50 tokens/result (id+title+score), "
                                               "'summary' truncates content to 150 chars, 'full' returns everything, "
@@ -4654,7 +5394,9 @@ async def _tool_catalogue():
         Tool(
             name="memory_stats",
             description="Memory statistics with health metrics: sessions, knowledge by type/project, "
-                        "retention zones (active/archived/consolidated), stale records, storage size, config.",
+                        "retention zones (active/archived/consolidated), stale records, storage size, config, "
+                        "write path (embedding backfill queue, outbox intents, swallowed errors by component "
+                        "over 24h, importance budget clamps).",
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
@@ -4673,7 +5415,7 @@ async def _tool_catalogue():
         Tool(
             name="memory_export",
             description="Export all knowledge as JSON for backup or migration. "
-                        "Includes knowledge, sessions, and relations.",
+                        "Includes knowledge, sessions, relations and the agent action log.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -4685,7 +5427,8 @@ async def _tool_catalogue():
         Tool(
             name="memory_forget",
             description="Apply retention policy: archive stale records (>180d, never recalled, low confidence), "
-                        "purge very old archived records (>365d). Keeps memory clean.",
+                        "purge very old archived records (>365d), prune the agent action log past "
+                        "TAM_ACTION_LOG_RETENTION_DAYS. Keeps memory clean.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -4862,8 +5605,12 @@ async def _tool_catalogue():
             name="self_rules",
             description="Manage behavioral rules (SOUL). Rules are promoted insights that shape agent behavior. "
                         "Actions: list, get (full text by ids), fire (record relevance), "
-                        "rate (success=true/false), suspend, activate, retire, add_manual. "
-                        "Auto-suspend: success_rate < 0.2 after 10+ RATINGS (success_count+fail_count), "
+                        "rate (success=true/false), suspend, activate, retire, add_manual, "
+                        "followed (surface_id from self_rules_context(query=...): was the rule followed?), "
+                        "report (follow-rate effectiveness with Wilson CIs, measurement only). "
+                        "success_rate = success / (success + fail). Auto-suspend: "
+                        f"{RULE_SUSPEND_MIN_RATED}+ ratings and the "
+                        f"95% upper bound of success_rate < {RULE_SUSPEND_MAX_UPPER}, "
                         "checked only when action='rate' runs - an unrated rule is never suspended, "
                         "however often it fires. "
                         "For list: no result cap by default - all matching active rules are "
@@ -4877,7 +5624,7 @@ async def _tool_catalogue():
                 "properties": {
                     "action": {"type": "string",
                                "enum": ["list", "get", "fire", "rate", "suspend", "activate",
-                                        "retire", "add_manual"]},
+                                        "retire", "add_manual", "followed", "report"]},
                     "ids": {"type": "array", "items": {"type": "integer"}, "maxItems": 50,
                             "description": "For get: rule ids to fetch in full (max 50 per call; "
                                            "extras are dropped, unknown/inactive ids are skipped)."},
@@ -4893,6 +5640,15 @@ async def _tool_catalogue():
                     "limit": {"type": "integer", "minimum": 0,
                               "description": "For list: optional cap on number of rules returned. "
                                              "Defaults to the MEMORY_RULES_LIMIT env var (unset = no cap)."},
+                    "surface_id": {"type": "string",
+                                   "description": "For followed: surface_id returned by self_rules_context"},
+                    "followed": {"type": ["boolean", "null"],
+                                 "description": "For followed: true followed, false ignored, null clears"},
+                    "note": {"type": "string", "default": "", "description": "For followed: evidence note"},
+                    "applicable": {"type": "boolean", "default": True,
+                                   "description": "For followed: false marks the rule not applicable"},
+                    "min_n": {"type": "integer", "default": DEFAULT_REPORT_MIN_N, "minimum": 1,
+                              "description": "For report: judged surfaces needed before a verdict"},
                 },
                 "required": ["action"],
             },
@@ -4941,11 +5697,11 @@ async def _tool_catalogue():
                         "Call at SESSION START to load rules. Returns rules filtered by project and scope. "
                         "v8.0: pass `phase` to lazy-load rules relevant to current task phase — core "
                         "rules (no phase tag) + rules tagged phase:<X>. Cuts prompt tokens ~70%. "
-                        "No result cap by default - all matching active rules are returned unless "
-                        "`limit` is passed or the MEMORY_RULES_LIMIT env var is set. "
-                        "Only rules actually returned get fire_count/last_fired bumped, which "
-                        "feeds self_patterns rule_effectiveness - narrowing this limit also "
-                        "narrows that telemetry. "
+                        "Without `query`, no result cap by default - all matching active rules are "
+                        "returned unless `limit` is passed or the MEMORY_RULES_LIMIT env var is set. "
+                        "Only rules actually returned get shown_count/last_fired bumped (a load is "
+                        "not a fire), and last_fired feeds the self_patterns stale-rules report - "
+                        "narrowing this limit also narrows that telemetry. "
                         "When the limit truncates, the response carries `rules_index` "
                         "(id/priority/category/head for every omitted rule, same ordering) and "
                         "a `hint`: those rules still bind you - fetch their full text with "
@@ -4965,7 +5721,13 @@ async def _tool_catalogue():
                     "limit": {"type": "integer", "minimum": 0,
                               "description": "Optional cap on number of rules returned, applied after "
                                              "the phase filter. Defaults to the MEMORY_RULES_LIMIT env "
-                                             "var (unset = no cap)."},
+                                             "var (unset = no cap); with `query`, defaults to "
+                                             f"{DEFAULT_SURFACE_LIMIT}."},
+                    "query": {"type": "string",
+                              "description": "Optional task text: rank rules by relevance and return a "
+                                             "surface_id per rule for self_rules(action='followed')."},
+                    "session_id": {"type": "string",
+                                   "description": "Optional session for the surfaces (default: current)."},
                 },
             },
         ),
@@ -5772,7 +6534,16 @@ async def _tool_catalogue():
                         "making progress without interfering with active work.",
             inputSchema={"type": "object", "properties": {}},
         ),
+        # ── Exploration memos: conclusions keyed to source-file hashes ──
+        Tool(name=exploration_memo.RECORD_TOOL, description=exploration_memo.RECORD_DESCRIPTION,
+             inputSchema=exploration_memo.record_input_schema()),
+        Tool(name=exploration_memo.RECALL_TOOL, description=exploration_memo.RECALL_DESCRIPTION,
+             inputSchema=exploration_memo.recall_input_schema()),
     ]
+
+
+# Per-tool call recorder; installed by _bootstrap_session when TAM_TOOL_TELEMETRY allows it.
+TELEMETRY: tool_telemetry.ToolTelemetry | None = None
 
 
 async def _call_tool_impl(name, args) -> tuple[list[TextContent], bool]:
@@ -5783,20 +6554,25 @@ async def _call_tool_impl(name, args) -> tuple[list[TextContent], bool]:
     protocol-level error.
     """
     failed = False
+    started = time.perf_counter()
+    args_bytes = 0
+    error_class = None
     try:
         # Guarded: a client can call a tool before _bootstrap_session() has
         # run (or after a failed bootstrap). Losing the audit line is fine;
         # crashing the transport is not.
         # Credentials never reach the raw log, the store or any derived table.
         args, _ = redact_value(args or {})
+        args_bytes = tool_telemetry.payload_bytes(args)
         if store is not None:
             store.raw_append(SID, {"type": "tool_call", "tool": name, "args": args})
         r = await _do(name, args)
-        return [TextContent(type="text", text=r)], False
+        content, is_error = [TextContent(type="text", text=r)], False
     except Exception as e:
         failed = True
         LOG(f"Error in {name}: {e}")
-        return [TextContent(type="text", text=f"Error: {e}")], True
+        error_class = type(e).__name__
+        content, is_error = [TextContent(type="text", text=f"Error: {e}")], True
     finally:
         # A failed write leaves the implicit transaction open; its snapshot
         # then fails every later write on this connection with BUSY_SNAPSHOT.
@@ -5808,6 +6584,36 @@ async def _call_tool_impl(name, args) -> tuple[list[TextContent], bool]:
                 LOG(f"leaked transaction after {name} (ok={not failed}), rolled back")
             except Exception as e:
                 LOG(f"rollback after {name} failed: {e}")
+    _observe_tool_call(name, started, content, is_error, error_class, args_bytes)
+    return content, is_error
+
+
+def _observe_tool_call(name: str, started: float, content: list[TextContent], is_error: bool,
+                       error_class: str | None, args_bytes: int) -> None:
+    """Hidden-tool trace and telemetry sample for one call; never fails the call itself."""
+    duration_ms = (time.perf_counter() - started) * tool_telemetry.MS_PER_SEC
+    try:
+        tool_profiles.note_call(name, _tool_profile())
+    except tool_profiles.ToolProfileError as error:
+        LOG(f"Tool profile unavailable while recording {name}: {error}")
+    if TELEMETRY is not None:
+        TELEMETRY.record(
+            name, duration_ms=duration_ms, ok=not is_error, error_class=error_class, args_bytes=args_bytes,
+            result_bytes=sum(tool_telemetry.payload_bytes(item.text or "") for item in content),
+        )
+
+
+def _install_telemetry(db_path: Path) -> None:
+    """Start per-tool telemetry for this process unless TAM_TOOL_TELEMETRY turns it off."""
+    global TELEMETRY
+    if TELEMETRY is not None:
+        return
+    if not tool_telemetry.enabled(os.environ):
+        LOG("Tool telemetry: off (TAM_TOOL_TELEMETRY)")
+        return
+    TELEMETRY = tool_telemetry.ToolTelemetry(tool_telemetry.sqlite_connector(db_path),
+                                             profile=_tool_profile().name)
+    TELEMETRY.install_shutdown_hooks()
 
 
 async def call_tool(name, args):
@@ -5999,8 +6805,51 @@ def _required_text(a, key):
     return value
 
 
+def _tool_call_report() -> dict:
+    """Per-tool count, p50/p95 and error rate over the default window, from tool_calls."""
+    try:
+        if TELEMETRY is not None:
+            return {"enabled": True, **TELEMETRY.report()}
+        if store is None:
+            return {"enabled": False}
+        # Telemetry off in this process: other processes may still have written rows.
+        return {"enabled": False, **tool_telemetry.report(store.db)}
+    except Exception as error:  # noqa: BLE001 — a telemetry fault must not take the perf report down
+        LOG(f"tool call report failed: {error}")
+        return {"error": f"{type(error).__name__}: {error}"}
+
+
+def _render(value) -> str:
+    """Wire form of a tool result: compact JSON (no indentation, no padding), UTF-8 kept as is."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _without_null_hit_fields(result):
+    """Recall result with None-valued fields dropped from each hit.
+
+    Only per-hit keys go: inside a hit, an absent key and a null one mean the
+    same ("no value"). Top-level keys are left alone, where a null can carry
+    meaning of its own.
+    """
+    if not isinstance(result, dict):
+        return result
+    groups = result.get("results")
+    if isinstance(groups, dict):
+        compact = {kind: [_drop_none(hit) for hit in hits] if isinstance(hits, list) else hits
+                   for kind, hits in groups.items()}
+    elif isinstance(groups, list):
+        compact = [_drop_none(hit) for hit in groups]
+    else:
+        return result
+    return {**result, "results": compact}
+
+
+def _drop_none(hit):
+    return {key: value for key, value in hit.items() if value is not None} if isinstance(hit, dict) else hit
+
+
 async def _do(name, a):
-    J = lambda x: json.dumps(x, ensure_ascii=False, indent=2, default=str)
+    J = _render
 
     if name == "memory_recall":
         mode_param = a.get("mode", "search")
@@ -6021,10 +6870,17 @@ async def _do(name, a):
         # caller's detail= for those modes.
         search_detail = "full" if mode_param != "search" else detail_param
         search_limit = min(50, a.get("limit", 10) * 2) if mode_param == "evidence" else a.get("limit", 10)
+        fill_context = mode_param == "context" and bool(a.get("fill_budget", False))
+        if fill_context:
+            from memory_core.context_budget import FILL_SEARCH_LIMIT
+            search_limit = max(search_limit, FILL_SEARCH_LIMIT)
+        # `as_of` is passed only when given, so the positional call shape stays as before.
+        as_of_kwargs = {"as_of": a["as_of"]} if a.get("as_of") else {}
         result = recall.search(a["query"], a.get("project"), a.get("type", "all"),
                                search_limit, search_detail,
                                a.get("branch"), a.get("fusion", "rrf"),
-                               a.get("rerank", False), a.get("diverse", False))
+                               a.get("rerank", False), a.get("diverse", False),
+                               **as_of_kwargs)
         if a.get("detail") == "auto":
             result["auto_detail"] = detail_param
 
@@ -6201,8 +7057,11 @@ async def _do(name, a):
             evidence = EvidenceContext(store.db, get_recall_excluded_tags()).build(
                 flatten_results(result), query=a["query"],
                 scope=SearchScope(project=a.get("project"), kind=a.get("type", "all"), branch=a.get("branch")),
-                radius=int(a.get("neighbors", 1)),
+                # With fill_budget the budget goes to further ranked hits: on LoCoMo, neighbours
+                # took room from them and lowered coverage (docs/benchmarks/context-fill-v14).
+                radius=int(a.get("neighbors", 0 if fill_context else 1)),
                 max_chars=a.get("context_max_chars", DEFAULT_EVIDENCE_CHARS),
+                fill=fill_context,
             )
             result = {**result, "mode": "context", "results": evidence, "total": len(evidence),
                       "answer_guidance": ANSWER_GUIDANCE,
@@ -6224,7 +7083,7 @@ async def _do(name, a):
             from evidence_endpoint import evidence_response
             result = evidence_response(store, recall, a, result)
         elif mode_param == "search":
-            result = recall_output.shape(result)
+            result = _without_null_hit_fields(recall_output.shape(result))
         return J(result)
 
     elif name == "memory_timeline":
@@ -6287,6 +7146,9 @@ async def _do(name, a):
             result["privacy_redacted_sections"] = private_sections
         if quality_meta and quality_meta.get("decision") == "pass":
             result["quality_score"] = quality_meta.get("total")
+        if quality_meta and quality_meta.get("importance_budget"):
+            result["importance"] = quality_meta["importance_budget"]["applied"]
+            result["importance_note"] = quality_meta["importance_budget"]["note"]
 
         # Auto-update SelfModel competencies for solution/lesson saves
         if a["type"] in ("solution", "lesson") and not was_dedup:
@@ -6307,7 +7169,7 @@ async def _do(name, a):
                 if competency_updates:
                     result["competency_updated"] = competency_updates
             except Exception as e:
-                LOG(f"SelfModel competency update error: {e}")
+                store._swallowed("save.self_model", e, "SelfModel competency update error")
 
         return J(result)
 
@@ -6344,7 +7206,7 @@ async def _do(name, a):
             from representations_queue import RepresentationsQueue
             RepresentationsQueue(store.db).enqueue(new_id)
         except Exception as _e:
-            LOG(f"memory_update: repr-queue enqueue failed for new_id={new_id}: {_e}")
+            store._swallowed("update.repr_enqueue", _e, f"memory_update: repr-queue enqueue failed for new_id={new_id}")
         if store.chroma and not store._check_binary_search():
             try:
                 store.chroma.delete(ids=[str(old["id"])])
@@ -6358,7 +7220,9 @@ async def _do(name, a):
         return J({"updated": True, "old_id": old["id"], "new_id": new_id})
 
     elif name == "memory_stats":
-        return J(recall.stats())
+        data = recall.stats()
+        data["llm"] = _llm_and_queue_health(store.db)
+        return J(data)
 
     elif name == "memory_consolidate":
         threshold = a.get("threshold", 0.75)
@@ -6438,6 +7302,7 @@ async def _do(name, a):
                 SELECT COUNT(*) FROM knowledge WHERE status='archived' AND last_confirmed < ?
             """, (purge_cutoff,)).fetchone()[0]
             return J({"dry_run": True, "would_archive": would_archive, "would_purge": would_purge,
+                       "would_prune_actions": store.prune_agent_actions(dry_run=True),
                        "archive_after_days": ARCHIVE_AFTER_DAYS, "purge_after_days": PURGE_AFTER_DAYS})
         else:
             result = store.apply_retention()
@@ -6681,7 +7546,8 @@ async def _do(name, a):
     elif name == "self_rules_context":
         return J(store.get_rules_for_context(
             project=a.get("project", "general"), categories=a.get("categories"),
-            phase=a.get("phase"), limit=a.get("limit")))
+            phase=a.get("phase"), query=a.get("query"), session_id=a.get("session_id"),
+            limit=a.get("limit")))
 
     elif name == "rule_set_phase":
         return J(store.set_rule_phase(a["rule_id"], a.get("phase")))
@@ -6953,7 +7819,7 @@ async def _do(name, a):
         # `session_id` invents it - 231 of 256 stored summaries name a session
         # that never existed. Defaulting to this process's own session is the
         # only value a caller could not have known to pass.
-        return J(sc.session_end(
+        ended = sc.session_end(
             a.get("session_id") or SID, a.get("summary"),
             highlights=a.get("highlights"),
             pitfalls=a.get("pitfalls"),
@@ -6963,7 +7829,14 @@ async def _do(name, a):
             branch=a.get("branch", BRANCH),
             auto_compress=a.get("auto_compress", False),
             transcript=a.get("transcript"),
-        ))
+        )
+        note = _session_note_text(a, ended)
+        if note:
+            note_id, *_ = store.save_knowledge(
+                a.get("session_id") or SID, note, "note", project=a.get("project", "general"),
+                tags=["session-note"], skip_quality=True, repeat="replace")
+            ended["note_id"] = note_id
+        return J(ended)
 
     elif name == "ingest_codebase":
         from ast_ingest import ASTIngester
@@ -7119,6 +7992,9 @@ async def _do(name, a):
             out["privacy_redacted"] = True
         if private_sections:
             out["privacy_redacted_sections"] = private_sections
+        if quality_meta and quality_meta.get("importance_budget"):
+            out["importance"] = quality_meta["importance_budget"]["applied"]
+            out["importance_note"] = quality_meta["importance_budget"]["note"]
         return J(out)
 
     elif name == "memory_search_fast":
@@ -7192,6 +8068,7 @@ async def _do(name, a):
                 report["benchmark_md_path"] = str(bench)
         except Exception:
             pass
+        report["tool_calls"] = _tool_call_report()
         return J(report)
 
     elif name == "memory_rebuild_fts":
@@ -7314,7 +8191,7 @@ async def _do(name, a):
                     )
                     rebuilt += 1
                 except Exception as e:
-                    LOG(f"rebuild_embeddings failed for id={r['id']}: {e}")
+                    store._swallowed("rebuild_embeddings", e, f"rebuild_embeddings failed for id={r['id']}")
                     skipped += 1
             store.db.commit()
         result = {
@@ -7826,10 +8703,59 @@ async def _do(name, a):
         from v11_handlers import handle_consolidate_status
         return J(handle_consolidate_status(a, conn=store.db))
 
+    elif name in ("memory_exploration_record", "memory_exploration_recall"):
+        import exploration_memo
+        return J(exploration_memo.handle(name, a, store.db, lexical=Store._jaccard, embed=store.embed,
+                                         model_name=store._active_embed_model_name()))
+
     # MCP: a name the server does not implement is an error, not a result.
     # _call_tool_impl turns this into an isError=true CallToolResult so the
     # model sees it and can self-correct.
     raise ValueError(f"Unknown tool: {name}")
+
+
+def _session_note_text(args: dict, ended: dict) -> str | None:
+    """The end-of-session summary as one retrievable record (type `note`).
+
+    `session_summaries` is read once by session_init and then consumed, so
+    a later question like "how did we deploy the billing service" never found
+    it. The note keeps the summary, next steps and pitfalls in the knowledge
+    table, where every recall tier sees it. MEMORY_SESSION_NOTES=off disables it.
+    """
+    if os.environ.get("MEMORY_SESSION_NOTES", "on").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    summary = (args.get("summary") or "").strip()
+    if not summary:
+        return None
+    day = (ended.get("ended_at") or "")[:10]
+    lines = [f"Session note ({args.get('project', 'general')}, {day}): {summary}"]
+    for label, key in (("Next steps", "next_steps"), ("Pitfalls", "pitfalls"), ("Highlights", "highlights")):
+        items = [str(item).strip() for item in (args.get(key) or []) if str(item).strip()]
+        if items:
+            lines.append(f"{label}: " + "; ".join(items))
+    return "\n".join(lines)
+
+
+def _llm_and_queue_health(db) -> dict:
+    """LLM chain state plus the enrichment queues it feeds; `stalled` when rows wait and nothing answers."""
+    import config as _config
+    health = _config.llm_health()
+    queues = {}
+    pending = 0
+    for label, module_name, class_name in (("triple", "triple_extraction_queue", "TripleExtractionQueue"),
+                                            ("enrich", "deep_enrichment_queue", "DeepEnrichmentQueue"),
+                                            ("repr", "representations_queue", "RepresentationsQueue")):
+        try:
+            module = __import__(module_name)
+            counts = getattr(module, class_name)(db).stats()
+        except (sqlite3.Error, AttributeError, ImportError) as error:
+            counts = {"error": str(error)}
+        queues[label] = counts
+        pending += int(counts.get("pending", 0) or 0)
+    health["queues"] = queues
+    health["pending_total"] = pending
+    health["stalled"] = bool(pending and health["mode"] != "false" and health["active"] is None)
+    return health
 
 
 def _detect_git_branch():
@@ -7902,6 +8828,7 @@ async def _bootstrap_session():
     global store, recall, SID, BRANCH
     store = Store()
     recall = Recall(store)
+    _install_telemetry(store.db_path)
     SID = _session_id()
     BRANCH = _detect_git_branch()
     store.session_start(SID, project=_detect_project(), branch=BRANCH)
@@ -8191,15 +9118,100 @@ async def main():
         )
 
 
+def _check_tool_profile() -> None:
+    """Refuse to start on an unknown TAM_TOOL_PROFILE instead of silently exposing all tools."""
+    try:
+        profile = _tool_profile()
+    except tool_profiles.ToolProfileError as error:
+        raise SystemExit(f"[memory-mcp] {error}") from error
+    if not profile.is_full:
+        LOG(f"Tool profile: {profile.name} ({len(profile.tools)} tools listed; the rest stay callable)")
+
+
+class _Terminated(SystemExit):
+    """Raised by the SIGTERM handler so the stack unwinds and held locks are released."""
+
+
+def _exit_on_sigterm(signum, frame) -> None:
+    raise _Terminated(128 + signum)
+
+
+def _exit_on_sigterm_in_loop() -> None:
+    raise _Terminated(128 + signal.SIGTERM)
+
+
+async def _with_sigterm_in_loop(coro):
+    """Await ``coro`` with SIGTERM delivered as an event-loop callback.
+
+    A plain signal handler raises between any two bytecodes, also inside anyio's
+    task bookkeeping; the exception then corrupts the task group, the main task
+    never finishes, and the server hangs instead of exiting. The loop runs signal
+    callbacks between tasks and lets SystemExit out of run_forever.
+    """
+    if signal.getsignal(signal.SIGTERM) is not _exit_on_sigterm:
+        return await coro
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _exit_on_sigterm_in_loop)
+    except (NotImplementedError, RuntimeError):
+        return await coro  # no loop signal support (Windows); the plain handler stays
+    try:
+        return await coro
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, _exit_on_sigterm)
+
+
+def _run_until_terminated(coro) -> None:
+    """asyncio.run that, after SIGTERM, exits without joining threads stuck in blocking I/O.
+
+    The stdio transport reads stdin on a non-daemon anyio worker thread. While the
+    client keeps its end of the pipe open that read never returns, and interpreter
+    shutdown would join the thread forever, so SIGTERM would not stop the server.
+    Exit hooks run first, so buffered recall usage and tool telemetry still land.
+    """
+    try:
+        asyncio.run(_with_sigterm_in_loop(coro))
+    except _Terminated as stop:
+        # CPython's own exit-hook runner (3.11+); without it, flush what we buffer.
+        run_exit_hooks = getattr(atexit, "_run_exitfuncs", None)
+        if run_exit_hooks is not None:
+            run_exit_hooks()
+        else:
+            from memory_core import recall_touch
+            recall_touch.close_all()
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass  # the client already closed the pipe; nothing left to deliver
+        os._exit(stop.code)
+
+
+def _flush_on_sigterm() -> None:
+    """Make SIGTERM end the process through SystemExit, so exit hooks still run.
+
+    Python's default SIGTERM action skips atexit, which would drop the recall
+    usage statistics still buffered by memory_core.recall_touch. A handler
+    someone else installed (uvicorn, the worker supervisor) is left alone.
+    """
+    if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
+        signal.signal(signal.SIGTERM, _exit_on_sigterm)
+
+
 def run() -> None:
     """Process entry point: one server, a worker handed a socket, or a group of workers."""
+    _check_tool_profile()
     listen_fd = os.environ.get(HTTP_LISTEN_FD_ENV)
     if listen_fd:
-        asyncio.run(_http_worker(*_http_address(), socket.socket(fileno=int(listen_fd)), _hold_init_lock()))
+        _flush_on_sigterm()
+        _run_until_terminated(_http_worker(*_http_address(), socket.socket(fileno=int(listen_fd)),
+                                           _hold_init_lock()))
     elif _transport() in HTTP_TRANSPORTS and _http_workers() > 1:
         _serve_http_workers(*_http_address(), _http_workers())
     else:
-        asyncio.run(main())
+        _flush_on_sigterm()
+        _run_until_terminated(main())
 
 
 if __name__ == "__main__":

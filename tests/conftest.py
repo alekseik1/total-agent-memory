@@ -17,6 +17,12 @@ if "TAM_MEMORY_DIR" not in os.environ and "CLAUDE_MEMORY_DIR" not in os.environ:
     _safe_tam_root = tempfile.mkdtemp(prefix="tam-test-root-")
     os.environ["TAM_MEMORY_DIR"] = _safe_tam_root
 
+# Codex sets CODEX_HOME for the commands it runs, and the installers and
+# setup_wizard write Codex's config there instead of under HOME. A suite run
+# from inside Codex once rewrote the real ~/.codex/config.toml with a test's
+# temporary memory directory, so no test or subprocess may see it.
+os.environ.pop("CODEX_HOME", None)
+
 # The cross-encoder downloads an 80 MB model on first use. Tests that cover
 # it inject a fake encoder; everything else runs without it.
 os.environ.setdefault("MEMORY_CROSS_RERANK", "off")

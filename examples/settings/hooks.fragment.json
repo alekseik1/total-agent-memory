@@ -1,6 +1,6 @@
 {
   "_comment": "Merge these entries into the top-level \"hooks\" object of ~/.claude/settings.json. If a key (e.g. PreToolUse) already exists, append the hook into its array instead of overwriting. Restart Claude Code after editing. install.sh auto-registers the same set — this fragment is for manual/partial setups.",
-  "_post_tool_use_note": "post-tool-use.sh is safe to register unconditionally: it's a no-op when MEMORY_POST_TOOL_CAPTURE is unset. Set MEMORY_POST_TOOL_CAPTURE=1 in your shell to enable deferred observation capture.",
+  "_post_tool_use_note": "post-tool-use.sh is safe to register unconditionally: it logs the call in the agent action log (TAM_ACTION_LOG=false turns that off), nudges memory_save, and captures observations only when MEMORY_POST_TOOL_CAPTURE=1. It is registered for PostToolUseFailure too, so failed calls are logged.",
   "hooks": {
     "SessionStart": [
       {
@@ -55,6 +55,15 @@
             "command": "$HOME/.claude/hooks/pre-edit.sh"
           }
         ]
+      },
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/rule-reminder.sh"
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -77,6 +86,30 @@
           {
             "type": "command",
             "command": "$HOME/.claude/hooks/auto-capture.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/post-tool-use.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/memory-trigger.sh"
+          },
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/on-bash-error.sh"
           }
         ]
       },

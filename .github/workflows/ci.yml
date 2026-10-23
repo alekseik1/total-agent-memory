@@ -1,0 +1,298 @@
+name: ci
+
+# Fast feedback for every pull request and every push to main: lint, the full
+# test suite on three OSes x three Pythons, a coverage floor, the multilingual
+# recall-quality gate, and a dependency audit. Branch protection should require
+# the single `ci-green` check; it fails when any required job failed, was
+# cancelled or was skipped.
+#
+# Local equivalent: scripts/check.sh
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Mirrors docker/Dockerfile.dev and the smoke workflow: no LLM, no reranker
+  # download, fast mode, stdio transport, deterministic single-thread embedding.
+  MCP_TRANSPORT: stdio
+  MEMORY_LLM_ENABLED: 'false'
+  MEMORY_MODE: fast
+  MEMORY_CROSS_RERANK: 'off'
+  MEMORY_EMBED_THREADS: '1'
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: '1'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  # Ruff version the ratchet in pyproject.toml [tool.ruff] was measured with.
+  RUFF_VERSION: 0.16.8
+  # Line coverage of src/ minus 2 points. Measured 2026-10-13 with
+  # `pytest -m "not quarantined" --cov=src` (macOS arm64, py3.13):
+  # 29841 / 48746 lines = 61.22%. Raise it when coverage grows; never lower it.
+  COVERAGE_FLOOR: '59'
+  # Every blocking pytest run uses the same selection.
+  PYTEST_BLOCKING_MARKERS: not quarantined and not eval and not platform_sensitive
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ruff
+        run: python -m pip install "ruff==${RUFF_VERSION}"
+      - name: Ruff (rules and ratchet in pyproject.toml)
+        run: ruff check --output-format=github .
+
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+        python: ['3.11', '3.12', '3.13']
+        include:
+          - os: ubuntu-24.04
+            blocking: true
+          - os: macos-15
+            blocking: true
+          # The full suite runs on Windows too; POSIX-only tests skip there with
+          # the reason, and a Windows failure fails `ci-green` like any other OS.
+          - os: windows-2022
+            blocking: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ !matrix.blocking }}
+    env:
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.tam-models
+      TAM_MEMORY_DIR: ${{ github.workspace }}/.tam-test-memory
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.FASTEMBED_CACHE_PATH }}
+          key: tam-models-ci-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/config.py') }}
+          restore-keys: tam-models-ci-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Prewarm embedding models
+        run: python tests/smoke/prewarm_models.py
+      - name: Test suite
+        run: >-
+          python -m pytest tests -q --strict-markers -p no:cacheprovider
+          -m "${PYTEST_BLOCKING_MARKERS}"
+          --junitxml=test-results.xml
+      - name: Platform-sensitive tests (blocking on Linux, reported elsewhere)
+        continue-on-error: ${{ runner.os != 'Linux' }}
+        run: |
+          rc=0
+          python -m pytest tests -q --strict-markers -p no:cacheprovider \
+            -m "platform_sensitive and not quarantined" --junitxml=platform-results.xml || rc=$?
+          # Exit code 5: no test carries the marker, which is not a failure.
+          if [ "$rc" -eq 5 ]; then exit 0; fi
+          exit "$rc"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            test-results.xml
+            platform-results.xml
+          if-no-files-found: ignore
+
+  quarantine:
+    # Non-blocking but visible: known-flaky tests keep running so a fix (or a
+    # regression into a hard failure) is noticed. Not required by ci-green.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    continue-on-error: true
+    env:
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.tam-models
+      TAM_MEMORY_DIR: ${{ github.workspace }}/.tam-test-memory
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.FASTEMBED_CACHE_PATH }}
+          key: tam-models-ci-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/config.py') }}
+          restore-keys: tam-models-ci-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Prewarm embedding models
+        run: python tests/smoke/prewarm_models.py
+      - name: Quarantined tests
+        run: |
+          rc=0
+          python -m pytest tests -q --strict-markers -p no:cacheprovider -rA \
+            -m quarantined --junitxml=quarantine-results.xml || rc=$?
+          if [ "$rc" -eq 5 ]; then
+            echo "No quarantined tests." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Quarantined tests exit code: $rc (see the log for each reason)" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quarantine-results
+          path: quarantine-results.xml
+          if-no-files-found: ignore
+
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.tam-models
+      TAM_MEMORY_DIR: ${{ github.workspace }}/.tam-test-memory
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.FASTEMBED_CACHE_PATH }}
+          key: tam-models-ci-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/config.py') }}
+          restore-keys: tam-models-ci-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Prewarm embedding models
+        run: python tests/smoke/prewarm_models.py
+      - name: Coverage of src/ with floor
+        run: >-
+          python -m pytest tests -q --strict-markers -p no:cacheprovider
+          -m "not quarantined"
+          --cov=src --cov-report=term-missing:skip-covered --cov-report=xml:coverage.xml
+          --cov-fail-under="${COVERAGE_FLOOR}"
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f coverage.xml ]; then
+            python - >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          rate = float(ET.parse("coverage.xml").getroot().get("line-rate")) * 100
+          print("### Coverage\n")
+          print(f"src/ line coverage: {rate:.2f}% (floor {os.environ['COVERAGE_FLOOR']}%)")
+          PY
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  eval:
+    name: recall-quality gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.tam-models
+      TAM_MEMORY_DIR: ${{ github.workspace }}/.tam-test-memory
+      # A missing model must fail the gate, not skip it.
+      TAM_EVAL_REQUIRE_EMBEDDER: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.FASTEMBED_CACHE_PATH }}
+          key: tam-models-ci-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/config.py') }}
+          restore-keys: tam-models-ci-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Prewarm embedding models
+        run: python tests/smoke/prewarm_models.py
+      - name: Recall floors per bucket (EN/RU/UK, cross-lingual, temporal)
+        run: python -m pytest tests -q -s --strict-markers -p no:cacheprovider -m eval
+
+  pip-audit:
+    # Advisory only: a new CVE in a transitive dependency must not block
+    # unrelated pull requests. Results are in the job log and summary.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pip-audit
+        run: python -m pip install pip-audit
+      - name: Audit runtime and dev requirements
+        run: |
+          rc=0
+          pip-audit --progress-spinner off --desc on -r requirements.txt -r requirements-dev.txt | tee audit.txt || rc=$?
+          {
+            echo "### pip-audit"
+            echo
+            echo '```'
+            cat audit.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+  ci-green:
+    if: always()
+    needs: [lint, test, coverage, eval]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every blocking job
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
+          EVAL_RESULT: ${{ needs.eval.result }}
+        run: |
+          fail=0
+          for pair in "lint=$LINT_RESULT" "test=$TEST_RESULT" "coverage=$COVERAGE_RESULT" "eval=$EVAL_RESULT"; do
+            name="${pair%%=*}"
+            result="${pair#*=}"
+            echo "$name: $result"
+            if [ "$result" != success ]; then
+              echo "::error::required job '$name' finished with '$result'"
+              fail=1
+            fi
+          done
+          exit "$fail"

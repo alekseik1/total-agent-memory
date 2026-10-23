@@ -8,6 +8,7 @@ role in a fresh database and yields its StoreDatabase.
 """
 import secrets
 import uuid
+from collections.abc import Iterator
 
 import pytest
 
@@ -30,8 +31,14 @@ def provision_workspace(admin_url: str, key: str = DEFAULT_WORKSPACE_KEY) -> Sto
 
 @pytest.fixture(params=[pytest.param(Backend.SQLITE, id="sqlite"),
                         pytest.param(Backend.POSTGRES, id="postgres", marks=pytest.mark.postgres)])
-def store_backend(request: pytest.FixtureRequest) -> StoreDatabase | None:
+def store_backend(request: pytest.FixtureRequest) -> Iterator[StoreDatabase | None]:
     if request.param is Backend.SQLITE:
-        return None
+        yield None
+        return
     database = request.getfixturevalue("pg_database")
-    return provision_workspace(database.url)
+    yield provision_workspace(database.url)
+    # Write buffered recall usage while the workspace role still exists; at
+    # interpreter exit the database is gone and the flush fails.
+    from memory_core import recall_touch
+
+    recall_touch.close_all()

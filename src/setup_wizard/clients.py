@@ -146,6 +146,14 @@ def server_entry(env: Mapping[str, str]) -> ServerEntry:
     return ServerEntry(sys.executable, (str(Path(__file__).resolve().parents[1] / "server.py"),), dict(env))
 
 
+def proxy_entry(env: Mapping[str, str]) -> ServerEntry:
+    """Opt-in: launch `tam proxy`, the stdio front end of the shared warm daemon (docs/shared-daemon.md)."""
+    base = server_entry(env)
+    if base.args:
+        return ServerEntry(sys.executable, (str(Path(__file__).resolve().parents[1] / "tam_daemon"), "proxy"), dict(env))
+    return ServerEntry(base.command, ("proxy",), dict(env))
+
+
 def read_json(path: Path) -> dict:
     if not path.exists():
         return {}

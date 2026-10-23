@@ -1,4 +1,5 @@
 import re
+import sys
 import time
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ from tests.pg_store_support import store_backend  # noqa: F401 — fixture
 
 CANONICAL = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
 MIGRATION = Path(__file__).parents[1] / "migrations/034_canonical_timestamps.sql"
+NO_TZSET = "time.tzset is POSIX-only: Windows cannot switch the process time zone to Europe/Berlin"
 
 
 @pytest.fixture
@@ -38,10 +40,17 @@ def test_format_utc_converts_offsets_and_rejects_naive_values():
     ("2026-09-21T08:03:19.489091+00:00", "2026-09-21T08:03:19.489091Z"),
     ("2026-09-21T08:03:19Z", "2026-09-21T08:03:19.000000Z"),
     ("2026-09-21T10:03:19+02:00", "2026-09-21T08:03:19.000000Z"),
+])
+def test_normalize_reads_every_zoned_legacy_shape(stored, expected):
+    assert normalize_timestamp(stored) == expected
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason=NO_TZSET)
+@pytest.mark.parametrize(("stored", "expected"), [
     ("2026-03-27 09:04:00", "2026-03-27T08:04:00.000000Z"),
     ("2026-04-07 13:04:13", "2026-04-07T11:04:13.000000Z"),
 ])
-def test_normalize_reads_every_legacy_shape_and_local_time_with_dst(berlin, stored, expected):
+def test_normalize_reads_local_time_with_dst(berlin, stored, expected):
     assert normalize_timestamp(stored) == expected
 
 
@@ -51,6 +60,7 @@ def test_normalize_rejects_garbage():
             normalize_timestamp(value)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason=NO_TZSET)
 def test_migration_canonicalizes_knowledge_without_rebuilding_atomic_facts(tmp_path, monkeypatch, berlin):
     import server
     monkeypatch.setattr(server, "MEMORY_DIR", tmp_path)

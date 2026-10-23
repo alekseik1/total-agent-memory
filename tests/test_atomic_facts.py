@@ -231,8 +231,8 @@ def test_backfill_uses_current_schema_and_is_resumable(repo, tmp_path, monkeypat
         repo.db.backup(copied)
     provider = Provider({"facts": []})
     monkeypatch.setattr(atomic_facts_backfill, "make_provider", lambda name: provider)
-    assert atomic_facts_backfill.backfill(path, "a", 10) == (2, 0)
-    assert atomic_facts_backfill.backfill(path, "a", 10) == (0, 0)
+    assert atomic_facts_backfill.backfill(path, "a", 10) == (2, 0, 0)
+    assert atomic_facts_backfill.backfill(path, "a", 10) == (0, 0, 0)
     assert len(provider.calls) == 2
 
 

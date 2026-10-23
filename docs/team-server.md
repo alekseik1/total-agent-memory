@@ -6,14 +6,14 @@ One server holds personal, team and shared memory for several people. This page 
 
 | Mode | Install and use |
 |---|---|
-| **Local, one person** | Follow [installation](installation.md), then the [Quick start](../README.md#quick-start). Memory and models run on your machine; the local MCP catalogue has 77 tools. |
+| **Local, one person** | Follow [installation](installation.md), then the [Quick start](../README.md#quick-start). Memory and models run on your machine; the local MCP catalogue has 79 tools. |
 | **Server, multiple people** | Follow the setup below. Memory and models run on the server; clients need only Python and their token. The remote catalogue exposes eight core tools. |
 
 The server instructions work on Linux, macOS and Windows. Run commands in a directory where you can create the data folder and token files.
 
 ## Start a server without Docker
 
-Install the package in a dedicated environment. To use a locally built wheel instead, pass its path (for example `./dist/total_agent_memory-14.6.0-py3-none-any.whl`) in place of the package name. Linux/macOS:
+Install the package in a dedicated environment. To use a locally built wheel instead, pass its path (for example `./dist/total_agent_memory-14.9.0-py3-none-any.whl`) in place of the package name. Linux/macOS:
 
 ```sh
 python3 -m venv .venv

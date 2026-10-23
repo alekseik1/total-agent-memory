@@ -289,7 +289,8 @@ def test_save_writes_under_reports_dir(db, tmp_path):
     path = tmp_path / "reports" / PROJECT / "week-2026-09-21.md"
     assert path.is_file() and markdown.endswith(f"_Saved to: {path}_\n")
     assert path.read_text(encoding="utf-8") == markdown.split("\n_Saved to:")[0]
-    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    if sys.platform != "win32":  # NTFS has no POSIX modes; the profile ACL protects the file
+        assert oct(path.stat().st_mode & 0o777) == "0o600"
     report = build(db, project=None, period="custom", since="2026-09-01", until="2026-09-15")
     assert report_path(tmp_path, report) == tmp_path / "reports" / "all-projects" / "custom-2026-09-01_2026-09-15.md"
     assert slug("../../etc") == "etc" and slug("a/b c") == "a-b-c" and slug("...") == "project"

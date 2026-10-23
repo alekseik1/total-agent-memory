@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -76,6 +77,7 @@ def test_capture_tool_observation_truncates_huge_output(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.skipif(sys.platform == "win32", reason="bare bash resolves to the WSL stub on Windows; the .sh hooks are POSIX-only")
 def test_post_tool_hook_respects_env_flag(tmp_path: Path) -> None:
     """Without MEMORY_POST_TOOL_CAPTURE=1 the hook is a no-op."""
     mem_dir = tmp_path / "memdir"
@@ -109,6 +111,7 @@ def test_post_tool_hook_respects_env_flag(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.skipif(sys.platform == "win32", reason="bare bash resolves to the WSL stub on Windows; the .sh hooks are POSIX-only")
 def test_post_tool_hook_enqueues_when_enabled(tmp_path: Path) -> None:
     """With MEMORY_POST_TOOL_CAPTURE=1 the hook writes to the extract queue."""
     mem_dir = tmp_path / "memdir"

@@ -1,0 +1,4 @@
+# Vendored third-party files stay byte-identical to the npm registry release:
+# tests/test_dashboard_vendored_assets.py pins their sha256, and core.autocrlf
+# on Windows checkouts would otherwise rewrite LF to CRLF.
+src/dashboard_static/vendor/** -text

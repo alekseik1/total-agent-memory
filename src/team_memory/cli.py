@@ -205,7 +205,8 @@ def db_migrate(parser: argparse.ArgumentParser, args) -> None:
 
 def request_shutdown() -> None:
     """Ask the running server to stop (uvicorn handles SIGTERM gracefully); main() then exits non-zero."""
-    os.kill(os.getpid(), signal.SIGTERM)
+    # raise_signal runs uvicorn's handler everywhere; on Windows os.kill(own pid) terminates at once.
+    signal.raise_signal(signal.SIGTERM)
 
 
 def stop_serving(gate, pools) -> None:

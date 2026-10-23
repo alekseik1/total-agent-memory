@@ -1,52 +1,39 @@
 # ===========================================
-# PreToolUse Hook (PowerShell) — v7.0/v8.0 file_context guard
+# PreToolUse Hook (PowerShell) — v7.0 file_context guard
 #
-# Port of ~/.claude/hooks/pre-edit.sh for Windows.
-# Emits a reminder to call file_context(path) BEFORE editing a file.
-# The agent then calls the tool itself and reads warnings/risk_score.
+# Twin of hooks/pre-edit.sh. Asks the model to call file_context(path)
+# BEFORE editing a file, delivered as hookSpecificOutput.additionalContext.
 #
 # Hook: PreToolUse (matcher: "Write|Edit")
 # ===========================================
 
-$ErrorActionPreference = "SilentlyContinue"
+. (Join-Path $PSScriptRoot "lib\common.ps1")
+Set-HookEvent "PreToolUse"
 
-# Parse stdin JSON (Claude Code hook payload).
-$stdinRaw = [Console]::In.ReadToEnd()
-if (-not $stdinRaw) { exit 0 }
+function Invoke-Hook {
+    $tool = Get-HookField 'tool_name'
+    $filePath = Get-HookField 'tool_input.file_path'
 
-try {
-    $data = $stdinRaw | ConvertFrom-Json
-} catch {
-    exit 0
-}
+    # Only guard Write/Edit, not NotebookEdit
+    if ($tool -ne "Write" -and $tool -ne "Edit") { return }
+    if (-not $filePath) { return }
 
-$tool = $data.tool_name
-$filePath = $null
-if ($data.tool_input) {
-    $filePath = $data.tool_input.file_path
-}
+    # Skip vendored / temp paths (Windows + POSIX separators).
+    $normalized = $filePath.Replace("\", "/")
+    foreach ($pat in @("/.git/", "/node_modules/", "/.venv/", "/Temp/")) {
+        if ($normalized -like "*$pat*") { return }
+    }
+    if ($normalized.StartsWith("/tmp/")) { return }
 
-# Only guard Write/Edit, not NotebookEdit
-if ($tool -ne "Write" -and $tool -ne "Edit") { exit 0 }
-if (-not $filePath) { exit 0 }
-
-# Skip trivial / dotfile / vendored / temp paths (Windows + POSIX separators).
-$normalized = $filePath.Replace("\", "/")
-$skipPatterns = @("/.git/", "/node_modules/", "/.venv/", "/tmp/", "/Temp/")
-foreach ($pat in $skipPatterns) {
-    if ($normalized -like "*$pat*") { exit 0 }
-}
-
-# Emit the system-reminder on stdout (Claude Code reads it).
-$reminder = @"
-<system-reminder>
+    Add-HookContext @"
 v7.0 pre-edit guard: before editing ``$filePath``, call
   file_context(path="$filePath")
 If risk_score > 0.3, read the returned warnings (past errors / hot spots) and
 incorporate them into the edit. Skip if file_context was already called for this
 path in the current turn.
-</system-reminder>
 "@
+}
 
-Write-Output $reminder
+Invoke-Hook
+Complete-Hook
 exit 0

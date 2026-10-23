@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import os
 import sqlite3
+import threading
 import time
 from unittest.mock import patch
 
@@ -170,44 +171,42 @@ def test_flag_on_multiple_tier_failures_no_crash(flag_on, mrs_db):
 
 
 def test_flag_on_parallel_is_faster_than_sequential(mrs_db):
-    """Synthetic: each scorer sleeps 50ms; parallel < 150ms, sequential > 200ms."""
+    """Synthetic: with the flag on the tier scorers overlap, with it off they run one at a time.
+
+    Measured as peak concurrency, not wall time: a loaded CI runner stretches
+    milliseconds, while overlapping scorers stay overlapping.
+    """
     from multi_repr_search import search
     import multi_repr_search as mrs_mod
 
     _seed_rich(mrs_db)
     q_emb = _det_emb("alpha summary phrase")
 
-    TIER_SLEEP = 0.05  # 50ms
+    TIER_SLEEP = 0.05  # long enough for concurrent scorers to overlap
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0}
 
     def slow_score(rows, query_embedding, top_n):
-        time.sleep(TIER_SLEEP)
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        try:
+            time.sleep(TIER_SLEEP)
+        finally:
+            with lock:
+                state["active"] -= 1
         # Return a minimal non-empty ranked list so fusion runs.
         return [(1, 0.9)]
 
-    # Sequential (flag OFF) — _score_rows is invoked inside _process_representation.
-    with patch.dict(os.environ, {"V9_PARALLEL_RETRIEVAL": "0"}):
-        with patch.object(mrs_mod, "_score_rows", side_effect=slow_score):
-            t0 = time.perf_counter()
-            _ = search(mrs_db, q_emb, top_n=5)
-            seq_ms = (time.perf_counter() - t0) * 1000.0
+    def peak_concurrency(flag: str) -> int:
+        state.update(active=0, peak=0)
+        with patch.dict(os.environ, {"V9_PARALLEL_RETRIEVAL": flag}):
+            with patch.object(mrs_mod, "_score_rows", side_effect=slow_score):
+                assert search(mrs_db, q_emb, top_n=5)
+        return state["peak"]
 
-    # Parallel (flag ON) — _score_rows runs concurrently via asyncio.gather.
-    with patch.dict(os.environ, {"V9_PARALLEL_RETRIEVAL": "1"}):
-        with patch.object(mrs_mod, "_score_rows", side_effect=slow_score):
-            t0 = time.perf_counter()
-            _ = search(mrs_db, q_emb, top_n=5)
-            par_ms = (time.perf_counter() - t0) * 1000.0
-
-    # 4 tiers × 50ms = 200ms sequential lower bound, parallel should be ~50ms
-    # (plus overhead). Leave a generous margin so CI is stable.
-    print(f"\n[bench] sequential={seq_ms:.1f}ms  parallel={par_ms:.1f}ms")
-    assert seq_ms > 150.0, f"sequential should be >150ms, got {seq_ms:.1f}"
-    assert par_ms < 150.0, f"parallel should be <150ms, got {par_ms:.1f}"
-    # Speedup must be at least ~1.6× on 4 tiers.
-    assert seq_ms / par_ms >= 1.6, (
-        f"expected ≥1.6× speedup, got {seq_ms / par_ms:.2f}× "
-        f"(seq={seq_ms:.1f}ms par={par_ms:.1f}ms)"
-    )
+    assert peak_concurrency("0") == 1, "flag off must score one representation at a time"
+    assert peak_concurrency("1") >= 2, "flag on must score representations concurrently"
 
 
 def test_flag_on_empty_corpus_returns_empty(flag_on, mrs_db):

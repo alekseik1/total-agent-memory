@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Literal
 from urllib.parse import unquote, urlsplit
+from urllib.request import url2pathname
 
 from pydantic import ValidationError, model_validator
 
@@ -173,7 +174,8 @@ class ReplicationSettings(DTO):
 
     @property
     def directory(self) -> Path:
-        return Path(unquote(urlsplit(self.url).path))
+        # url2pathname turns file:///C:/srv into C:\srv on Windows; on POSIX it only unquotes.
+        return Path(url2pathname(urlsplit(self.url).path))
 
     @property
     def path_style(self) -> bool:

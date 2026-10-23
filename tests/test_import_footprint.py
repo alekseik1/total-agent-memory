@@ -131,7 +131,8 @@ def test_tam_model_cache_pins_the_cache_when_set(tmp_path):
         """,
         tmp_path,
     )
-    assert result["cache"] == "/tmp/tam-models-override"
+    # The product normalizes through Path, so Windows reports the native separator.
+    assert result["cache"] == str(Path("/tmp/tam-models-override"))
 
 
 def test_the_pinned_cache_is_never_inside_the_memory_dir(tmp_path):

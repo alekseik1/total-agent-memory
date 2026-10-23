@@ -79,23 +79,48 @@ still get the data when the agent calls `file_context()` manually.
 
 ---
 
+## 2a. `rule-reminder.{sh,ps1}`
+
+**Fires:** before `Bash`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit`
+(`PreToolUse`).
+
+**Reads:** `tool_input.command`, or `tool_input.file_path` plus the new
+text (`new_string` / `content` / `edits[].new_string`).
+
+**Does:** matches that text against the active SOUL rules
+(`src/ambient/reminders.py`). A prohibition the action seems to break
+("never use sqlite" vs `sqlite3 app.db`) or a rule sharing two or more
+words with the action (one of them rare among the rules) is sent to the
+agent as `additionalContext` and recorded as a rule surface, so the Stop
+hook can check it. The same rule is reminded at most once per 15 minutes
+per session. Never a permission decision.
+
+**Skip:** `TAM_RULE_REMINDERS=false`.
+
+**Cost:** one python start (~70 ms) and a scan of the active rules.
+
+---
+
 ## 3. `post-tool-use.{sh,ps1}`
 
-**Fires:** after every successful tool call (Claude Code hook event
-`PostToolUse`).
+**Fires:** after every tool call (`PostToolUse`) and after every failed
+one (`PostToolUseFailure`).
 
-**Reads:** `tool_name`, `tool_input`, `tool_output`.
+**Reads:** `tool_name`, `tool_input`, `tool_response`, `hook_event_name`.
 
-**Does:** opt-in only. With `MEMORY_POST_TOOL_CAPTURE=1`:
-1. Calls `memory_observe(tool_name, summary, files_affected, project)`
-   so the reflection cycle has raw observations to pattern-match
-   against.
+**Does:**
+1. Logs the call in `agent_actions` (`TAM_ACTION_LOG`, default on):
+   tool, a short secret-redacted summary (the command, or the path plus
+   the start of the new text; MCP tools keep argument names only), status
+   and exit code. Read-only lookups (Read, Glob, Grep, LS, Todo*) are
+   skipped. Kept `TAM_ACTION_LOG_RETENTION_DAYS` (30) and at most 100 000
+   rows. Synchronous, so the Stop hook sees the turn's last call.
+2. Counts edits vs `memory_save` calls and nudges the agent to save
+   (`MEMORY_NUDGE_*`). Failed calls are not counted.
+3. Opt-in, `MEMORY_POST_TOOL_CAPTURE=1`: queues an observation for the
+   extractor.
 
-**Skip:** by default. Enable only if you're studying tool-use patterns
-or the reflection agent's quality is degrading.
-
-**Cost:** ~30 ms / call. Cumulative — at 100 tool calls per session,
-it adds up.
+**Cost:** two python starts per call (~100 ms).
 
 ---
 
@@ -107,35 +132,53 @@ it adds up.
 **Reads:** `prompt`, `cwd`, `session_id`.
 
 **Does:**
-1. Calls `save_intent(prompt, project=<basename>)` via MCP.
-2. Returns the inbox snapshot for A2A (if A2A peers exist) so the
-   agent sees pending peer messages on the same turn.
-3. Exits 0.
+1. A detached worker stores the prompt in `intents`
+   (`list_intents()` / `search_intents()`).
+2. Ambient recall (`src/ambient/prompt_context.py`, `TAM_AMBIENT_RECALL`):
+   rules sharing two or more words with the prompt, then a short block of
+   relevant records, go to the agent as `additionalContext`. The records
+   come from the shared daemon when one runs (full hybrid recall) and
+   from FTS5 otherwise. Bounded by `TAM_AMBIENT_TOKEN_BUDGET` (400
+   tokens) and `TAM_AMBIENT_LATENCY_MS` (1500 ms); anything already
+   injected into the session is skipped. Slash commands and prompts under
+   8 characters get nothing. A failure is logged to `hooks.log`; the
+   prompt is never blocked.
+3. Correction capture (`TAM_CORRECTION_CAPTURE`): a prompt that corrects
+   the agent ("I already told you", "сколько раз", ...) becomes a draft
+   insight (`src/correction_capture.py`), once per prompt per session.
 
-**Skip if:** you don't care about prompt history. Keep if you ever
-want `list_intents()` / `search_intents()` to be useful.
-
-**Cost:** ~50 ms.
+**Cost:** ~100 ms cold, plus the daemon's recall time when warm.
 
 ---
 
 ## 5. `on-stop.{sh,ps1}`
 
-**Fires:** when the agent session ends abnormally — context limit
-reached, Ctrl-C, IDE close (Claude Code hook event `Stop`).
+**Fires:** at the end of every agent turn (Claude Code hook event
+`Stop`).
 
-**Reads:** `session_id`, `cwd`, `reason`.
+**Reads:** `session_id`, `cwd`, `last_assistant_message` (when sent).
 
 **Does:**
-1. Snapshots git state (`status`, recent commits) — not committed,
-   just recorded.
-2. Writes `~/.claude/recovery/pending-<timestamp>.md` with everything
-   needed to resume.
-3. Keeps the last 5 recovery files; older ones auto-purged.
+1. Refreshes one recovery snapshot per session (rate-limited).
+2. Rule compliance (`TAM_RULE_COMPLIANCE`): the actions logged since the
+   previous Stop are checked against the rules shown to the session
+   (prompt context, rule reminders). A "never X" rule whose X appears in
+   an action is *violated* and reported to the user in `systemMessage`;
+   enough overlap counts as *followed*. Each new verdict goes to the
+   rule's heuristic counters `auto_success_count` / `auto_fail_count`
+   only (shown by `self_rules_context`, `self_rules(action='list')` and
+   `self_patterns(view='rule_effectiveness')`). Explicit ratings,
+   `success_rate`, `success_lower_bound` and auto-suspension never see
+   them. Showing a rule never changes `fire_count`.
+   With `TAM_DOCKER=1` (Docker install) the ambient commands run inside
+   the container: `docker exec -i tam-mcp python -m ambient <command>`.
+3. Turn summary (`TAM_TURN_AUTOSAVE`): a turn that edited files or ran
+   commands is saved as a short auto-saved `fact` (request, tools, files,
+   commands, outcome; secrets redacted). `tam forget-auto` removes them.
+4. Once per session, a reminder when there were edits but no
+   `memory_save`; prunes per-session state older than 7 days.
 
-**Skip if:** you want a clean shutdown without recovery files.
-
-**Cost:** runs in background, doesn't block shutdown.
+**Cost:** one python start plus a few SQLite queries.
 
 ---
 
@@ -182,11 +225,19 @@ the editor.
 
 ## 9. `codex-notify.{sh,ps1}`
 
-**Fires:** Codex notification hook — used to surface MCP events
-(superseded knowledge, quality-gate drops, contradiction supersede)
-to the user via desktop notification.
+**Fires:** Codex `notify` program, after each agent turn — only if you
+add it to `~/.codex/config.toml` yourself
+(`notify = ["/path/to/hooks/codex-notify.sh"]`); the installer does not
+register it.
 
-**Skip:** if you don't want desktop popups.
+**Reads:** the notification JSON Codex passes as the last argument
+(`type`, `thread-id`, `cwd`, `input-messages`,
+`last-assistant-message`); a JSON on stdin also works.
+
+**Does:** each `agent-turn-complete` becomes one `codex_turn` row in the
+agent action log (client `codex`, session = thread id) and, with
+`TAM_TURN_AUTOSAVE`, one auto-saved turn summary. Then a desktop
+notification (`TAM_HOOK_NOTIFY=0` turns it off).
 
 ---
 
@@ -208,6 +259,8 @@ no-op.
 |---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
 | `session-start` | ✅ | ✅ | ⚠️ ¹ | ⚠️ ¹ | ⚠️ ¹ | ❌ | ⚠️ ¹ | ⚠️ ¹ | ✅ |
 | `pre-edit` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ⚠️ ² |
+| `rule-reminder` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `codex-notify` | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `post-tool-use` | ✅ | ⚠️ ³ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `user-prompt-submit` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ⚠️ ² |
 | `on-stop` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |

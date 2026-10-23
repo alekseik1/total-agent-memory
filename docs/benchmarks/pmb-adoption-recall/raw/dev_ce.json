@@ -1,0 +1,95 @@
+{
+ "bench": "locomo",
+ "split": "dev",
+ "limit": 0,
+ "cross_rerank": "on",
+ "search_limit": 50,
+ "entity_graph": false,
+ "graph": [],
+ "configs": {
+  "default": [
+   {
+    "fts": 1.0,
+    "semantic": 1.2,
+    "hyde": 1.0,
+    "multi_repr": 1.0,
+    "fuzzy": 0.5,
+    "graph": 0.3,
+    "episode": 0.9,
+    "atomic_facts": 1.0,
+    "directives": 1.0,
+    "multi_query": 0.0,
+    "query_entity": 0.0
+   },
+   {}
+  ]
+ },
+ "results": {
+  "default": {
+   "all": {
+    "n": 383,
+    "R@1": 0.4674,
+    "R@5": 0.7389,
+    "R@10": 0.8277,
+    "MRR": 0.5856
+   },
+   "multi-hop": {
+    "n": 74,
+    "R@1": 0.3108,
+    "R@5": 0.6486,
+    "R@10": 0.7703,
+    "MRR": 0.4614
+   },
+   "open-domain": {
+    "n": 19,
+    "R@1": 0.2105,
+    "R@5": 0.3684,
+    "R@10": 0.4211,
+    "MRR": 0.2742
+   },
+   "single-hop": {
+    "n": 200,
+    "R@1": 0.465,
+    "R@5": 0.735,
+    "R@10": 0.835,
+    "MRR": 0.5805
+   },
+   "temporal": {
+    "n": 90,
+    "R@1": 0.6556,
+    "R@5": 0.9,
+    "R@10": 0.9444,
+    "MRR": 0.7648
+   },
+   "tier_fired": {
+    "fts": 1.0,
+    "semantic": 1.0,
+    "hyde": 0.0,
+    "multi_repr": 0.0,
+    "fuzzy": 0.0,
+    "graph": 0.0,
+    "episode": 0.0,
+    "atomic_facts": 0.0,
+    "directives": 0.0,
+    "multi_query": 0.0,
+    "query_entity": 0.0
+   },
+   "latency_ms": {
+    "p50": 900.2,
+    "p95": 1040.9
+   },
+   "coverage@10": 0.7668,
+   "compound": {
+    "n": 0,
+    "coverage@5": 0.0,
+    "coverage@10": 0.0
+   },
+   "fired": {
+    "compound": 0,
+    "historical": 1,
+    "fts_damped": 1
+   }
+  }
+ },
+ "seconds": 344.3
+}

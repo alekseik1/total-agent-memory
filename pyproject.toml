@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "total-agent-memory"
-version = "14.6.0"
-description = "Persistent local memory MCP server for Claude Code, Codex CLI, Cursor and any MCP client: 77 tools — temporal knowledge graph, procedural memory, episodic memory, AST codebase ingest, pre-edit guard, auto-consolidating error capture"
+version = "14.9.0"
+description = "Persistent local memory MCP server for Claude Code, Codex CLI, Cursor and any MCP client: 79 tools — temporal knowledge graph, procedural memory, episodic memory, AST codebase ingest, pre-edit guard, auto-consolidating error capture"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -104,10 +104,28 @@ postgres = [
     "psycopg[binary,pool]>=3.2,<4",
     "pgvector>=0.3,<1",
 ]
+# Image OCR in the file watcher (src/ingestion/ocr.py) through Apple Vision.
+# macOS only; elsewhere the extra resolves to nothing and OCR falls back to
+# pytesseract when it is installed. The import is guarded, so a base install
+# still runs: images are stored without their text.
+ocr = [
+    "pyobjc-framework-Vision>=10.3; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.3; sys_platform == 'darwin'",
+]
 all = ["total-agent-memory[rerank]", "total-agent-memory[postgres]"]
+# Test and lint toolchain for contributors and CI (mirrors requirements-dev.txt,
+# minus the benchmark-only packages): pip install -e ".[dev]"
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.100",
+    "ruff>=0.16.6",
+    "build>=1.2.0",
+]
 
 [project.urls]
-Homepage = "https://github.com/vbcherepanov/total-agent-memory"
+Homepage = "https://totalmemory.dev"
+Documentation = "https://totalmemory.dev/docs"
 Repository = "https://github.com/vbcherepanov/total-agent-memory"
 Issues = "https://github.com/vbcherepanov/total-agent-memory/issues"
 
@@ -187,4 +205,140 @@ src = [
 markers = [
     "slow: heavy tests (network/model download); set RUN_RERANKER_SLOW=1 to enable",
     "postgres: needs a PostgreSQL server (--backend=postgres|both or TAM_TEST_PG_URL)",
+    "eval: recall-quality floor gate on the frozen multilingual corpus; needs the default embedding model cached (tests/smoke/prewarm_models.py)",
+    "quarantined(reason): known-flaky test excluded from the blocking CI jobs and run in the non-blocking quarantine job. The reason MUST name the root cause (or the open issue tracking it) and the date quarantined, e.g. quarantined(reason='races the enrichment thread on db.close, issue #123, 2026-10-13')",
+    "platform_sensitive(reason): result depends on OS, filesystem or CPU numerics; runs everywhere but failures are reported separately. The reason MUST state which platform differs and why, e.g. platform_sensitive(reason='NTFS has no POSIX file modes')",
 ]
+
+# Lint gate run by .github/workflows/ci.yml and scripts/check.sh.
+#
+# The selected rules are the ones that catch real defects without a
+# style opinion: syntax errors (E9), broken comparisons (F63), misplaced
+# statements (F7), undefined names (F82), and unused imports / variables
+# (F401, F841), which hide dead code and missed refactors.
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [".claude", ".tam-models", ".tam-test-memory", "dist", "build"]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82", "F401", "F841"]
+
+# Ratchet list, measured 2026-10-13 with ruff 0.16.8. Each entry is a file
+# that already violated the rule when the gate was introduced; every file not
+# listed here is held to the full rule set. Remove an entry once its file is
+# clean. Never add one: fix the new violation instead.
+#
+# F821 entries are names ruff cannot resolve statically:
+#   src/graph/query.py        string annotation "GraphStore" resolved by a
+#                             deferred import inside __init__ (false positive)
+[tool.ruff.lint.per-file-ignores]
+"benchmarks/analyze_failures.py" = ["F401"]
+"benchmarks/locomo_bench.py" = ["F841"]
+"benchmarks/locomo_bench_llm.py" = ["F841"]
+"benchmarks/longmemeval_bench.py" = ["F841"]
+"benchmarks/parallel_drain.py" = ["F401"]
+"benchmarks/personal_bench.py" = ["F401", "F841"]
+"benchmarks/v11_pipeline.py" = ["F401"]
+"docker/tam_supervisor.py" = ["F401"]
+"scripts/build_temporal_index.py" = ["F401"]
+"scripts/calibrate_nli.py" = ["F401", "F841"]
+"scripts/extract_triples_openai.py" = ["F401"]
+"scripts/finetune_embedding.py" = ["F401"]
+"src/associative/composition.py" = ["F401"]
+"src/auto_episode_capture.py" = ["F401"]
+"src/auto_self_improve.py" = ["F401"]
+"src/auto_session_save.py" = ["F401"]
+"src/cache.py" = ["F401"]
+"src/dashboard.py" = ["F401"]
+"src/enrichment_filter.py" = ["F401"]
+"src/enrichment_worker.py" = ["F401"]
+"src/entity_dedup.py" = ["F401"]
+"src/fact_index.py" = ["F401"]
+"src/fact_synthesizer.py" = ["F401"]
+"src/graph/auto_link.py" = ["F401"]
+"src/graph/enricher.py" = ["F401"]
+"src/graph/query.py" = ["F821"]
+"src/graph/store.py" = ["F841"]
+"src/graph_expander.py" = ["F401"]
+"src/memory_core/chunker.py" = ["F401"]
+"src/memory_core/embedding_spaces.py" = ["F401"]
+"src/memory_core/episodes/schema.py" = ["F401"]
+"src/memory_core/storage.py" = ["F401"]
+"src/migrate_knowledge_to_graph.py" = ["F841"]
+"src/outbox.py" = ["F401"]
+"src/project_wiki.py" = ["F401"]
+"src/query_router.py" = ["F401"]
+"src/reflection/agent.py" = ["F401"]
+"src/reflection/digest.py" = ["F401"]
+"src/reflection/synthesize.py" = ["F841"]
+"src/server.py" = ["F401"]
+"src/tools/backfill_v6.py" = ["F401"]
+"src/tools/benchmark.py" = ["F401", "F841"]
+"src/tools/brain_autonomy.py" = ["F401"]
+"src/tools/brain_health.py" = ["F401"]
+"src/tools/context_layers.py" = ["F401"]
+"src/tools/dependency_monitor.py" = ["F401"]
+"src/tools/merge_duplicate_nodes.py" = ["F401"]
+"src/tools/predictive.py" = ["F841"]
+"src/tools/task_manager.py" = ["F401"]
+"src/workers/consolidation_daemon.py" = ["F401", "F841"]
+"tests/test_activation.py" = ["F401"]
+"tests/test_answer_router.py" = ["F401"]
+"tests/test_autofilter.py" = ["F401"]
+"tests/test_backfill_orphan_edges.py" = ["F841"]
+"tests/test_backfill_v6.py" = ["F841"]
+"tests/test_binary_search_edge_cases.py" = ["F401"]
+"tests/test_cache_layer.py" = ["F401"]
+"tests/test_cache_layer_bench.py" = ["F401"]
+"tests/test_cache_layer_integration.py" = ["F401"]
+"tests/test_compare_eval.py" = ["F401"]
+"tests/test_config.py" = ["F401"]
+"tests/test_consolidation_chaos_kill.py" = ["F401"]
+"tests/test_content_filter.py" = ["F401"]
+"tests/test_context_expander.py" = ["F401"]
+"tests/test_decay_per_repr.py" = ["F401"]
+"tests/test_e2e_v8_workflow.py" = ["F401"]
+"tests/test_edge_freshness.py" = ["F401"]
+"tests/test_embed_provider_openai.py" = ["F401"]
+"tests/test_enrichment_worker.py" = ["F841"]
+"tests/test_ensemble_judge.py" = ["F401"]
+"tests/test_entity_dedup.py" = ["F401", "F841"]
+"tests/test_entity_resolver.py" = ["F401"]
+"tests/test_eval_harness.py" = ["F401"]
+"tests/test_extract_triples_v2.py" = ["F401"]
+"tests/test_fact_index.py" = ["F401"]
+"tests/test_fact_merger.py" = ["F401", "F841"]
+"tests/test_fact_synthesizer_v2.py" = ["F401"]
+"tests/test_graph.py" = ["F401"]
+"tests/test_has_llm_provider_aware.py" = ["F401"]
+"tests/test_hooks_user_prompt_submit.py" = ["F401"]
+"tests/test_idk_router.py" = ["F401"]
+"tests/test_importance_levels.py" = ["F401"]
+"tests/test_ingestion.py" = ["F401"]
+"tests/test_integration_active_context.py" = ["F401"]
+"tests/test_integration_expand_context.py" = ["F401"]
+"tests/test_integration_memory_save.py" = ["F401"]
+"tests/test_integration_rerank_multi_repr.py" = ["F401"]
+"tests/test_integration_task_mcp.py" = ["F401"]
+"tests/test_llm_provider.py" = ["F401"]
+"tests/test_lookup_cli.py" = ["F401"]
+"tests/test_memory_nudge_hook.py" = ["F401"]
+"tests/test_mine_locomo_fewshot.py" = ["F401"]
+"tests/test_multi_representation.py" = ["F401"]
+"tests/test_no_llm_hot_path_v11.py" = ["F401", "F841"]
+"tests/test_outbox.py" = ["F401", "F841"]
+"tests/test_paths_migration.py" = ["F401"]
+"tests/test_procedural.py" = ["F841"]
+"tests/test_quality_gate.py" = ["F401"]
+"tests/test_recall_filters.py" = ["F401"]
+"tests/test_recall_modes.py" = ["F401"]
+"tests/test_reflection.py" = ["F401", "F841"]
+"tests/test_repr_drift.py" = ["F401"]
+"tests/test_task_classifier.py" = ["F401"]
+"tests/test_temporal_kg.py" = ["F401"]
+"tests/test_triple_queue_reclaim.py" = ["F401"]
+"tests/test_v11_new_tools.py" = ["F841"]
+"tests/test_validator.py" = ["F401"]
+"tests/test_verbosity.py" = ["F401"]
+"total_agent_memory/lookup.py" = ["F401"]

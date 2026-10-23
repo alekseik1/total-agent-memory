@@ -29,7 +29,7 @@ import time
 import threading
 from collections.abc import Mapping
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from socketserver import ThreadingMixIn
+from socketserver import TCPServer, ThreadingMixIn
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlsplit
 
@@ -966,12 +966,20 @@ def api_system_status() -> dict:
         )
     disk["total_mb"] = round(sum(disk.values()), 2)
 
+    # LLM provider chain (14.8.0): which provider each enrichment phase can use right now.
+    try:
+        import config as _config
+        llm = _config.llm_health()
+    except (ValueError, OSError) as exc:
+        llm = {"error": str(exc)}
+
     return {
         "status": "running",
         "port": DASHBOARD_PORT,
         "launch_agents": agents,
         "memory": stats,
         "disk": disk,
+        "llm": llm,
         "uptime_info": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
@@ -4446,13 +4454,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
         rejection = request_rejection(self.headers.get("Host"), self.headers.get("Origin"), ALLOWED_HOSTS)
         if rejection is None:
             return False
-        self._send_error(*rejection)
+        self._refuse(*rejection)
         return True
+
+    def _refuse(self, status: int, message: str) -> None:
+        """Refuse a request whose body was not read yet.
+
+        Closing a socket with unread request bytes makes Windows reset the
+        connection, and the client then gets WinError 10053 instead of this
+        answer; a small body is read and dropped first.
+        """
+        length = self.headers.get("Content-Length", "")
+        if length.isdigit() and int(length) <= dashboard_settings.MAX_BODY_BYTES:
+            self.rfile.read(int(length))
+        self._send_error(status, message)
 
     def _reject_method(self) -> None:
         """Memory pages are read-only: every non-GET method except the settings writes is refused."""
         if not self._refused():
-            self._send_error(405, "Method not allowed")
+            self._refuse(405, "Method not allowed")
 
     do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _reject_method
 
@@ -4475,11 +4495,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path.rstrip("/")
         if path not in POST_ROUTES:
-            self._send_error(405, "Method not allowed")
+            self._refuse(405, "Method not allowed")
             return
         rejection = self._write_rejection()
         if rejection is not None:
-            self._send_error(*rejection)
+            self._refuse(*rejection)
             return
         try:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
@@ -4775,29 +4795,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
             db.close()
 
 
+class DashboardHTTPServer(ThreadingMixIn, HTTPServer):
+    """Threaded HTTP server that starts listening without a reverse DNS lookup.
+
+    HTTPServer.server_bind resolves the bind address with socket.getfqdn
+    between bind() and listen(); a slow resolver (seen above 10 s on CI
+    macOS hosts) leaves the port bound but not accepting. The dashboard
+    never uses the resolved name.
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+    allow_reuse_port = True
+
+    def server_bind(self) -> None:
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass  # SO_REUSEPORT is optional (absent on Windows)
+        TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 def main() -> None:
     """Start the dashboard HTTP server."""
     print(f"Memory dir: {MEMORY_DIR}")
     print(f"Database:   {DB_PATH} ({'exists' if DB_PATH.exists() else 'NOT FOUND'})")
     print(f"Dashboard running at http://localhost:{DASHBOARD_PORT}")
 
-    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
-        daemon_threads = True
-        allow_reuse_address = True
-        allow_reuse_port = True
-
-        def server_bind(self) -> None:
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except (AttributeError, OSError):
-                pass
-            super().server_bind()
-
     # Bind to loopback by default; opt-in LAN via DASHBOARD_BIND.
     # Never expose DB / graph / filter contents to any non-127.0.0.1 host.
     bind_addr = os.environ.get("DASHBOARD_BIND", "127.0.0.1").strip() or "127.0.0.1"
-    server = ThreadingHTTPServer((bind_addr, DASHBOARD_PORT), DashboardHandler)
+    server = DashboardHTTPServer((bind_addr, DASHBOARD_PORT), DashboardHandler)
     print(f"Dashboard at http://{bind_addr}:{DASHBOARD_PORT}  "
           f"(DASHBOARD_BIND to override)")
     try:

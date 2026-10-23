@@ -20,8 +20,28 @@ EXTERNAL_DATA_ERROR = "External data path validation failed"
 MATERIALIZED_DIR = "materialized"
 
 
+_telemetry_disabled = False
+
+
+def disable_onnxruntime_telemetry() -> None:
+    """Turn off onnxruntime's telemetry uploader before the first session.
+
+    Its HTTP worker thread outlives interpreter shutdown and aborts the
+    process (SIGABRT in recursive_mutex::lock), and a memory server has no
+    business sending usage events anywhere.
+    """
+    global _telemetry_disabled
+    if _telemetry_disabled:
+        return
+    import onnxruntime
+
+    onnxruntime.disable_telemetry_events()
+    _telemetry_disabled = True
+
+
 def load_model(factory: Callable[..., object], model: str, **kwargs) -> object:
     """`factory(model, **kwargs)`, retried from a symlink-free copy when onnxruntime refuses the cache."""
+    disable_onnxruntime_telemetry()
     try:
         return factory(model, **kwargs)
     except Exception as error:

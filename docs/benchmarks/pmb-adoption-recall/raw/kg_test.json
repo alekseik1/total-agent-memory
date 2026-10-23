@@ -1,0 +1,367 @@
+{
+ "bench": "locomo",
+ "split": "test",
+ "limit": 0,
+ "cross_rerank": "off",
+ "search_limit": 50,
+ "entity_graph": true,
+ "graph": [
+  {
+   "unit": "locomo_3",
+   "skipped": "graph present"
+  },
+  {
+   "unit": "locomo_4",
+   "skipped": "graph present"
+  },
+  {
+   "unit": "locomo_5",
+   "skipped": "graph present"
+  },
+  {
+   "unit": "locomo_6",
+   "skipped": "graph present"
+  },
+  {
+   "unit": "locomo_7",
+   "skipped": "graph present"
+  },
+  {
+   "unit": "locomo_8",
+   "skipped": "graph present"
+  },
+  {
+   "unit": "locomo_9",
+   "skipped": "graph present"
+  }
+ ],
+ "configs": {
+  "qe_off": [
+   {
+    "fts": 1.0,
+    "semantic": 1.2,
+    "hyde": 1.0,
+    "multi_repr": 1.0,
+    "fuzzy": 0.5,
+    "graph": 0.3,
+    "episode": 0.9,
+    "atomic_facts": 1.0,
+    "directives": 1.0,
+    "multi_query": 0.0,
+    "query_entity": 0.0
+   },
+   {}
+  ],
+  "qe_0.3": [
+   {
+    "fts": 1.0,
+    "semantic": 1.2,
+    "hyde": 1.0,
+    "multi_repr": 1.0,
+    "fuzzy": 0.5,
+    "graph": 0.3,
+    "episode": 0.9,
+    "atomic_facts": 1.0,
+    "directives": 1.0,
+    "multi_query": 0.0,
+    "query_entity": 0.3
+   },
+   {}
+  ],
+  "qe_0.5": [
+   {
+    "fts": 1.0,
+    "semantic": 1.2,
+    "hyde": 1.0,
+    "multi_repr": 1.0,
+    "fuzzy": 0.5,
+    "graph": 0.3,
+    "episode": 0.9,
+    "atomic_facts": 1.0,
+    "directives": 1.0,
+    "multi_query": 0.0,
+    "query_entity": 0.5
+   },
+   {}
+  ],
+  "qe_1": [
+   {
+    "fts": 1.0,
+    "semantic": 1.2,
+    "hyde": 1.0,
+    "multi_repr": 1.0,
+    "fuzzy": 0.5,
+    "graph": 0.3,
+    "episode": 0.9,
+    "atomic_facts": 1.0,
+    "directives": 1.0,
+    "multi_query": 0.0,
+    "query_entity": 1.0
+   },
+   {}
+  ]
+ },
+ "results": {
+  "qe_off": {
+   "all": {
+    "n": 1153,
+    "R@1": 0.3044,
+    "R@5": 0.588,
+    "R@10": 0.673,
+    "MRR": 0.433
+   },
+   "multi-hop": {
+    "n": 208,
+    "R@1": 0.2163,
+    "R@5": 0.4519,
+    "R@10": 0.5769,
+    "MRR": 0.3326
+   },
+   "open-domain": {
+    "n": 73,
+    "R@1": 0.0959,
+    "R@5": 0.3562,
+    "R@10": 0.3973,
+    "MRR": 0.2142
+   },
+   "single-hop": {
+    "n": 641,
+    "R@1": 0.3307,
+    "R@5": 0.6427,
+    "R@10": 0.7192,
+    "MRR": 0.4689
+   },
+   "temporal": {
+    "n": 231,
+    "R@1": 0.3766,
+    "R@5": 0.632,
+    "R@10": 0.7186,
+    "MRR": 0.4931
+   },
+   "tier_fired": {
+    "fts": 1.0,
+    "semantic": 1.0,
+    "hyde": 0.0,
+    "multi_repr": 0.0,
+    "fuzzy": 0.0,
+    "graph": 0.408,
+    "episode": 0.0,
+    "atomic_facts": 0.0,
+    "directives": 0.0,
+    "multi_query": 0.0,
+    "query_entity": 0.0
+   },
+   "latency_ms": {
+    "p50": 26.2,
+    "p95": 37.1
+   },
+   "coverage@10": 0.5981,
+   "compound": {
+    "n": 3,
+    "coverage@5": 0.5,
+    "coverage@10": 0.6667
+   },
+   "fired": {
+    "compound": 3,
+    "historical": 8,
+    "fts_damped": 0
+   }
+  },
+  "qe_0.3": {
+   "all": {
+    "n": 1153,
+    "R@1": 0.3001,
+    "R@5": 0.5872,
+    "R@10": 0.6722,
+    "MRR": 0.4312
+   },
+   "multi-hop": {
+    "n": 208,
+    "R@1": 0.2212,
+    "R@5": 0.4519,
+    "R@10": 0.5769,
+    "MRR": 0.3361
+   },
+   "open-domain": {
+    "n": 73,
+    "R@1": 0.1096,
+    "R@5": 0.3562,
+    "R@10": 0.3973,
+    "MRR": 0.2251
+   },
+   "single-hop": {
+    "n": 641,
+    "R@1": 0.3198,
+    "R@5": 0.6396,
+    "R@10": 0.7176,
+    "MRR": 0.4617
+   },
+   "temporal": {
+    "n": 231,
+    "R@1": 0.3766,
+    "R@5": 0.6364,
+    "R@10": 0.7186,
+    "MRR": 0.4974
+   },
+   "tier_fired": {
+    "fts": 1.0,
+    "semantic": 1.0,
+    "hyde": 0.0,
+    "multi_repr": 0.0,
+    "fuzzy": 0.0,
+    "graph": 0.408,
+    "episode": 0.0,
+    "atomic_facts": 0.0,
+    "directives": 0.0,
+    "multi_query": 0.0,
+    "query_entity": 0.19
+   },
+   "latency_ms": {
+    "p50": 26.0,
+    "p95": 37.2
+   },
+   "coverage@10": 0.5968,
+   "compound": {
+    "n": 3,
+    "coverage@5": 0.6667,
+    "coverage@10": 0.6667
+   },
+   "fired": {
+    "compound": 3,
+    "historical": 8,
+    "fts_damped": 0
+   }
+  },
+  "qe_0.5": {
+   "all": {
+    "n": 1153,
+    "R@1": 0.3001,
+    "R@5": 0.5863,
+    "R@10": 0.6704,
+    "MRR": 0.4307
+   },
+   "multi-hop": {
+    "n": 208,
+    "R@1": 0.2212,
+    "R@5": 0.4519,
+    "R@10": 0.5769,
+    "MRR": 0.3369
+   },
+   "open-domain": {
+    "n": 73,
+    "R@1": 0.1096,
+    "R@5": 0.3562,
+    "R@10": 0.3973,
+    "MRR": 0.2251
+   },
+   "single-hop": {
+    "n": 641,
+    "R@1": 0.3198,
+    "R@5": 0.6381,
+    "R@10": 0.7145,
+    "MRR": 0.4606
+   },
+   "temporal": {
+    "n": 231,
+    "R@1": 0.3766,
+    "R@5": 0.6364,
+    "R@10": 0.7186,
+    "MRR": 0.4971
+   },
+   "tier_fired": {
+    "fts": 1.0,
+    "semantic": 1.0,
+    "hyde": 0.0,
+    "multi_repr": 0.0,
+    "fuzzy": 0.0,
+    "graph": 0.408,
+    "episode": 0.0,
+    "atomic_facts": 0.0,
+    "directives": 0.0,
+    "multi_query": 0.0,
+    "query_entity": 0.19
+   },
+   "latency_ms": {
+    "p50": 26.7,
+    "p95": 37.6
+   },
+   "coverage@10": 0.5955,
+   "compound": {
+    "n": 3,
+    "coverage@5": 0.6667,
+    "coverage@10": 0.6667
+   },
+   "fired": {
+    "compound": 3,
+    "historical": 8,
+    "fts_damped": 0
+   }
+  },
+  "qe_1": {
+   "all": {
+    "n": 1153,
+    "R@1": 0.2992,
+    "R@5": 0.5863,
+    "R@10": 0.6687,
+    "MRR": 0.4294
+   },
+   "multi-hop": {
+    "n": 208,
+    "R@1": 0.2163,
+    "R@5": 0.4567,
+    "R@10": 0.5769,
+    "MRR": 0.3334
+   },
+   "open-domain": {
+    "n": 73,
+    "R@1": 0.1233,
+    "R@5": 0.3562,
+    "R@10": 0.3973,
+    "MRR": 0.2285
+   },
+   "single-hop": {
+    "n": 641,
+    "R@1": 0.3198,
+    "R@5": 0.6381,
+    "R@10": 0.7145,
+    "MRR": 0.4605
+   },
+   "temporal": {
+    "n": 231,
+    "R@1": 0.3723,
+    "R@5": 0.632,
+    "R@10": 0.71,
+    "MRR": 0.4928
+   },
+   "tier_fired": {
+    "fts": 1.0,
+    "semantic": 1.0,
+    "hyde": 0.0,
+    "multi_repr": 0.0,
+    "fuzzy": 0.0,
+    "graph": 0.408,
+    "episode": 0.0,
+    "atomic_facts": 0.0,
+    "directives": 0.0,
+    "multi_query": 0.0,
+    "query_entity": 0.19
+   },
+   "latency_ms": {
+    "p50": 27.8,
+    "p95": 39.7
+   },
+   "coverage@10": 0.5945,
+   "compound": {
+    "n": 3,
+    "coverage@5": 0.6667,
+    "coverage@10": 0.6667
+   },
+   "fired": {
+    "compound": 3,
+    "historical": 8,
+    "fts_damped": 0
+   }
+  }
+ },
+ "seconds": 138.0
+}

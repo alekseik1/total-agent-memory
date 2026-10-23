@@ -85,9 +85,86 @@ def _season_range(season: str, year: int) -> DateRange:
     return DateRange(datetime(year, lo, 1), datetime(year + 1, hi, 28))
 
 
-def parse_query_dates(query: str) -> list[DateRange]:
-    q = query.lower()
+_NUMBER_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "couple": 2, "few": 3, "several": 3,
+}
+_UNIT_DAYS = {"day": 1, "week": 7, "month": 30, "year": 365}
+# Tolerance around "N units ago": the speaker rounds, the record carries the exact date.
+_UNIT_TOLERANCE_DAYS = {"day": 1, "week": 3, "month": 7, "year": 30}
+
+_AGO_RE = re.compile(
+    r"\b(?:(?P<since>since)\b[^.?!]{0,40}?)?(?:(?P<num>\d{1,3})|(?P<word>a|an|one|two|three|four|five|six|seven|"
+    r"eight|nine|ten|eleven|twelve|couple(?: of)?|few|several))\s+(?P<unit>day|week|month|year)s?\s+ago\b",
+    re.IGNORECASE,
+)
+_WINDOW_RE = re.compile(
+    r"\b(?:in the |over the |during the |within the )?(?P<kind>last|past|this|previous)\s+"
+    r"(?:(?P<num>\d{1,3})|(?P<word>couple(?: of)?|few|several|two|three|four|five|six))?\s*"
+    r"(?P<unit>day|week|month|year)s?\b",
+    re.IGNORECASE,
+)
+_SIMPLE_RE = re.compile(r"\b(?P<kind>yesterday|recently|lately|the other day)\b", re.IGNORECASE)
+RECENT_WINDOW_DAYS = 60
+
+
+def _count(num: str | None, word: str | None) -> int:
+    if num:
+        return int(num)
+    if word:
+        return _NUMBER_WORDS.get(word.split()[0].lower(), 1)
+    return 1
+
+
+def parse_relative_dates(query: str, anchor: datetime) -> list[DateRange]:
+    """Date windows for relative phrases, counted back from `anchor`.
+
+    "three weeks ago" -> the day three weeks before the anchor, give or take
+    the unit's tolerance; "since ... three weeks ago" -> from that day to the
+    anchor; "last month" / "past two weeks" / "this week" -> the window ending
+    at the anchor; "yesterday"; "recently" -> the last RECENT_WINDOW_DAYS days.
+    """
     ranges: list[DateRange] = []
+    for m in _AGO_RE.finditer(query):
+        unit = m.group("unit").lower()
+        then = anchor - timedelta(days=_count(m.group("num"), m.group("word")) * _UNIT_DAYS[unit])
+        tolerance = timedelta(days=_UNIT_TOLERANCE_DAYS[unit])
+        if m.group("since"):
+            ranges.append(DateRange(then - tolerance, anchor))
+        else:
+            ranges.append(DateRange(then - tolerance, then + tolerance))
+    for m in _WINDOW_RE.finditer(query):
+        unit = m.group("unit").lower()
+        count = _count(m.group("num"), m.group("word"))
+        kind = m.group("kind").lower()
+        if kind == "this":
+            if unit == "week":
+                start = anchor - timedelta(days=anchor.weekday())
+            elif unit == "month":
+                start = anchor.replace(day=1)
+            elif unit == "year":
+                start = anchor.replace(month=1, day=1)
+            else:
+                start = anchor
+            ranges.append(DateRange(start.replace(hour=0, minute=0, second=0, microsecond=0), anchor))
+        else:
+            ranges.append(DateRange(anchor - timedelta(days=count * _UNIT_DAYS[unit]), anchor))
+    for m in _SIMPLE_RE.finditer(query):
+        kind = m.group("kind").lower()
+        if kind == "yesterday":
+            day = (anchor - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            ranges.append(DateRange(day, day + timedelta(days=1)))
+        elif kind == "the other day":
+            ranges.append(DateRange(anchor - timedelta(days=7), anchor))
+        else:
+            ranges.append(DateRange(anchor - timedelta(days=RECENT_WINDOW_DAYS), anchor))
+    return ranges
+
+
+def parse_query_dates(query: str, anchor: datetime | None = None) -> list[DateRange]:
+    """Absolute dates in the query, plus relative phrases counted back from `anchor` (default: now)."""
+    q = query.lower()
+    ranges: list[DateRange] = parse_relative_dates(query, anchor or datetime.now())
     for pat, kind in DATE_PATTERNS:
         for m in re.finditer(pat, q, flags=re.IGNORECASE):
             try:
@@ -159,6 +236,7 @@ def temporal_rerank(
     proximity_weight: float = 0.5,
     max_window_days: int = 180,
     drop_outside_window: bool = False,
+    anchor: datetime | None = None,
 ) -> list[dict]:
     """Return entries re-ranked by blending score + date proximity.
 
@@ -171,7 +249,7 @@ def temporal_rerank(
     if not has_temporal_intent(query):
         return entries
 
-    ranges = parse_query_dates(query)
+    ranges = parse_query_dates(query, anchor=anchor)
     if not ranges:
         # Temporal intent without explicit dates — don't rerank
         return entries

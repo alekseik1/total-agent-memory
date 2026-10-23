@@ -498,7 +498,8 @@ def test_secrets_encrypted_at_rest_and_never_returned(world):
     assert world['settings'].overrides()['OPENAI_API_KEY'] == SECRET
     audit = json.dumps(client.get('/dashboard/api/admin/audit?limit=200').json())
     assert SECRET not in audit and 'OPENAI_API_KEY' in audit
-    assert (registry.root / MASTER_KEY_FILE).stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":  # NTFS has no POSIX modes; the profile ACL protects the file
+        assert (registry.root / MASTER_KEY_FILE).stat().st_mode & 0o777 == 0o600
     assert client.post('/dashboard/api/admin/settings', headers=headers,
                        json={'values': {'MEMORY_LLM_PROVIDER': 'gemini'}}).status_code == 400
     assert client.post('/dashboard/api/admin/settings', headers=headers,
@@ -532,13 +533,19 @@ def test_precedence_web_over_env_over_default(tmp_path):
     assert store.effective()['MEMORY_LLM_MODEL'] == 'env-model'
 
 
-def test_master_key_from_env_and_rejects_loose_file(tmp_path):
+def test_master_key_from_env_or_created_file(tmp_path):
     from cryptography.fernet import Fernet
     key = Fernet.generate_key().decode()
     load_cipher(tmp_path, {'TAM_TEAM_MASTER_KEY': key})
     assert not (tmp_path / MASTER_KEY_FILE).exists()
     with pytest.raises(ValueError):
         load_cipher(tmp_path, {'TAM_TEAM_MASTER_KEY': 'not-a-key'})
+    load_cipher(tmp_path, {})
+    assert (tmp_path / MASTER_KEY_FILE).is_file()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="NTFS has no group/other mode bits to refuse")
+def test_master_key_rejects_loose_file(tmp_path):
     load_cipher(tmp_path, {})
     (tmp_path / MASTER_KEY_FILE).chmod(0o644)
     with pytest.raises(PermissionError):

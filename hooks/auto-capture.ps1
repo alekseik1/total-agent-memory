@@ -1,36 +1,28 @@
-# PostToolUse:Write,Edit hook — suggest memory_observe after file changes
+# ===========================================
+# Auto Capture Hook (PowerShell) — twin of hooks/auto-capture.sh
 #
-# Add to %USERPROFILE%\.claude\settings.json:
-#   "hooks": {
-#     "PostToolUse": [
-#       {
-#         "type": "command",
-#         "command": "powershell -ExecutionPolicy Bypass -File C:\\path\\to\\hooks\\auto-capture.ps1",
-#         "matcher": "Write"
-#       },
-#       {
-#         "type": "command",
-#         "command": "powershell -ExecutionPolicy Bypass -File C:\\path\\to\\hooks\\auto-capture.ps1",
-#         "matcher": "Edit"
-#       }
-#     ]
-#   }
+# PostToolUse:Write|Edit — suggests memory_observe after file changes
+# (delivered as hookSpecificOutput.additionalContext).
+#
+# Hook: PostToolUse (matcher: "Write|Edit")
+# ===========================================
 
-$input_json = $input | Out-String
+. (Join-Path $PSScriptRoot "lib\common.ps1")
+Set-HookEvent "PostToolUse"
 
-try {
-    $data = $input_json | ConvertFrom-Json
-    $toolName = $data.tool_name
-    $filePath = $data.input.file_path
-} catch {
-    exit 0
+function Invoke-Hook {
+    $toolName = Get-HookField 'tool_name'
+    $filePath = Get-HookField 'tool_input.file_path'
+    if (-not $toolName -or -not $filePath) { return }
+
+    # Skip config/doc files — usually not worth observing
+    $ext = [System.IO.Path]::GetExtension($filePath)
+    if ($ext -in ".md", ".txt", ".log", ".json", ".yaml", ".yml", ".toml", ".lock", ".sum") { return }
+
+    $fileName = [System.IO.Path]::GetFileName($filePath)
+    Add-HookContext "MEMORY_HINT: File changed: $fileName. Consider: memory_observe(tool_name=`"$toolName`", summary=`"Modified $fileName`", files_affected=[`"$filePath`"])"
 }
 
-if (-not $toolName -or -not $filePath) { exit 0 }
-
-# Skip config/doc files
-$ext = [System.IO.Path]::GetExtension($filePath)
-if ($ext -in ".md", ".txt", ".log", ".json", ".yaml", ".yml", ".toml", ".lock", ".sum") { exit 0 }
-
-$fileName = [System.IO.Path]::GetFileName($filePath)
-Write-Output "MEMORY_HINT: File changed: $fileName. Consider: memory_observe(tool_name=`"$toolName`", summary=`"Modified $fileName`", files_affected=[`"$filePath`"])"
+Invoke-Hook
+Complete-Hook
+exit 0

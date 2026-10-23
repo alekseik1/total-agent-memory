@@ -74,3 +74,21 @@ def test_a_model_that_loads_directly_is_not_copied(tmp_path):
     loaded = load_model(lambda model, **kwargs: ("ok", model, kwargs), "small", cache_dir=str(tmp_path))
     assert loaded == ("ok", "small", {"cache_dir": str(tmp_path)})
     assert not (tmp_path / "materialized").exists()
+
+
+def test_onnxruntime_telemetry_is_disabled_once_before_loading(monkeypatch):
+    # Regression: onnxruntime's telemetry upload thread aborted pytest at exit
+    # (SIGABRT in recursive_mutex::lock, 2026-10-13 crash reports).
+    import onnxruntime
+
+    calls: list[str] = []
+    monkeypatch.setattr(onnxruntime, "disable_telemetry_events", lambda: calls.append("off"))
+    monkeypatch.setattr(fastembed_loader, "_telemetry_disabled", False)
+
+    def factory(model, **kwargs):
+        assert calls == ["off"]
+        return model
+
+    assert load_model(factory, "a") == "a"
+    assert load_model(factory, "b") == "b"
+    assert calls == ["off"]

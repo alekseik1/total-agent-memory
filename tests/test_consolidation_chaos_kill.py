@@ -21,8 +21,6 @@ SIGTERM — the daemon traps that for clean shutdown.
 
 from __future__ import annotations
 
-import os
-import signal
 import sqlite3
 import subprocess
 import sys
@@ -121,8 +119,8 @@ def test_db_intact_after_sigkill_mid_run(tmp_path):
     time.sleep(1.0)
     assert proc.poll() is None, "child exited prematurely"
 
-    # SIGKILL — no clean shutdown, no signal handler runs.
-    os.kill(proc.pid, signal.SIGKILL)
+    # SIGKILL on POSIX, TerminateProcess on Windows — no clean shutdown, no handler runs.
+    proc.kill()
     proc.wait(timeout=5)
 
     # DB must still open and be query-able.
@@ -187,7 +185,7 @@ def test_kill_then_immediate_restart_returns_paused_until_ttl_expires(tmp_path):
     proc = _spawn_long_running_consolidation(db_path)
     time.sleep(1.0)
     assert proc.poll() is None
-    os.kill(proc.pid, signal.SIGKILL)
+    proc.kill()
     proc.wait(timeout=5)
 
     sys.path.insert(0, str(_SRC))
@@ -212,7 +210,7 @@ def test_atomic_rows_no_partial_inferred_facts(tmp_path):
     proc = _spawn_long_running_consolidation(db_path)
     time.sleep(1.5)
     if proc.poll() is None:
-        os.kill(proc.pid, signal.SIGKILL)
+        proc.kill()
         proc.wait(timeout=5)
 
     conn = _open(db_path)

@@ -144,6 +144,7 @@ def test_has_llm_true_when_ollama_and_model_present(monkeypatch):
         def read(self): return b'{"models":[{"name":"qwen2.5-coder:7b"}]}'
 
     monkeypatch.setattr(config.urllib.request, "urlopen", lambda r, timeout=2: _R())
+    monkeypatch.setenv("MEMORY_LLM_ENABLED", "auto")
     monkeypatch.setenv("MEMORY_LLM_MODEL", "qwen2.5-coder:7b")
     config._cache_clear()
     assert config.has_llm() is True
@@ -301,6 +302,7 @@ def test_get_status_reports_full_picture(monkeypatch):
         def read(self): return b'{"models":[{"name":"qwen2.5-coder:7b"}]}'
 
     monkeypatch.setattr(config.urllib.request, "urlopen", lambda r, timeout=2: _R())
+    monkeypatch.setenv("MEMORY_LLM_ENABLED", "auto")
     monkeypatch.setenv("MEMORY_LLM_MODEL", "qwen2.5-coder:7b")
     config._cache_clear()
 

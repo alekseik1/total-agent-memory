@@ -2,8 +2,9 @@
 """
 OCR module using Apple Vision Framework (macOS).
 
-Uses pyobjc to access macOS Vision.framework for free, fast, local OCR.
-Supports: PNG, JPG, TIFF, BMP, PDF (first page).
+Uses pyobjc to access macOS Vision.framework for free, fast, local OCR
+(install with: pip install "total-agent-memory[ocr]").
+Supports: PNG, JPG, TIFF, BMP, PDF (first page, rendered through Quartz).
 Languages: English, Russian (configurable).
 
 Fallback: If pyobjc not available, tries pytesseract, then returns empty.
@@ -24,27 +25,59 @@ from pathlib import Path
 LOG = lambda msg: sys.stderr.write(f"[memory-ocr] {msg}\n")
 
 
-# Try to import Apple Vision
+# Vision reads bitmaps, not PDFs: the first page is drawn at this long side.
+PDF_RENDER_LONG_SIDE = 2048
+# Recognized lines below this confidence are noise (smudges, texture).
+MIN_LINE_CONFIDENCE = 0.3
+
 _HAS_VISION = False
 try:
-    import objc
+    import Quartz
     from Foundation import NSURL
-    from Quartz import (
-        CGImageSourceCreateWithURL,
-        CGImageSourceCreateImageAtIndex,
+    from Vision import (
+        VNImageRequestHandler,
+        VNRecognizeTextRequest,
+        VNRequestTextRecognitionLevelAccurate,
     )
-    # Import Vision framework
-    objc.loadBundle(
-        "Vision",
-        bundle_path="/System/Library/Frameworks/Vision.framework",
-        module_globals=globals(),
-    )
+
     _HAS_VISION = True
     LOG("Apple Vision framework: available")
 except ImportError:
-    LOG("Apple Vision framework: not available (install pyobjc-framework-Vision)")
+    LOG('Apple Vision framework: not available (pip install "total-agent-memory[ocr]")')
 except Exception as e:
     LOG(f"Apple Vision framework error: {e}")
+
+
+def _perform_outcome(result) -> tuple[bool, object]:
+    """performRequests:error: gives (ok, error) on older pyobjc and a bare bool on pyobjc 12."""
+    if isinstance(result, tuple):
+        return bool(result[0]), result[1]
+    return bool(result), None
+
+
+def _render_pdf_first_page(pdf_path: str):
+    """Draw page 1 of a PDF on white into a CGImage; None when there is nothing to draw."""
+    document = Quartz.CGPDFDocumentCreateWithURL(NSURL.fileURLWithPath_(pdf_path))
+    if document is None or Quartz.CGPDFDocumentGetNumberOfPages(document) < 1:
+        return None
+    page = Quartz.CGPDFDocumentGetPage(document, 1)
+    box = Quartz.CGPDFPageGetBoxRect(page, Quartz.kCGPDFMediaBox)
+    long_side = max(box.size.width, box.size.height)
+    if long_side <= 0:
+        return None
+    scale = PDF_RENDER_LONG_SIDE / long_side
+    width, height = round(box.size.width * scale), round(box.size.height * scale)
+    context = Quartz.CGBitmapContextCreate(
+        None, width, height, 8, 0, Quartz.CGColorSpaceCreateDeviceRGB(), Quartz.kCGImageAlphaPremultipliedLast
+    )
+    if context is None:
+        return None
+    Quartz.CGContextSetRGBFillColor(context, 1, 1, 1, 1)
+    Quartz.CGContextFillRect(context, Quartz.CGRectMake(0, 0, width, height))
+    Quartz.CGContextScaleCTM(context, scale, scale)
+    Quartz.CGContextTranslateCTM(context, -box.origin.x, -box.origin.y)
+    Quartz.CGContextDrawPDFPage(context, page)
+    return Quartz.CGBitmapContextCreateImage(context)
 
 
 class OCREngine:
@@ -107,47 +140,42 @@ class OCREngine:
             return ""
 
     def _extract_vision(self, image_path: str) -> str:
-        """Extract text using Apple Vision framework."""
+        """Extract text using Apple Vision framework (accurate recognition)."""
         try:
-            # Create image URL
-            file_url = NSURL.fileURLWithPath_(image_path)
+            handler = self._vision_handler(image_path)
+            if handler is None:
+                return ""
 
-            # Create request handler
-            handler = VNImageRequestHandler.alloc().initWithURL_options_(file_url, {})
-
-            # Create text recognition request
             request = VNRecognizeTextRequest.alloc().init()
-            request.setRecognitionLevel_(1)  # 0 = fast, 1 = accurate
+            request.setRecognitionLevel_(VNRequestTextRecognitionLevelAccurate)
             request.setUsesLanguageCorrection_(True)
             request.setRecognitionLanguages_(self.languages)
 
-            # Perform request
-            success, error = handler.performRequests_error_([request], None)
-
-            if not success:
-                LOG(f"Vision OCR failed: {error}")
-                return ""
-
-            # Extract results
-            results = request.results()
-            if not results:
+            ok, error = _perform_outcome(handler.performRequests_error_([request], None))
+            if not ok:
+                LOG(f"Vision OCR failed for {image_path}: {error}")
                 return ""
 
             lines = []
-            for observation in results:
-                # Get top candidate
+            for observation in request.results() or []:
                 candidates = observation.topCandidates_(1)
-                if candidates:
-                    text = candidates[0].string()
-                    confidence = candidates[0].confidence()
-                    if confidence > 0.3:  # Filter low-confidence results
-                        lines.append(text)
-
+                if candidates and candidates[0].confidence() > MIN_LINE_CONFIDENCE:
+                    lines.append(candidates[0].string())
             return "\n".join(lines)
 
         except Exception as e:
-            LOG(f"Vision OCR error: {e}")
+            LOG(f"Vision OCR error for {image_path}: {e}")
             return ""
+
+    def _vision_handler(self, image_path: str):
+        """Request handler for an image file, or for the first page of a PDF drawn as an image."""
+        if Path(image_path).suffix.lower() != ".pdf":
+            return VNImageRequestHandler.alloc().initWithURL_options_(NSURL.fileURLWithPath_(image_path), None)
+        page = _render_pdf_first_page(image_path)
+        if page is None:
+            LOG(f"Vision OCR skipped {image_path}: the PDF has no page that can be drawn")
+            return None
+        return VNImageRequestHandler.alloc().initWithCGImage_options_(page, None)
 
     def _extract_tesseract(self, image_path: str) -> str:
         """Fallback: Extract text using pytesseract."""
@@ -230,7 +258,7 @@ if __name__ == "__main__":
     engine = OCREngine()
 
     if not engine.available:
-        print("No OCR engine available. Install: pip install pyobjc-framework-Vision")
+        print('No OCR engine available. Install: pip install "total-agent-memory[ocr]"')
         sys.exit(1)
 
     text = engine.extract_text(args.image)

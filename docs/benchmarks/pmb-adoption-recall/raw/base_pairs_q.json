@@ -1,0 +1,72 @@
+{
+ "bench": "locomo",
+ "split": "test",
+ "limit": 0,
+ "cross_rerank": "off",
+ "search_limit": 10,
+ "entity_graph": false,
+ "graph": [],
+ "configs": {
+  "default": [
+   {
+    "fts": 1.0,
+    "semantic": 1.2,
+    "hyde": 1.0,
+    "multi_repr": 1.0,
+    "fuzzy": 0.5,
+    "graph": 0.3,
+    "episode": 0.9,
+    "atomic_facts": 1.0,
+    "directives": 1.0,
+    "multi_query": 0.0
+   },
+   {}
+  ]
+ },
+ "results": {
+  "default": {
+   "all": {
+    "n": 318,
+    "R@1": 0.4025,
+    "R@5": 0.7484,
+    "R@10": 0.8019,
+    "MRR": 0.5413
+   },
+   "pair-question": {
+    "n": 318,
+    "R@1": 0.4025,
+    "R@5": 0.7484,
+    "R@10": 0.8019,
+    "MRR": 0.5413
+   },
+   "tier_fired": {
+    "fts": 1.0,
+    "semantic": 1.0,
+    "hyde": 0.0,
+    "multi_repr": 0.0,
+    "fuzzy": 0.0,
+    "graph": 0.0,
+    "episode": 0.0,
+    "atomic_facts": 0.0,
+    "directives": 0.0,
+    "multi_query": 0.0
+   },
+   "latency_ms": {
+    "p50": 41.4,
+    "p95": 64.5
+   },
+   "coverage@10": 0.5829,
+   "compound": {
+    "n": 0,
+    "coverage@5": 0.0,
+    "coverage@10": 0.0
+   },
+   "fired": {
+    "compound": 0,
+    "historical": 0,
+    "fts_damped": 0
+   }
+  }
+ },
+ "seconds": 17.3
+}

@@ -231,7 +231,8 @@ def contribute_extras(ctx: Context, plan: Plan, answer: ExtrasAnswer) -> None:
     if answer.hooks:
         prepared: list[extras.HookPlan] = []
         plan.actions.append(Action("Install Claude Code hooks", lambda: _install_hooks(prepared[0]),
-                                   lambda: prepared.append(extras.plan_hooks(root, host))))
+                                   lambda: prepared.append(extras.plan_hooks(root, host,
+                                                                             memory_dir=ctx.memory_dir))))
     if answer.skills:
         copies = extras.skill_copies(root, host, _chosen(ctx))
         plan.actions.append(Action("Install agent skills", lambda: [f"Skill installed: {path}" for path in

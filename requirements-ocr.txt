@@ -1,0 +1,6 @@
+# OCR extra — mirrors [project.optional-dependencies].ocr in pyproject.toml.
+# Image OCR in the file watcher through Apple Vision; macOS only, the markers
+# make it a no-op elsewhere.
+-r requirements.txt
+pyobjc-framework-Vision>=10.3; sys_platform == 'darwin'
+pyobjc-framework-Quartz>=10.3; sys_platform == 'darwin'

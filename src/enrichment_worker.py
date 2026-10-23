@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from memory_core.exit_join import join_at_exit
 from memory_core.leases import LeaseHeartbeat, LeaseLost, assert_owned, enqueue_rebuilds
 from memory_core.telemetry import counters, op_timer
 from paths import memory_dir
@@ -625,4 +626,5 @@ def start_worker(store) -> _WorkerThread | None:
         return None
     t = _WorkerThread(store)
     t.start()
+    join_at_exit(t, stop=t.stop)  # its tasks embed through onnxruntime; see memory_core/exit_join.py
     return t

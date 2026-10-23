@@ -351,3 +351,27 @@ def test_serve_exits_non_zero_when_another_server_takes_the_lease(tmp_path, monk
     code, _, _ = run_cli(monkeypatch, capsys, tmp_path / 'server', 'serve', '--port', '0')
     assert code == cli.EXIT_LEASE_LOST and shutdowns == ['sigterm']
     assert captured['maintenance'].state().reason is MaintenanceReason.LEASE_LOST
+
+
+def test_request_shutdown_runs_the_installed_sigterm_handler():
+    # Regression: os.kill(own pid, SIGTERM) terminated the server outright on
+    # Windows instead of letting uvicorn's handler shut it down gracefully.
+    import signal
+    import threading
+    import time
+
+    from team_memory import cli
+
+    received = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, frame: received.append(signum))
+    try:
+        # The lease watcher calls it from a background thread.
+        caller = threading.Thread(target=cli.request_shutdown)
+        caller.start()
+        caller.join()
+        deadline = time.monotonic() + 5
+        while not received and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert received == [signal.SIGTERM]

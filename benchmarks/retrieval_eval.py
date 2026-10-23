@@ -48,7 +48,7 @@ def questions(bench: str, split: str) -> list[dict]:
     ranked = sorted(data, key=lambda entry: hashlib.sha256(entry["question_id"].encode()).hexdigest())
     chosen = {"dev": ranked[:LONGMEMEVAL_DEV_SIZE], "test": ranked[LONGMEMEVAL_DEV_SIZE:], "all": ranked}[split]
     return [{"question": entry["question"], "project": f"lme_{entry['question_id']}", "kind": entry["question_type"],
-             "gold": {sid.lower() for sid in entry["answer_session_ids"]}}
+             "gold": {sid.lower() for sid in entry["answer_session_ids"]}, "as_of": entry["question_date"]}
             for entry in chosen if not entry["question_id"].endswith("_abs")]
 
 
@@ -96,15 +96,16 @@ def main() -> int:
         rows = []
         started = time.perf_counter()
         for item in questions(args.bench, args.split):
+            as_of = {"as_of": item["as_of"]} if item.get("as_of") else {}
             found = recall({"query": item["question"], "project": item["project"], "limit": SEARCH_LIMIT,
-                            "detail": "compact"})
+                            "detail": "compact", **as_of})
             groups = found.get("results", {})
             ranked = [hit["id"] for group in (groups.values() if isinstance(groups, dict) else [groups])
                       for hit in group]
             first = next((rank for rank, keys in enumerate(evidence_keys(ranked)) if keys & item["gold"]), None)
             context = recall({"query": item["question"], "project": item["project"], "limit": args.limit,
                               "mode": "context", "neighbors": args.neighbors,
-                              "context_max_chars": args.context_chars, "detail": "full"})
+                              "context_max_chars": args.context_chars, "detail": "full", **as_of})
             covered = set().union(*(keys & item["gold"]
                                     for keys in evidence_keys([hit["id"] for hit in context.get("results", [])])))
             for bucket in ("all", item["kind"]):

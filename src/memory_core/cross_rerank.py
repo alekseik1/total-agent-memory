@@ -25,6 +25,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Sequence
 
+from memory_core.exit_join import join_at_exit
 from memory_core.telemetry import counters, op_timer
 
 LOGGER = logging.getLogger(__name__)
@@ -78,7 +79,9 @@ class CrossReranker:
             if self._started:
                 return
             self._started = True
-        threading.Thread(target=self._load, name="cross-rerank-load", daemon=True).start()
+        thread = threading.Thread(target=self._load, name="cross-rerank-load", daemon=True)
+        thread.start()
+        join_at_exit(thread)
 
     def _load(self) -> None:
         started = time.perf_counter()
@@ -152,7 +155,7 @@ class CrossReranker:
 
 
 def keep_updates_below(ranked: list[dict], text_of: Callable[[dict], str],
-                       recency_of: Callable[[dict], tuple]) -> list[dict]:
+                       recency_of: Callable[[dict], tuple], *, older_first: bool = False) -> list[dict]:
     """Put each record below its own later update.
 
     A web-trained encoder knows the real-world value: it ranks "Windows Vista
@@ -160,6 +163,9 @@ def keep_updates_below(ranked: list[dict], text_of: Callable[[dict], str],
     replaced it. Records that state different values for the same statement
     (`dedup.updates_value`) form a group; the group keeps the places the
     encoder gave it, filled newest first. Other records keep their places.
+
+    `older_first=True` fills the places oldest first, for a question about the
+    earlier value ("what was it before?", `query_shapes.is_historical_value_query`).
     """
     from memory_core.dedup import tokens_update_value, value_tokens
 
@@ -184,19 +190,21 @@ def keep_updates_below(ranked: list[dict], text_of: Callable[[dict], str],
     for places in groups.values():
         if len(places) < 2:
             continue
-        newest_first = sorted(places, key=lambda i: recency_of(ranked[i]), reverse=True)
-        for place, source in zip(places, newest_first):
+        by_time = sorted(places, key=lambda i: recency_of(ranked[i]), reverse=not older_first)
+        for place, source in zip(places, by_time):
             out[place] = ranked[source]
-        moved = moved or newest_first != places
+        moved = moved or by_time != places
     if moved:
-        counters.bump("update_order_restored")
+        counters.bump("update_order_older_first" if older_first else "update_order_restored")
     return out
 
 
 def order_value_updates(ranked: Sequence[dict], text_of: Callable[[dict], str],
-                        recency_of: Callable[[dict], tuple], window: int = UPDATE_ORDER_WINDOW) -> list[dict]:
+                        recency_of: Callable[[dict], tuple], window: int = UPDATE_ORDER_WINDOW, *,
+                        older_first: bool = False) -> list[dict]:
     """`keep_updates_below` over the top `window` records, whatever ranked them; the rest keep their order."""
-    return keep_updates_below(list(ranked[:window]), text_of, recency_of) + list(ranked[window:])
+    return keep_updates_below(list(ranked[:window]), text_of, recency_of, older_first=older_first) + list(
+        ranked[window:])
 
 
 def session_window_texts(db, rows: Sequence[dict], *, side_chars: int) -> dict[int, str]:

@@ -42,9 +42,9 @@ These are the published distribution channels. Python 3.11 or newer is required 
 | **uvx** (Python via uv) | `uvx total-agent-memory` | One-off run with no install. Best for trying without commitment. |
 | **pipx** (Python isolated) | `pipx install total-agent-memory` | Installs the `total-agent-memory`, `tam`, `tam-lookup`, `lookup-memory` binaries on PATH in an isolated venv. |
 | **brew** (macOS / Linuxbrew) | `brew install vbcherepanov/tap/total-memory` | Bottle-style install with `tam` and legacy `claude-total-memory` symlinks. |
-| **Docker** (multi-arch) | `docker run -p 3737:3737 -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:14.6.0` | Containerized (linux/amd64 + linux/arm64). MCP over HTTP on `:3737/mcp`, dashboard on `:37737`. |
+| **Docker** (multi-arch) | `docker run -p 3737:3737 -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:14.9.0` | Containerized (linux/amd64 + linux/arm64). MCP over HTTP on `:3737/mcp`, dashboard on `:37737`. |
 | **Claude Code plugin** | `/plugin marketplace add vbcherepanov/total-agent-memory`<br>`/plugin install total-agent-memory@vbcherepanov` | Installs the MCP server, the `memory-protocol` skill and all seven capture hooks in one step, from inside Claude Code. The bootstrap reuses an existing install if it finds one, so nothing is downloaded twice. |
-| **Claude plugin (directory edition)** | `/plugin marketplace add vbcherepanov/total-agent-memory-plugin`<br>`/plugin install total-agent-memory@vbcherepanov` | A small separate repository, [total-agent-memory-plugin](https://github.com/vbcherepanov/total-agent-memory-plugin), for Claude Code, Cowork and Codex (see the next row). Runs the pinned server with `uvx total-agent-memory==14.6.0` and adds the `memory-protocol` skill; no hooks. Needs [uv](https://docs.astral.sh/uv/). Use either this or the plugin above, not both. |
+| **Claude plugin (directory edition)** | `/plugin marketplace add vbcherepanov/total-agent-memory-plugin`<br>`/plugin install total-agent-memory@vbcherepanov` | A small separate repository, [total-agent-memory-plugin](https://github.com/vbcherepanov/total-agent-memory-plugin), for Claude Code, Cowork and Codex (see the next row). Runs the pinned server with `uvx total-agent-memory==14.8.0` and adds the `memory-protocol` skill; no hooks. Needs [uv](https://docs.astral.sh/uv/). Use either this or the plugin above, not both. |
 | **Codex plugin** | `codex plugin marketplace add vbcherepanov/total-agent-memory-plugin`<br>`codex plugin add total-agent-memory@vbcherepanov` | The same plugin repository for Codex CLI: the pinned server and the `memory-protocol` skill. Data goes to `~/.tam/`, shared with Claude Code. Needs [uv](https://docs.astral.sh/uv/). |
 | **Manual clone** | `git clone https://github.com/vbcherepanov/total-agent-memory ~/total-agent-memory && cd ~/total-agent-memory && ./install.sh --ide claude-code` | Full control. Lets you hack on the server, run benchmarks, and pick which background services to enable. Detailed walkthrough below. |
 
@@ -75,6 +75,18 @@ pip install "total-agent-memory[rerank]"      # pip / uvx / pipx
 pip install -r requirements-rerank.txt        # clone / Docker
 ```
 
+### Optional image OCR (macOS)
+
+The file watcher reads the text out of images and PDFs with Apple Vision. It
+needs pyobjc, which is an extra because it exists only on macOS. Without it,
+images are still stored but without their text (pytesseract is used instead
+when it is installed).
+
+```bash
+pip install "total-agent-memory[ocr]"         # pip / uvx / pipx
+pip install -r requirements-ocr.txt           # clone
+```
+
 ### Upgrading from v11.x
 
 Whatever channel you pick will auto-migrate
@@ -85,7 +97,7 @@ compat. No manual data move required.
 
 ## From a source checkout
 
-The installers configure IDE entries, hooks and background services in one step. Same 77 tools and dashboard on every path.
+The installers configure IDE entries, hooks and background services in one step. Same 79 tools and dashboard on every path.
 
 ### Path A — native (macOS / Linux / WSL2)
 
@@ -109,7 +121,7 @@ The installer:
 8. Applies all migrations to a fresh `memory.db`
 9. Starts the dashboard at `http://127.0.0.1:37737`
 
-Restart Claude Code → `/mcp` → `memory` should show **Connected** with 77 tools.
+Restart Claude Code → `/mcp` → `memory` should show **Connected** with 79 tools.
 
 ### Path A — native (Windows 10/11)
 
@@ -122,7 +134,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Ide claude-code
 Same 9 steps as Unix, but:
 
 - MCP config path is `%USERPROFILE%\.claude\settings.json` (or `.cursor\mcp.json`, etc.)
-- Hooks copied to `%USERPROFILE%\.claude\hooks\` — `.ps1` versions (auto-capture, memory-trigger, user-prompt-submit, post-tool-use, pre-edit, on-bash-error, session-start/end, on-stop, codex-notify)
+- Hooks copied to `%USERPROFILE%\.claude\hooks\` — `.ps1` versions (auto-capture, memory-trigger, user-prompt-submit, post-tool-use, pre-edit, on-bash-error, session-start/end, on-stop, plus codex-notify — an optional Codex desktop reminder that is not registered and does not capture memory)
 - Background services via **Task Scheduler**:
   - `total-agent-memory-reflection` — every 5 min (no native FileSystemWatcher equivalent)
   - `total-agent-memory-orphan-backfill` — daily 00:00 + 6h repetition

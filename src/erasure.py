@@ -3,8 +3,9 @@
 `memory_delete` without `hard` only hides a record. This removes it for good: SQLite
 rows (triggers take the FTS index, atomic facts, graph links and evidence passages),
 vectors in every embedding space, queue and log rows, quotes of it inside later
-versions, and the copies of its text in the raw call log. `secure_delete` zeroes the
-freed pages and a WAL checkpoint truncates the log, so the text is not left on disk.
+versions, agent action log rows that quote it, and the copies of its text in the raw
+call log. `secure_delete` zeroes the freed pages and a WAL checkpoint truncates the
+log, so the text is not left on disk.
 """
 
 from __future__ import annotations
@@ -16,7 +17,10 @@ import tempfile
 import time
 from pathlib import Path
 
+from ambient.actions import ActionLog
+
 ERASED = "[erased]"
+ACTION_LOG_TABLE = "agent_actions"
 SECONDS_PER_DAY = 86_400
 
 # Tables whose `knowledge_id` rows describe a record. Triggers on DELETE FROM knowledge
@@ -117,12 +121,25 @@ def scrub_raw_logs(raw_dir: Path, texts: list[str]) -> int:
 
 def erase(store, record_id: int, raw_dir: Path, chroma_dir: Path | None = None) -> dict | None:
     """Erase `record_id` with its earlier versions; None when no such record exists."""
+    return erase_many(store, [record_id], raw_dir, chroma_dir)
+
+
+def erase_many(store, record_ids: list[int], raw_dir: Path, chroma_dir: Path | None = None) -> dict | None:
+    """Erase every record in `record_ids` with its earlier versions in one pass; None when none exists.
+
+    One FTS merge, one WAL checkpoint and one raw-log scrub for the whole batch, so
+    `tam forget-auto` costs the same for one record or a thousand.
+    """
     if getattr(store, "is_postgres", False):
         raise ErasureUnsupported("Hard delete is available for personal (SQLite) memory only")
     db = store.db
-    if db.execute("SELECT 1 FROM knowledge WHERE id=?", (record_id,)).fetchone() is None:
+    existing = [rid for rid in dict.fromkeys(record_ids)
+                if db.execute("SELECT 1 FROM knowledge WHERE id=?", (rid,)).fetchone() is not None]
+    if not existing:
         return None
-    ids = version_chain(db, record_id)
+    ids: list[int] = []
+    for rid in existing:
+        ids.extend(kid for kid in version_chain(db, rid) if kid not in ids)
     marks = ",".join("?" * len(ids))
     rows = db.execute(f"SELECT id, content, context, project FROM knowledge WHERE id IN ({marks})", ids).fetchall()
     texts = [value for row in rows for value in (row[1], row[2]) if value]
@@ -131,6 +148,7 @@ def erase(store, record_id: int, raw_dir: Path, chroma_dir: Path | None = None) 
         f"SELECT DISTINCT embedding_space FROM embeddings WHERE knowledge_id IN ({marks})", ids)}
 
     tables = _existing_tables(db)
+    actions_erased = 0
     db.execute("PRAGMA secure_delete=ON")
     try:
         for kid in ids:
@@ -147,6 +165,9 @@ def erase(store, record_id: int, raw_dir: Path, chroma_dir: Path | None = None) 
             if quoted.strip():
                 db.execute(f"UPDATE knowledge SET context=replace(context, ?, ?) "
                            f"WHERE instr(context, ?) > 0 AND id NOT IN ({marks})", (quoted, ERASED, quoted, *ids))
+        if ACTION_LOG_TABLE in tables:
+            # A logged command or edit can carry the record's text (src/ambient/actions.py).
+            actions_erased = ActionLog(db).erase_mentions(texts)
         db.execute(f"DELETE FROM knowledge WHERE id IN ({marks})", ids)
         _merge_fts(db)
         db.commit()
@@ -157,7 +178,8 @@ def erase(store, record_id: int, raw_dir: Path, chroma_dir: Path | None = None) 
         db.execute("PRAGMA secure_delete=OFF")
     db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
-    result = {"erased": ids, "projects": projects, "raw_logs_rewritten": scrub_raw_logs(raw_dir, texts)}
+    result = {"erased": ids, "projects": projects, "raw_logs_rewritten": scrub_raw_logs(raw_dir, texts),
+              "actions_erased": actions_erased}
     for space in sorted({"text", *spaces}):
         collection = store._chroma_collection_for(space)
         if collection is None:

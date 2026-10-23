@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,11 @@ import pytest
 
 ROOT = Path(__file__).parent.parent
 INSTALL_SH = ROOT / "install.sh"
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="install.sh is the POSIX installer; Windows uses install.ps1 (tests/test_windows_installer_runtime.py)",
+)
 
 
 # ---------- helpers ----------

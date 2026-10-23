@@ -33,7 +33,7 @@ that the `fast` hot path makes no LLM or network call.
                   │   (Claude Code · Codex CLI · Cursor · any MCP)  │
                   └──────────────────────┬──────────────────────────┘
                                          │ MCP (stdio or HTTP)
-                                         │ 77 tools
+                                         │ 79 tools
                   ┌──────────────────────▼──────────────────────────┐
                   │            total-agent-memory server             │
                   │    ┌──────────────┐  ┌────────────────────┐     │

@@ -1,0 +1,26 @@
+{
+ "cross_rerank": "off",
+ "summary": {
+  "en/current": {
+   "n": 24,
+   "correct": 1.0,
+   "found": 1.0
+  },
+  "en/historical": {
+   "n": 24,
+   "correct": 1.0,
+   "found": 1.0
+  },
+  "ru/current": {
+   "n": 24,
+   "correct": 1.0,
+   "found": 1.0
+  },
+  "ru/historical": {
+   "n": 24,
+   "correct": 1.0,
+   "found": 1.0
+  }
+ },
+ "seconds": 2.1
+}

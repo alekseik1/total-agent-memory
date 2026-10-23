@@ -1,13 +1,13 @@
 # Tools and interfaces
 
-The local server exposes 77 MCP tools. This page groups them, shows typical
+The local server exposes 79 MCP tools. This page groups them, shows typical
 calls, and describes the command-line helpers, the TypeScript client and the
 dashboard. The team server exposes a smaller remote catalogue; see
 [team-server.md](team-server.md).
 
 - [Capabilities](#capabilities)
 - [Usage examples](#usage-examples)
-- [MCP tools reference](#mcp-tools-reference-77-tools)
+- [MCP tools reference](#mcp-tools-reference-79-tools)
 - [CLI: `lookup-memory` for sub-agents](#cli-lookup-memory-for-sub-agents)
 - [Activity reports](#activity-reports-report-and-tam-report)
 - [TypeScript SDK](#typescript-sdk)
@@ -108,6 +108,9 @@ memory_save(
 ```
 memory_recall(query="vector database choice", project="my-api", limit=5)
 → RRF-fused results from 6 retrieval tiers
+
+memory_recall(query="what did we decide about caching last month", project="my-api", as_of="2026-09-15")
+→ "last month" is counted back from 2026-09-15 instead of today (replays, benchmarks, "as of" questions)
 ```
 
 **4. Predict approach before starting a task**
@@ -131,7 +134,7 @@ memory_stats()
 → {sessions: 515, knowledge: {active: 1859, ...}, storage_mb: 119.5, ...}
 ```
 
-## MCP tools reference (77 tools)
+## MCP tools reference (79 tools)
 
 ### Tool categories
 
@@ -163,9 +166,11 @@ memory_stats()
 
 **Skills (3):** `memory_skill_get`, `memory_skill_update`, `file_context`
 
-Total: **77 tools.** Each is documented below with input schema and example.
+**Exploration memos (2):** `memory_exploration_record`, `memory_exploration_recall` — conclusions about a codebase keyed to the SHA-256 of the files they came from, see [Exploration memos](#exploration-memos-skip-re-reading-unchanged-files)
 
-Every tool carries MCP behaviour annotations — 38 are marked `readOnlyHint`,
+Total: **79 tools.** Each is documented below with input schema and example.
+
+Every tool carries MCP behaviour annotations — 39 are marked `readOnlyHint`,
 and `memory_delete` / `memory_forget` / `memory_update` / `kg_invalidate_fact`
 plus the two rebuild tools are marked `destructiveHint`. Clients use these to
 decide what may run without a confirmation prompt. Tools that answer in JSON
@@ -271,6 +276,39 @@ tam report --project billing-api --period month --save     # also <memory dir>/r
 ```
 
 On the team server the same tool reports on your own memory, a department (heads, company viewers, superadmins) or the whole company, and the dashboard has a **Reports** page with a period picker and a Markdown download. Details: [docs/REPORTS.md](REPORTS.md).
+
+## Exploration memos: skip re-reading unchanged files
+
+Agents re-read the same files every session to answer the same structural questions ("how is auth wired?", "where are migrations applied?"). After answering one by reading code, record the conclusion with the files it came from:
+
+```json
+memory_exploration_record({
+  "question": "How is authentication wired?",
+  "conclusion": "check_token() in src/auth/middleware.py runs before every route except the ones listed in src/auth/routes.py.",
+  "files": ["src/auth/middleware.py", "src/auth/routes.py"],
+  "project": "billing-api",
+  "root": "/home/me/code/billing-api"
+})
+```
+
+TAM stores the SHA-256 and size of each file, with paths relative to `root` (default: the server's working directory). Files outside `root` — absolute paths elsewhere, `../` paths, symlinks leading out — are refused. Limits: 64 files per memo, 32 MB per file, 2,000-character questions, 20,000-character conclusions. Recording the same question again (case and trailing punctuation ignored) replaces the memo.
+
+Before the next exploration, ask first:
+
+```json
+memory_exploration_recall({"question": "where is auth checked?", "project": "billing-api", "root": "/home/me/code/billing-api"})
+```
+
+Results are ranked by question similarity: an exact question match scores 1.0; otherwise 0.8 × cosine similarity of the question embeddings (same embedding model only) + 0.2 × word overlap, falling back to word overlap alone when no embedding is available. Results below 0.2 are dropped. Every file is re-hashed under the `root` given at recall time, so a moved checkout still verifies:
+
+- `"status": "fresh"`: every file is byte-identical, so the conclusion can be reused without re-reading.
+- `"status": "stale"`: `changed_files` and `missing_files` list what to re-read. `unverifiable_files` lists files that now resolve outside the root or exceed the size limit.
+
+`include_stale: false` returns fresh memos only. Memos are kept in the `exploration_memos` / `exploration_memo_files` tables (migration 042) and are not mixed into `memory_recall`, so a stale conclusion never surfaces as a plain fact.
+
+## Importing history and moving the store
+
+`tam import chatgpt|claude|mem0|markdown <path>` brings existing chat history and notes into memory, and `tam export --encrypted` / `tam import-bundle` move the whole store between machines. See [docs/importing.md](importing.md).
 
 ## TypeScript SDK
 

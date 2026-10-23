@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import stat
+import sys
 import threading
 import time
 import uuid
@@ -87,7 +88,8 @@ def test_config_is_encrypted_atomic_and_private(tmp_path):
     store.save(config)
     raw = (tmp_path / DATABASE_CONFIG_FILE).read_bytes()
     assert PASSWORD.encode() not in raw and b"db.internal" not in raw
-    assert oct((tmp_path / DATABASE_CONFIG_FILE).stat().st_mode & 0o777) == "0o600"
+    if sys.platform != "win32":  # NTFS has no POSIX modes; the profile ACL protects the file
+        assert oct((tmp_path / DATABASE_CONFIG_FILE).stat().st_mode & 0o777) == "0o600"
     assert [path.name for path in tmp_path.iterdir() if path.name.startswith(".")] == []
     assert store.load() == config
     assert store.unseal(config).to_uri() == DatabaseDsn.parse(REMOTE_DSN).to_uri()
@@ -95,12 +97,17 @@ def test_config_is_encrypted_atomic_and_private(tmp_path):
     assert store.load().generation == 2
 
 
-def test_group_readable_or_corrupt_config_is_refused(tmp_path):
+@pytest.mark.skipif(sys.platform == "win32", reason="NTFS has no group/other mode bits to refuse")
+def test_group_readable_config_is_refused(tmp_path):
     store = FileDatabaseConfigStore(tmp_path, {})
     store.save(web_config(store, None, uuid.uuid4()))
     (tmp_path / DATABASE_CONFIG_FILE).chmod(0o644)
     assert refusal(store.load) is StartupRefusal.CONFIG_UNREADABLE
-    (tmp_path / DATABASE_CONFIG_FILE).chmod(0o600)
+
+
+def test_corrupt_config_is_refused(tmp_path):
+    store = FileDatabaseConfigStore(tmp_path, {})
+    store.save(web_config(store, None, uuid.uuid4()))
     (tmp_path / DATABASE_CONFIG_FILE).write_text("{not json")
     assert refusal(store.load) is StartupRefusal.CONFIG_UNREADABLE
 
@@ -150,7 +157,8 @@ def test_sqlite_default_keeps_one_instance_id(tmp_path):
     assert plane.backend is Backend.SQLITE and plane.current().generation == 0
     assert plane.current().instance_id == sqlite_instance_id(tmp_path, create=False)
     assert open_control_plane(tmp_path, {}).current().instance_id == plane.current().instance_id
-    assert oct((tmp_path / "identity.db").stat().st_mode & 0o777) == "0o600"
+    if sys.platform != "win32":  # NTFS has no POSIX modes; the profile ACL protects the file
+        assert oct((tmp_path / "identity.db").stat().st_mode & 0o777) == "0o600"
 
 
 def test_web_sqlite_config_of_another_installation_is_refused(tmp_path):

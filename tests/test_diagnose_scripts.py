@@ -13,6 +13,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,12 +24,18 @@ DIAG_PS1 = ROOT / "scripts" / "diagnose.ps1"
 INSTALL_MD = ROOT / "docs" / "installation.md"
 WSL_JSON = ROOT / "examples" / "settings" / "claude-code-wsl.json"
 
+posix_diagnose = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="diagnose.sh is the POSIX diagnostic; Windows uses scripts/diagnose.ps1 (test_diagnose_ps1_*)",
+)
+
 
 # ---------------------------------------------------------------------------
 # diagnose.sh
 # ---------------------------------------------------------------------------
 
 
+@posix_diagnose
 def test_diagnose_sh_exists_and_executable():
     assert DIAG_SH.exists(), f"{DIAG_SH} must exist"
     mode = DIAG_SH.stat().st_mode
@@ -44,6 +51,7 @@ def test_diagnose_sh_has_shebang():
     assert "bash" in first_line, "shebang should reference bash"
 
 
+@posix_diagnose
 def test_diagnose_sh_runs_in_test_mode():
     """With DIAG_TEST_MODE=1, the script must exit 0 and emit a mock report."""
     env = {**os.environ, "DIAG_TEST_MODE": "1"}

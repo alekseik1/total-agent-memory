@@ -12,10 +12,11 @@ authors:
   - family-names: Cherepanov
     given-names: Vitalii
     orcid: "https://orcid.org/0009-0009-8289-8435"
-version: 14.6.0
-date-released: 2026-09-27
+version: 14.9.0
+date-released: 2026-10-13
 license: MIT
 repository-code: "https://github.com/vbcherepanov/total-agent-memory"
+url: "https://totalmemory.dev"
 identifiers:
   - type: doi
     value: 10.5281/zenodo.23011523

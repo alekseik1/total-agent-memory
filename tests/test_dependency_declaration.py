@@ -171,6 +171,36 @@ def test_the_rerank_requirements_file_mirrors_the_extra():
     )
 
 
+# ── the OCR extra ─────────────────────────────────────────────────────
+# src/ingestion/ocr.py imports Vision, Quartz and Foundation behind a guard.
+# Foundation comes with either framework wheel through pyobjc-framework-Cocoa.
+OCR_STACK = {"pyobjc-framework-vision", "pyobjc-framework-quartz"}
+
+
+def test_the_ocr_extra_carries_what_the_ocr_module_imports():
+    """Image OCR went unpackaged for years: pyobjc was never declared anywhere."""
+    ocr = _extras().get("ocr")
+    assert ocr is not None, "pyproject lost the 'ocr' optional-dependency group"
+    assert OCR_STACK <= ocr, f"'ocr' is missing {sorted(OCR_STACK - ocr)}"
+    assert not OCR_STACK & _pyproject(), "pyobjc is macOS-only and stays out of the base install"
+
+
+def test_the_ocr_requirements_file_mirrors_the_extra():
+    """install.sh / Docker users get the extra through a requirements file."""
+    mirrored = _requirements_file("requirements-ocr.txt")
+    ocr = _extras()["ocr"]
+    assert ocr == mirrored, (
+        f"requirements-ocr.txt and the 'ocr' extra disagree: "
+        f"only in extra {sorted(ocr - mirrored)}, only in file {sorted(mirrored - ocr)}"
+    )
+
+
+def test_the_ocr_extra_is_macos_only():
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    for spec in data["project"]["optional-dependencies"]["ocr"]:
+        assert "sys_platform == 'darwin'" in spec, f"{spec} would be resolved on Linux and Windows too"
+
+
 def test_the_installers_do_not_warm_a_model_they_cannot_load():
     """The pre-download step used sentence-transformers, which is now an extra.
 

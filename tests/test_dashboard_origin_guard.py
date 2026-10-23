@@ -147,3 +147,44 @@ def test_extra_hosts_come_from_bind_and_allow_list(port: int, monkeypatch: pytes
     monkeypatch.setattr(dashboard, "ALLOWED_HOSTS", extra)
     assert request(port, "GET", "/api/stats", {}, host=f"mem.lan:{port}")[0] == 200
     assert request(port, "GET", "/api/stats", {"Origin": f"http://mem.lan:{port}"}, host=f"mem.lan:{port}")[0] == 200
+
+
+def test_dashboard_server_listens_without_reverse_dns(monkeypatch):
+    # Regression: HTTPServer.server_bind ran socket.getfqdn between bind() and
+    # listen(); on GitHub macOS runners that took over 10 s, so the port stayed
+    # bound but refused to accept and the dashboard looked dead.
+    def no_lookup(*args):
+        raise AssertionError("the dashboard must not resolve its bind address")
+
+    monkeypatch.setattr(socket, "getfqdn", no_lookup)
+    server = dashboard.DashboardHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    try:
+        host, port = server.server_address[:2]
+        assert (server.server_name, server.server_port) == (host, port)
+        with socket.create_connection((host, port), timeout=2):
+            pass
+    finally:
+        server.server_close()
+
+
+def test_refusal_reads_a_small_unread_body_first():
+    # Regression: refusing before reading the body left bytes unread; Windows then reset the
+    # connection and clients saw WinError 10053 instead of the 403/405 answer.
+    import io
+    from email.message import Message
+
+    def handler(length: int) -> tuple:
+        h = dashboard.DashboardHandler.__new__(dashboard.DashboardHandler)
+        h.headers = Message()
+        h.headers["Content-Length"] = str(length)
+        h.rfile = io.BytesIO(b"x" * length)
+        sent = []
+        h._send_error = lambda status, message: sent.append(status)
+        return h, sent
+
+    small, sent = handler(64)
+    small._refuse(405, "Method not allowed")
+    assert small.rfile.tell() == 64 and sent == [405]
+    huge, sent = handler(dashboard.dashboard_settings.MAX_BODY_BYTES + 1)
+    huge._refuse(413, "Request body missing or too large")
+    assert huge.rfile.tell() == 0 and sent == [413]

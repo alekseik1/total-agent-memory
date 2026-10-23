@@ -1,4 +1,5 @@
 import json
+import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -530,7 +531,8 @@ def test_repository_migrations_are_idempotent(tmp_path, backend):
     skip_unless_sqlite(backend, "learning.db file checks")
     with sqlite3.connect(tmp_path / 'learning.db') as db:
         assert db.execute('SELECT COUNT(*) FROM schema_migrations').fetchone()[0] == 1
-    assert oct((tmp_path / 'learning.db').stat().st_mode & 0o777) == '0o600'
+    if sys.platform != "win32":  # NTFS has no POSIX modes; the profile ACL protects the file
+        assert oct((tmp_path / 'learning.db').stat().st_mode & 0o777) == '0o600'
 
 
 @pytest.mark.anyio

@@ -283,60 +283,6 @@ def summarize(text: str, topic: str = "", max_words: int = 300) -> str:
     return generate_cheap(prompt)
 
 
-def _load_rules_from_db(stack: str = "", project: str = "") -> str:
-    """Load architecture rules, conventions from knowledge DB.
-
-    Searches by tags: convention, architecture, rules + stack-specific.
-    Returns formatted rules text for injection into prompts.
-    """
-    import sqlite3
-
-    db_path = MEMORY_DIR / "memory.db"
-    if not db_path.exists():
-        return ""
-
-    db = sqlite3.connect(str(db_path))
-    db.row_factory = sqlite3.Row
-
-    rules_parts: list[str] = []
-
-    try:
-        # Get conventions and architecture rules
-        tag_filters = ['convention', 'architecture', 'rules']
-        if stack:
-            tag_filters.append(stack.lower())
-
-        conditions = " OR ".join(f'tags LIKE \'%"{t}"%\'' for t in tag_filters)
-        query = (
-            f"SELECT content, type, tags FROM knowledge "
-            f"WHERE status = 'active' AND ({conditions}) "
-            f"ORDER BY confidence DESC, recall_count DESC LIMIT 20"
-        )
-
-        rows = db.execute(query).fetchall()
-        for row in rows:
-            rules_parts.append(row["content"][:500])
-
-        # Also get project-specific conventions
-        if project:
-            proj_rows = db.execute(
-                "SELECT content FROM knowledge "
-                "WHERE status = 'active' AND project = ? "
-                "AND (type = 'convention' OR tags LIKE '%convention%') "
-                "ORDER BY confidence DESC LIMIT 5",
-                (project,)
-            ).fetchall()
-            for row in proj_rows:
-                rules_parts.append(row["content"][:500])
-
-    except Exception as e:
-        LOG(f"Load rules error: {e}")
-    finally:
-        db.close()
-
-    return "\n\n".join(rules_parts) if rules_parts else ""
-
-
 def _load_rules_from_files(stack: str = "") -> str:
     """Load rules from CLAUDE.md rule files as fallback."""
     rules_dir = Path.home() / ".claude" / "rules"

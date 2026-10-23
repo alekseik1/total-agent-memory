@@ -163,8 +163,8 @@ class FileProcessor:
             engine = OCREngine()
             if engine.available:
                 ocr_text = engine.extract_text(str(file_path))
-        except Exception:
-            pass
+        except Exception as e:
+            LOG(f"OCR error for {file_path.name}: {e}")
 
         content = ocr_text if ocr_text else f"Image: {file_path.name}"
         now = utc_now()

@@ -9,7 +9,7 @@
     {
       "name": "total-agent-memory",
       "displayName": "Total Agent Memory",
-      "description": "Persistent local memory: temporal knowledge graph, procedural memory, AST codebase ingest, cross-project analogy. 77 MCP tools, zero LLM calls in the hot path, nothing leaves the machine.",
+      "description": "Persistent local memory: temporal knowledge graph, procedural memory, AST codebase ingest, cross-project analogy. 79 MCP tools, zero LLM calls in the hot path, nothing leaves the machine.",
       "source": "./",
       "category": "Productivity",
       "tags": ["memory", "mcp", "knowledge-graph", "local-first", "context"]

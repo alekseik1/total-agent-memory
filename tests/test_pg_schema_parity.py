@@ -61,6 +61,13 @@ def sqlite_store(tmp_path_factory):
         server.MEMORY_DIR = previous
 
 
+def _bundled_versions() -> tuple[int, ...]:
+    """Versions a fresh workspace applies: every bundled workspace migration."""
+    from tam_db import pg_schema
+
+    return tuple(migration.version for migration in pg_schema.workspace_migrations())
+
+
 def provision_unmigrated(admin_url: str, key: str):
     """Workspace schema and role without the workspace migrations; its StoreDatabase."""
     from team_memory.pg_provision import PgProvisioner, PgWorkspaceProvisioner
@@ -78,7 +85,7 @@ def workspace(pg_database):
 
     connection = pg_connection.connect(provision_unmigrated(pg_database.url, WORKSPACE_KEY))
     connection.row_factory = sqlite3.Row
-    assert pg_schema.ensure(connection) == (1,)
+    assert pg_schema.ensure(connection) == _bundled_versions()
     yield connection
     connection.close()
 
@@ -468,7 +475,7 @@ def test_concurrent_ensure_applies_once(pg_database):
     for connection in connections:
         connection.close()
     assert errors == []
-    assert sorted(results) == [(), (), (1,)]
+    assert sorted(results) == [(), (), _bundled_versions()]
 
 
 def test_migration_files_must_be_numbered_without_gaps(tmp_path: Path):

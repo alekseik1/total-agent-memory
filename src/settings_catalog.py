@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict
 
+from ambient import settings as ambient
 from paths import exposed_to_others
 
 LOGGER = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ class SettingSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     key: str
-    group: Literal["llm", "embed", "recall", "storage"]
+    group: Literal["llm", "embed", "recall", "storage", "agent"]
     label: str
     kind: Literal["choice", "text", "url", "number", "integer", "secret", "path"]
     choices: tuple[str, ...] = ()
@@ -76,6 +77,18 @@ RECALL_SPECS: tuple[SettingSpec, ...] = (
     SettingSpec(key="MEMORY_FLAG_INSTRUCTIONS", group="recall", label="Flag records that address the agent",
                 kind="choice", choices=("true", "false"),
                 help='Marks records like "ignore previous instructions" as untrusted_instructions. Default true.'),
+    SettingSpec(key="MEMORY_CRITICAL_DAILY_BUDGET", group="recall", label="Critical saves per project per day",
+                kind="integer",
+                help="Further importance=critical saves are stored as high, with a note to the caller. "
+                     "Conventions are exempt. 0 = unlimited. Default 5."),
+    SettingSpec(key="MEMORY_HIGH_DAILY_BUDGET", group="recall", label="High saves per project per day",
+                kind="integer", help="Further importance=high saves are stored as medium. 0 = unlimited (default)."),
+    SettingSpec(key="MEMORY_DECAY_EXEMPT_TYPES", group="recall", label="Record types that do not age out",
+                kind="text",
+                help="Comma-separated. Their recency decay stops at the floor below. "
+                     "Default decision,convention,lesson."),
+    SettingSpec(key="MEMORY_DECAY_EXEMPT_FLOOR", group="recall", label="Decay floor for those types",
+                kind="number", help="Between 0 and 1. Default 0.85."),
 )
 # Personal installs only: the team server has its own reranker and storage layout.
 LOCAL_SPECS: tuple[SettingSpec, ...] = (
@@ -89,6 +102,56 @@ LOCAL_SPECS: tuple[SettingSpec, ...] = (
     SettingSpec(key="TAM_MODEL_CACHE", group="storage", label="Embedding model cache folder", kind="path",
                 help="Default is the system temp folder, which macOS clears; a folder here survives. "
                      "Models download once more after a change."),
+    SettingSpec(key="TAM_TOOL_PROFILE", group="agent", label="Tool set offered to agents", kind="choice",
+                choices=("full", "lean", "minimal"),
+                help="full: all tools with long descriptions (default). lean: the 28 everyday tools, minimal: "
+                     "the 12 core ones, both with one-line descriptions. Hidden tools stay callable. "
+                     "Applies to new sessions."),
+    SettingSpec(key="TAM_MCP_INSTRUCTIONS", group="agent", label="Usage instructions for agents", kind="choice",
+                choices=("true", "false"),
+                help="Sends a short read-first / what-to-save guide with today's date when a client connects. "
+                     "Default true."),
+    SettingSpec(key="TAM_TOOL_TELEMETRY", group="agent", label="Per-tool call statistics", kind="choice",
+                choices=("true", "false"),
+                help="Records tool name, duration, outcome and payload sizes (never contents) for "
+                     "memory_perf_report; kept 7 days. Default true."),
+    SettingSpec(key=ambient.AMBIENT_RECALL_ENV, group="agent", label="Recall with every prompt", kind="choice",
+                choices=("true", "false"),
+                help="The prompt hook adds matching rules and a few relevant records to each prompt, so memory "
+                     "works without the agent calling memory_recall. Default true."),
+    SettingSpec(key=ambient.AMBIENT_TOKEN_BUDGET_ENV, group="agent", label="Prompt recall budget, tokens",
+                kind="integer",
+                help=f"Upper bound of what one prompt receives (about 4 characters per token; "
+                     f"{ambient.MIN_TOKEN_BUDGET}–{ambient.MAX_TOKEN_BUDGET}). "
+                     f"Default {ambient.DEFAULT_AMBIENT_TOKEN_BUDGET}."),
+    SettingSpec(key=ambient.AMBIENT_LATENCY_ENV, group="agent", label="Prompt recall time limit, ms",
+                kind="integer",
+                help=f"After this the prompt goes on with whatever was found ({ambient.MIN_LATENCY_MS}–"
+                     f"{ambient.MAX_LATENCY_MS}). Default {ambient.DEFAULT_AMBIENT_LATENCY_MS}."),
+    SettingSpec(key=ambient.RULE_REMINDERS_ENV, group="agent", label="Rule reminders before commands and edits",
+                kind="choice", choices=("true", "false"),
+                help="Shows a rule to the agent right before a Bash call or an edit that matches it. Default true."),
+    SettingSpec(key=ambient.RULE_COMPLIANCE_ENV, group="agent", label="Check rules at the end of each turn",
+                kind="choice", choices=("true", "false"),
+                help="Compares the turn's actions with the rules shown to the session, reports a broken "
+                     "prohibition and counts the result in the rule's automatic statistics (never in its "
+                     "ratings). Default true."),
+    SettingSpec(key=ambient.TURN_AUTOSAVE_ENV, group="agent", label="Save a summary of each turn",
+                kind="choice", choices=("true", "false"),
+                help="Turns that edited files or ran commands are saved as short auto-saved records; "
+                     "`tam forget-auto` deletes them. Default true."),
+    SettingSpec(key=ambient.CORRECTION_CAPTURE_ENV, group="agent", label="Draft rules from user corrections",
+                kind="choice", choices=("true", "false"),
+                help="A prompt like \"I already told you…\" / \"сколько раз\" becomes a draft insight "
+                     "(self_insight list) that can be upvoted and promoted to a rule. Default true."),
+    SettingSpec(key=ambient.ACTION_LOG_ENV, group="agent", label="Agent action log", kind="choice",
+                choices=("true", "false"),
+                help="Hooks log each tool call (name, short redacted summary, exit status) for the turn check "
+                     "and summaries. Default true."),
+    SettingSpec(key=ambient.ACTION_LOG_RETENTION_ENV, group="storage", label="Keep the agent action log, days",
+                kind="integer",
+                help=f"Older rows are removed as new ones arrive and by memory_forget. "
+                     f"Default {ambient.DEFAULT_ACTION_LOG_RETENTION_DAYS}."),
 )
 class ProviderSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)

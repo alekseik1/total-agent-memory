@@ -84,7 +84,8 @@ def test_every_hook_command_exists_and_is_executable():
                 assert command.endswith('"'), event
                 path = ROOT / command.strip('"').replace("${CLAUDE_PLUGIN_ROOT}/", "")
                 assert path.is_file(), f"{event}: missing {path}"
-                assert os.stat(path).st_mode & stat.S_IXUSR, f"{event}: {path} not +x"
+                if sys.platform != "win32":  # NTFS has no POSIX executable bit
+                    assert os.stat(path).st_mode & stat.S_IXUSR, f"{event}: {path} not +x"
                 seen += 1
     assert seen >= 7, "expected the full capture hook set"
 

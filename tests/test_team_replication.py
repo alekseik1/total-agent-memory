@@ -49,8 +49,11 @@ def ltx(base: Path, relative: str, txid: int, level='0000') -> None:
 
 
 def cli(root: Path, env: dict, *args: str) -> subprocess.CompletedProcess:
-    environment = {'PATH': os.environ.get('PATH', ''), 'HOME': str(root.parent / 'home'), 'PYTHONPATH': str(SRC),
-                   'TAM_MEMORY_DIR': str(root.parent / 'home' / '.tam'), **env}
+    # Windows resolves the home directory from USERPROFILE and needs SYSTEMROOT to start Python.
+    environment = {'PATH': os.environ.get('PATH', ''), 'HOME': str(root.parent / 'home'),
+                   'USERPROFILE': str(root.parent / 'home'), 'PYTHONPATH': str(SRC),
+                   'TAM_MEMORY_DIR': str(root.parent / 'home' / '.tam'),
+                   **{name: os.environ[name] for name in ('SYSTEMROOT',) if name in os.environ}, **env}
     return subprocess.run([sys.executable, '-m', 'team_memory.cli', '--root', str(root), 'replication', *args],
                           env=environment, capture_output=True, text=True, timeout=120, check=False)
 
@@ -152,9 +155,11 @@ def test_write_config_is_private_and_creates_the_watched_directory(tmp_path):
     root = server(tmp_path)
     out = tmp_path / 'etc' / 'litestream.yml'
     replication.write_config(root, ReplicationSettings.from_env(S3_ENV), out)
-    assert stat.S_IMODE(out.stat().st_mode) == 0o600
-    assert stat.S_IMODE((root / 'workspaces').stat().st_mode) == 0o700
-    assert str(root.resolve() / 'workspaces') in out.read_text()
+    if sys.platform != 'win32':  # NTFS has no POSIX mode bits
+        assert stat.S_IMODE(out.stat().st_mode) == 0o600
+        assert stat.S_IMODE((root / 'workspaces').stat().st_mode) == 0o700
+    # The config quotes paths as JSON strings (valid YAML), so Windows backslashes appear escaped.
+    assert f"dir: {json.dumps(str(root.resolve() / 'workspaces'))}" in out.read_text()
     with pytest.raises(Conflict, match='identity database'):
         replication.write_config(tmp_path / 'empty', ReplicationSettings.from_env(S3_ENV), out)
 
@@ -231,7 +236,8 @@ def test_status_reports_pending_orphaned_and_non_wal_databases(tmp_path):
 # Restore
 
 def fake_litestream(tmp_path: Path, sources: dict[str, Path], calls: list) -> Litestream:
-    binary = tmp_path / 'bin' / 'litestream'
+    # shutil.which only accepts a PATHEXT extension on Windows, as for the real litestream.exe.
+    binary = tmp_path / 'bin' / ('litestream.exe' if sys.platform == 'win32' else 'litestream')
     binary.parent.mkdir()
     binary.write_text('#!/bin/sh\nexit 0\n')
     binary.chmod(0o755)
@@ -241,7 +247,7 @@ def fake_litestream(tmp_path: Path, sources: dict[str, Path], calls: list) -> Li
         if command[1] == 'version':
             return subprocess.CompletedProcess(command, 0, 'v0.5.17\n', '')
         output, database = Path(command[command.index('-o') + 1]), command[-1]
-        relative = next(rel for rel in sources if database.endswith(rel))
+        relative = next(rel for rel in sources if Path(database).as_posix().endswith(rel))
         if sources[relative] is None:
             return subprocess.CompletedProcess(command, 0, '', '')
         if sources[relative] == 'fail':
@@ -273,7 +279,8 @@ def test_restore_rebuilds_a_server_from_the_replica(tmp_path):
     with sqlite3.connect(destination / 'workspaces' / TEAM_KEY / 'memory.db') as db:
         assert [row[0] for row in db.execute('SELECT x FROM t')] == [1, 2, 3]
     assert not (destination / 'workspaces' / f'personal_{HEX}').exists()
-    assert stat.S_IMODE((destination / 'identity.db').stat().st_mode) == 0o600
+    if sys.platform != 'win32':  # NTFS has no POSIX mode bits
+        assert stat.S_IMODE((destination / 'identity.db').stat().st_mode) == 0o600
     marker = json.loads((destination / 'restored-from.json').read_text())
     assert marker['timestamp'] == '2026-09-25T14:30:00Z' and marker['replica'] == replica.as_uri()
     identity_call = calls[0]
@@ -495,3 +502,13 @@ def test_cli_refuses_replication_commands_on_postgres(tmp_path, monkeypatch, cap
     with pytest.raises(SystemExit) as exit_info:
         team_cli.main()
     assert exit_info.value.code == 1 and 'PostgreSQL tooling' in capsys.readouterr().err
+
+
+def test_directory_replica_url_maps_to_a_local_path(monkeypatch):
+    # Regression: file:///C:/srv parsed to "/C:/srv", an invalid path on Windows, so
+    # `replication init-bucket` and every directory replica failed there.
+    import nturl2path
+
+    assert ReplicationSettings(url='file:///srv/tam%20replica').directory == Path('/srv/tam replica')
+    monkeypatch.setattr(replication, 'url2pathname', nturl2path.url2pathname)
+    assert str(ReplicationSettings(url='file:///C:/srv/tam%20replica').directory) == 'C:\\srv\\tam replica'

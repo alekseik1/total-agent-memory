@@ -142,7 +142,7 @@ Either:
 
 ### New MCP tools in v8.0
 
-Quick reference — see full docs in [MCP tools reference](tools.md#mcp-tools-reference-77-tools):
+Quick reference — see full docs in [MCP tools reference](tools.md#mcp-tools-reference-79-tools):
 
 | Tool | Purpose |
 |---|---|

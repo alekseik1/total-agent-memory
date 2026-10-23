@@ -34,10 +34,12 @@ def seeded(store_backend, tmp_path, monkeypatch):  # noqa: F811 — pytest fixtu
         "Deploys run through Docker Compose with health checks",
     ):
         store.save_knowledge("s1", "fact", text, project="usage")
+    recall = server.Recall(store)
     try:
-        yield store, server.Recall(store)
+        yield store, recall
     finally:
         try:
+            recall.close()
             store.db.close()
         except Exception:
             pass
@@ -56,6 +58,7 @@ def test_search_records_usage_by_default(seeded):
     store, recall = seeded
     assert sum(_counts(store)) == 0
     recall.search(query="UUID v7 primary keys", project="usage", limit=5)
+    recall.flush_usage()
     assert sum(_counts(store)) > 0, "spaced repetition stopped working"
 
 
@@ -68,6 +71,7 @@ def test_record_usage_false_leaves_counters_untouched(seeded):
             limit=5,
             record_usage=False,
         )
+    recall.flush_usage()
     assert sum(_counts(store)) == 0
 
 
@@ -99,6 +103,7 @@ def test_explain_search_does_not_mutate_counters(seeded, monkeypatch):
     asyncio.run(
         server._do("memory_explain_search", {"query": "RabbitMQ", "project": "usage"})
     )
+    recall.flush_usage()
     assert sum(_counts(store)) == 0
 
 

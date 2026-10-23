@@ -1,0 +1,95 @@
+{
+ "bench": "locomo",
+ "split": "test",
+ "limit": 0,
+ "cross_rerank": "off",
+ "search_limit": 50,
+ "entity_graph": false,
+ "graph": [],
+ "configs": {
+  "default": [
+   {
+    "fts": 1.0,
+    "semantic": 1.2,
+    "hyde": 1.0,
+    "multi_repr": 1.0,
+    "fuzzy": 0.5,
+    "graph": 0.3,
+    "episode": 0.9,
+    "atomic_facts": 1.0,
+    "directives": 1.0,
+    "multi_query": 0.0,
+    "query_entity": 0.0
+   },
+   {}
+  ]
+ },
+ "results": {
+  "default": {
+   "all": {
+    "n": 1153,
+    "R@1": 0.314,
+    "R@5": 0.5863,
+    "R@10": 0.6722,
+    "MRR": 0.439
+   },
+   "multi-hop": {
+    "n": 208,
+    "R@1": 0.2067,
+    "R@5": 0.4519,
+    "R@10": 0.5721,
+    "MRR": 0.327
+   },
+   "open-domain": {
+    "n": 73,
+    "R@1": 0.0959,
+    "R@5": 0.3562,
+    "R@10": 0.3973,
+    "MRR": 0.2143
+   },
+   "single-hop": {
+    "n": 641,
+    "R@1": 0.3448,
+    "R@5": 0.6427,
+    "R@10": 0.7192,
+    "MRR": 0.4773
+   },
+   "temporal": {
+    "n": 231,
+    "R@1": 0.3939,
+    "R@5": 0.6234,
+    "R@10": 0.7186,
+    "MRR": 0.5045
+   },
+   "tier_fired": {
+    "fts": 1.0,
+    "semantic": 1.0,
+    "hyde": 0.0,
+    "multi_repr": 0.0,
+    "fuzzy": 0.0,
+    "graph": 0.0,
+    "episode": 0.0,
+    "atomic_facts": 0.0,
+    "directives": 0.0,
+    "multi_query": 0.0,
+    "query_entity": 0.0
+   },
+   "latency_ms": {
+    "p50": 26.2,
+    "p95": 37.2
+   },
+   "coverage@10": 0.5985,
+   "compound": {
+    "n": 3,
+    "coverage@5": 0.6667,
+    "coverage@10": 0.6667
+   },
+   "fired": {
+    "compound": 3,
+    "historical": 8,
+    "fts_damped": 0
+   }
+  }
+ },
+ "seconds": 33.8
+}

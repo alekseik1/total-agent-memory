@@ -55,7 +55,8 @@ def test_redact_cleans_rows_json_fts_and_logs_after_a_private_backup(old_install
     result = stored_secrets.redact(old_install)
     assert result["tables"]["knowledge"] == 1 and result["raw_logs"] == 1
     backup = Path(result["backup"])
-    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    if sys.platform != "win32":  # NTFS has no POSIX modes; the profile ACL protects the file
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
     assert STRIPE.encode() in backup.read_bytes()
 
     db = sqlite3.connect(old_install / "memory.db")

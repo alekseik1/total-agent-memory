@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="bare bash resolves to the WSL stub on Windows; the .sh hooks are POSIX-only")
 
 HOOK_PATH = (
     Path(__file__).resolve().parent.parent / "hooks" / "post-tool-use.sh"

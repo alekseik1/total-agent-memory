@@ -1,5 +1,8 @@
 """Entry point for pip-installed package: `tam setup` runs the wizard, `tam report` prints an activity report,
-`tam redact-existing` finds and redacts stored credentials, anything else starts src/server.py."""
+`tam daemon start|stop|status|restart` manages the shared warm daemon, `tam proxy` is its stdio front end,
+`tam redact-existing` finds and redacts stored credentials, `tam import` imports chat exports and notes,
+`tam export --encrypted` / `tam import-bundle` move the store between machines, `tam forget-auto` deletes the
+records hooks saved on their own, anything else starts src/server.py."""
 
 import importlib.util
 import os
@@ -43,6 +46,31 @@ def _report_cli():
     return cli
 
 
+def _portable_cli(command):
+    """`tam import` (chat/notes importers), `tam export --encrypted` and `tam import-bundle`."""
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
+    if command == "import":
+        from importers import cli
+        return cli.main
+    import portable_export
+    return portable_export.main_export if command == "export" else portable_export.main_import
+
+
+def _daemon_cli():
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
+    from tam_daemon import cli
+    return cli
+
+
+def _forget_auto_cli():
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
+    from ambient import forget
+    return forget
+
+
 def _adopt_existing_install():
     if _src not in sys.path:
         sys.path.insert(0, _src)
@@ -60,7 +88,15 @@ def main_sync():
             sys.path.insert(0, _src)
         import stored_secrets
         sys.exit(stored_secrets.main(argv[1:]))
+    if argv[:1] == ["daemon"]:
+        sys.exit(_daemon_cli().main(argv[1:]))
     _adopt_existing_install()
+    if argv[:1] in (["import"], ["export"], ["import-bundle"]):
+        sys.exit(_portable_cli(argv[0])(argv[1:]))
+    if argv[:1] == ["forget-auto"]:
+        sys.exit(_forget_auto_cli().main(argv[1:]))
+    if argv[:1] == ["proxy"]:
+        sys.exit(_daemon_cli().proxy_main(argv[1:]))
     if argv[:2] == ["setup", "register"]:
         from setup_wizard import register
         sys.exit(register.main(argv[2:]))

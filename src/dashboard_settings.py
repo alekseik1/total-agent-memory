@@ -129,6 +129,7 @@ const GROUPS = [
   ["embed", "Embeddings", "Turns records into vectors. Changing provider or model makes stored vectors incompatible until re-embedded."],
   ["recall", "Search answers", "What agents receive from memory_recall."],
   ["storage", "Storage", "Where files live and how long call logs are kept."],
+  ["agent", "Agent interface", "Which tools agents see, the guide they get on connect and per-tool statistics."],
 ];
 const SOURCE = {web: "Set here", env: "From environment", default: "Default"};
 const pending = new Map();

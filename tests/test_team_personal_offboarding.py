@@ -89,7 +89,8 @@ async def test_export_writes_records_and_history_for_a_disabled_user_only(compan
     registry.set_active('leaver', False)
     result = cli(registry.root, 'user-export', 'leaver', '--out', str(out))
     assert result.returncode == 0, result.stderr
-    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    if sys.platform != 'win32':  # NTFS has no POSIX mode bits
+        assert stat.S_IMODE(out.stat().st_mode) == 0o600
     lines = [json.loads(line) for line in out.read_text().splitlines()]
     header, records = lines[0], [line['record'] for line in lines if line['type'] == 'record']
     history = [line['event'] for line in lines if line['type'] == 'history']

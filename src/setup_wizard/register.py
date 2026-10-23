@@ -29,7 +29,11 @@ def parser() -> argparse.ArgumentParser:
                                 description="Register the local memory server with MCP clients (for installers).")
     p.add_argument("--client", action="append", required=True, choices=[c.id for c in clients.CLIENTS])
     p.add_argument("--memory-dir", type=Path, help="default: TAM_MEMORY_DIR or ~/.tam")
-    p.add_argument("--command", help="server command; default: this installation's total-agent-memory")
+    launch = p.add_mutually_exclusive_group()
+    launch.add_argument("--command", help="server command; default: this installation's total-agent-memory")
+    launch.add_argument("--shared-daemon", action="store_true",
+                        help="register `tam proxy`: every client session shares one warm daemon "
+                             "(opt-in; see docs/shared-daemon.md)")
     p.add_argument("--arg", action="append", default=[], help="server argument (repeatable)")
     p.add_argument("--env", action="append", default=[], metavar="KEY=VALUE", help="extra server env (repeatable)")
     p.add_argument("--hooks", action=argparse.BooleanOptionalAction, default=None,
@@ -56,6 +60,8 @@ def _entry(client: clients.Client, host: clients.Host, args: argparse.Namespace,
     env.update({"TAM_MEMORY_DIR": str(memory_dir), **_env(args.env)})
     if args.command:
         return clients.ServerEntry(args.command, tuple(args.arg), env)
+    if args.shared_daemon:
+        return clients.proxy_entry(env)
     return clients.server_entry(env)
 
 
@@ -70,7 +76,7 @@ def register(args: argparse.Namespace, environ: Mapping[str, str], host: clients
         private = any(hint in key.upper() for key in entry.env for hint in SECRET_HINTS)
         changes.append(clients.plan(client, entry, host, private, root))
     hooks = args.hooks if args.hooks is not None else "claude-code" in ids
-    hook_plan = extras.plan_hooks(root, host, args.overwrite_hooks) \
+    hook_plan = extras.plan_hooks(root, host, args.overwrite_hooks, memory_dir) \
         if hooks and "claude-code" in ids and extras.hooks_available(root, host) else None
     copies = extras.skill_copies(root, host, ids) if args.skills else []
     with deferred_interrupts():

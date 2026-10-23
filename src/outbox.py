@@ -20,6 +20,12 @@ The reconciler runs in Store.__init__ after migrations apply. It picks up
 genuinely in-flight saves not to be stomped on), parses the payload, and
 calls a replay function the caller injects. The replay must be idempotent
 under content_hash dedup; save_knowledge already is.
+
+Concurrency (migration 039): ``claim_pending`` leases intents atomically
+(``lease_until``), so two reconcilers never replay the same intent; an
+expired lease (crashed reconciler) is claimable again. Before replaying,
+``find_existing_by_hash`` detects a record that was inserted by a save that
+crashed before ``mark_committed`` and closes the intent without a replay.
 """
 
 from __future__ import annotations
@@ -29,17 +35,23 @@ import json
 import os
 import sys
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable, Iterable
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
-from memory_core.timestamps import utc_now
+from memory_core.timestamps import format_utc, utc_now
 
 LOG = lambda msg: sys.stderr.write(f"[outbox] {msg}\n")
 
 _DEFAULT_GRACE_SECONDS = 60
 _DEFAULT_MAX_ATTEMPTS = 3
 _DEFAULT_RECONCILE_LIMIT = 50
+# Longer than a replay can take (save_knowledge incl. embedding retries).
+_DEFAULT_LEASE_SECONDS = 600
+# save_knowledge stamps the knowledge row before it opens the intent; candidates
+# for find_existing_by_hash may be this much older than the intent.
+_CREATED_AT_SLACK_SECONDS = 300
 
 
 # ──────────────────────────────────────────────
@@ -204,61 +216,120 @@ def mark_failed(db, intent: WriteIntent | None, error: str) -> None:
         LOG(f"mark_failed({intent.id}) failed: {exc}")
 
 
+def _lease_seconds() -> int:
+    raw = os.environ.get("MEMORY_OUTBOX_LEASE_SEC")
+    if not raw:
+        return _DEFAULT_LEASE_SECONDS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _DEFAULT_LEASE_SECONDS
+
+
+def _iso_at(offset_seconds: float) -> str:
+    return format_utc(datetime.now(timezone.utc) + timedelta(seconds=offset_seconds))
+
+
+def _shift(stamp: str | None, offset_seconds: float) -> str:
+    """Canonical ``stamp`` moved by ``offset_seconds``; "" (matches everything) when absent."""
+    if not stamp:
+        return ""
+    moment = datetime.fromisoformat(stamp)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return format_utc(moment + timedelta(seconds=offset_seconds))
+
+
+def _row_to_intent(row) -> WriteIntent:
+    try:
+        payload = json.loads(row[4]) if row[4] else {}
+    except (TypeError, ValueError) as exc:
+        LOG(f"intent {row[1]}: unreadable payload ({exc}); replay will fail and count an attempt")
+        payload = {}
+    return WriteIntent(
+        id=row[0], intent_uuid=row[1], session_id=row[2],
+        content_hash=row[3], payload=payload, status=row[5],
+        knowledge_id=row[6], attempts=row[7], last_error=row[8],
+        created_at=row[9], updated_at=row[10], committed_at=row[11],
+    )
+
+
 def claim_pending(
-    db, *, grace_seconds: int | None = None, limit: int | None = None
+    db, *, grace_seconds: int | None = None, limit: int | None = None,
+    lease_seconds: int | None = None,
 ) -> list[WriteIntent]:
-    """Return pending intents older than the grace window."""
+    """Atomically lease pending intents older than the grace window.
+
+    One ``UPDATE ... RETURNING`` sets ``lease_until`` on up to ``limit``
+    intents whose lease is absent or expired; the outer WHERE repeats that
+    condition, so a concurrent reconciler (serialized by SQLite's write lock,
+    or re-checked by PostgreSQL after the row lock) cannot claim the same
+    intent. A reconciler that dies mid-replay leaves an expired lease behind
+    and the intent becomes claimable again after ``lease_seconds``.
+    """
     grace = _grace_seconds() if grace_seconds is None else grace_seconds
     cap = limit if limit is not None else _DEFAULT_RECONCILE_LIMIT
-    cutoff = (
-        datetime.now(timezone.utc).timestamp() - grace
-    )
-    cutoff_iso = (
-        datetime.fromtimestamp(cutoff, tz=timezone.utc)
-        .isoformat().replace("+00:00", "Z")
-    )
+    lease = _lease_seconds() if lease_seconds is None else lease_seconds
+    now_iso = _iso_at(0)
+    cutoff_iso = _iso_at(-grace)
+    lease_iso = _iso_at(lease)
     try:
         rows = db.execute(
-            """SELECT id, intent_uuid, session_id, content_hash, payload_json,
-                       status, knowledge_id, attempts, last_error,
-                       created_at, updated_at, committed_at
-                 FROM write_intents
-                WHERE status = 'pending' AND created_at < ?
-                ORDER BY created_at ASC LIMIT ?""",
-            (cutoff_iso, cap),
+            """UPDATE write_intents SET lease_until = ?, updated_at = ?
+                WHERE id IN (
+                    SELECT id FROM write_intents
+                     WHERE status = 'pending' AND created_at < ?
+                       AND (lease_until IS NULL OR lease_until < ?)
+                     ORDER BY created_at ASC, id ASC LIMIT ?)
+                  AND status = 'pending'
+                  AND (lease_until IS NULL OR lease_until < ?)
+            RETURNING id, intent_uuid, session_id, content_hash, payload_json,
+                      status, knowledge_id, attempts, last_error,
+                      created_at, updated_at, committed_at""",
+            (lease_iso, now_iso, cutoff_iso, now_iso, cap, now_iso),
         ).fetchall()
-    except Exception as exc:
-        LOG(f"claim_pending query failed: {exc}")
-        return []
-
-    results: list[WriteIntent] = []
-    for row in rows:
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 — reconcile is best-effort; the next start retries
         try:
-            payload = json.loads(row[4]) if row[4] else {}
-        except Exception:
-            payload = {}
-        results.append(
-            WriteIntent(
-                id=row[0], intent_uuid=row[1], session_id=row[2],
-                content_hash=row[3], payload=payload, status=row[5],
-                knowledge_id=row[6], attempts=row[7], last_error=row[8],
-                created_at=row[9], updated_at=row[10], committed_at=row[11],
-            )
-        )
-    return results
+            db.rollback()
+        except Exception as rollback_exc:  # noqa: BLE001 — report both, keep the original
+            LOG(f"claim_pending rollback failed: {rollback_exc}")
+        LOG(f"claim_pending failed: {exc}")
+        return []
+    return sorted((_row_to_intent(row) for row in rows), key=lambda i: (i.created_at, i.id))
 
 
-def find_existing_by_hash(db, content_hash: str) -> int | None:
-    """Look for a knowledge record whose content_hash already matches —
-    means the previous save committed to `knowledge` even if the intent
-    didn't get marked. Reconciler uses this to avoid double-inserts.
+def find_existing_by_hash(
+    db, content_hash: str, payload: Mapping[str, Any], *, since: str | None = None,
+) -> int | None:
+    """Id of a knowledge row this intent already produced, or None.
 
-    Implementation hits the dedup path indirectly: we re-derive the hash
-    on the fly from `knowledge` rows of the same content. SQLite is happy
-    to answer this in one row scan because content_hash is not stored
-    separately — we filter by status + project + type + content textual
-    equality on the rare reconcile path."""
-    return None  # see note in reconcile_pending below
+    Covers a crash after the INSERT but before ``mark_committed``: replaying
+    would insert the record a second time. Candidates come from the
+    ``idx_knowledge_neighbors`` index — (project, session_id) equality, rows
+    created at or after the intent — and must reproduce ``content_hash``
+    exactly (type, project and content), so a different record of the same
+    session never matches. Any status counts: a committed record that was
+    later superseded or deleted must not be resurrected by a replay.
+    """
+    content = payload.get("content")
+    ktype = payload.get("ktype")
+    project = payload.get("project") or "general"
+    session_id = payload.get("sid")
+    if not content or not ktype or session_id is None:
+        return None
+    if compute_content_hash(content, ktype, project) != content_hash:
+        return None
+    rows = db.execute(
+        """SELECT id, type, project, content FROM knowledge
+            WHERE project = ? AND session_id = ? AND created_at >= ?
+            ORDER BY created_at, id""",
+        (project, session_id, _shift(since, -_CREATED_AT_SLACK_SECONDS)),
+    ).fetchall()
+    for row in rows:
+        if compute_content_hash(row[3], row[1], row[2]) == content_hash:
+            return int(row[0])
+    return None
 
 
 def reconcile_pending(
@@ -267,17 +338,27 @@ def reconcile_pending(
     *,
     grace_seconds: int | None = None,
     limit: int | None = None,
+    lease_seconds: int | None = None,
+    on_recovered: Callable[[int], None] | None = None,
 ) -> dict[str, int]:
     """Walk pending intents, replay each via `replay_fn(payload)`.
+
+    Intents are leased first (``claim_pending``), so concurrent reconcilers
+    split the work instead of replaying the same intent twice. Before a
+    replay, ``find_existing_by_hash`` checks whether the record was already
+    inserted; if so the intent is closed as committed without a replay and
+    ``on_recovered(knowledge_id)`` lets the caller finish side effects the
+    crash may have skipped (e.g. queue a missing embedding).
 
     `replay_fn` should call save_knowledge(**payload, _from_outbox=True)
     and return the committed knowledge_id (or None on dedup). It must
     raise on hard failures so we can record `attempts`.
 
-    Returns counts of {replayed, dedup, failed, skipped}.
+    Returns counts of {replayed, dedup, failed, skipped, recovered}.
     """
-    counts = {"replayed": 0, "dedup": 0, "failed": 0, "skipped": 0}
-    pending = claim_pending(db, grace_seconds=grace_seconds, limit=limit)
+    counts = {"replayed": 0, "dedup": 0, "failed": 0, "skipped": 0, "recovered": 0}
+    pending = claim_pending(db, grace_seconds=grace_seconds, limit=limit,
+                            lease_seconds=lease_seconds)
     if not pending:
         return counts
 
@@ -286,6 +367,24 @@ def reconcile_pending(
             mark_failed(db, intent, "max attempts already reached")
             counts["failed"] += 1
             counts["skipped"] += 1
+            continue
+
+        try:
+            existing = find_existing_by_hash(db, intent.content_hash, intent.payload,
+                                             since=intent.created_at)
+        except Exception as exc:  # noqa: BLE001 — counted as a failed attempt
+            LOG(f"find_existing_by_hash failed for intent {intent.intent_uuid}: {exc}")
+            mark_failed(db, intent, f"existence check failed: {exc}")
+            counts["failed"] += 1
+            continue
+        if existing is not None:
+            mark_committed(db, intent, existing)
+            counts["recovered"] += 1
+            if on_recovered is not None:
+                try:
+                    on_recovered(existing)
+                except Exception as exc:  # noqa: BLE001 — caller hook must not stop the reconcile
+                    LOG(f"on_recovered({existing}) failed: {exc}")
             continue
 
         try:

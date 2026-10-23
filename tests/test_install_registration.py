@@ -24,6 +24,11 @@ from setup_wizard.upgrade import adopt_existing
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = str(ROOT / "src" / "server.py")
 
+posix_installer = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="install.sh is the POSIX installer; Windows uses install.ps1 (tests/test_windows_installer_runtime.py)",
+)
+
 
 def _host(home: Path) -> clients.Host:
     return clients.Host(home, platform.system(), {"XDG_CONFIG_HOME": str(home / ".config")}, lambda _b: None)
@@ -60,6 +65,7 @@ def _assert_entry(entry: dict, home: Path) -> None:
     assert entry["env"]["TAM_MEMORY_DIR"] == str((home / ".tam").resolve())
 
 
+@posix_installer
 @pytest.mark.parametrize("ide", [c.id for c in clients.CLIENTS])
 def test_install_writes_the_file_each_client_reads(home: Path, ide: str):
     result = _install(home, "--ide", ide)
@@ -100,6 +106,7 @@ def test_install_writes_the_file_each_client_reads(home: Path, ide: str):
     assert record["mode"] == "personal" and record["source"] == "installer" and ide in record["personal"]["clients"]
 
 
+@posix_installer
 def test_second_install_adds_the_client_to_the_record(home: Path):
     assert _install(home, "--ide", "claude-code").returncode == 0
     assert _install(home, "--ide", "cursor").returncode == 0
@@ -108,6 +115,7 @@ def test_second_install_adds_the_client_to_the_record(home: Path):
     assert "memory" in _json(home / ".claude.json")["mcpServers"]
 
 
+@posix_installer
 def test_installer_keeps_keys_set_by_the_wizard_and_replaces_npm_entry(home: Path):
     cursor = home / ".cursor" / "mcp.json"
     cursor.parent.mkdir()
@@ -124,6 +132,7 @@ def test_installer_keeps_keys_set_by_the_wizard_and_replaces_npm_entry(home: Pat
     assert oct(cursor.stat().st_mode & 0o777) == "0o600"
 
 
+@posix_installer
 def test_codex_npm_table_is_replaced_by_the_fenced_block(home: Path):
     config = home / ".codex" / "config.toml"
     config.parent.mkdir()
@@ -134,6 +143,7 @@ def test_codex_npm_table_is_replaced_by_the_fenced_block(home: Path):
     assert set(data["mcp_servers"]) == {"memory"} and data["other"] == {"x": 1}
 
 
+@posix_installer
 def test_broken_config_fails_the_install_and_is_left_alone(home: Path):
     cursor = home / ".cursor" / "mcp.json"
     cursor.parent.mkdir()
@@ -144,6 +154,7 @@ def test_broken_config_fails_the_install_and_is_left_alone(home: Path):
     assert not (home / ".tam" / "setup.json").exists()
 
 
+@posix_installer
 def test_aider_refuses_to_merge_into_an_existing_read_list(home: Path):
     conf = home / ".aider.conf.yml"
     conf.write_text("read:\n  - CONVENTIONS.md\n")
@@ -157,6 +168,7 @@ def test_aider_refuses_to_merge_into_an_existing_read_list(home: Path):
     assert text.startswith("model: gpt-4.1\n") and text.count("read:") == 1
 
 
+@posix_installer
 def test_overwrite_hooks_env_is_passed_through(home: Path):
     assert _install(home, "--ide", "claude-code").returncode == 0
     hook = home / ".claude" / "hooks" / "session-start.sh"
@@ -167,6 +179,7 @@ def test_overwrite_hooks_env_is_passed_through(home: Path):
     assert "exit 99" not in hook.read_text()
 
 
+@posix_installer
 def test_unregister_removes_entry_and_hooks_but_keeps_user_hooks(home: Path):
     assert _install(home, "--ide", "claude-code").returncode == 0
     settings = home / ".claude" / "settings.json"

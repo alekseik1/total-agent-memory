@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="bare bash resolves to the WSL stub on Windows; the .sh hooks are POSIX-only")
 
 HOOK_PATH = Path(__file__).parent.parent / "hooks" / "user-prompt-submit.sh"
 REPO_ROOT = Path(__file__).parent.parent

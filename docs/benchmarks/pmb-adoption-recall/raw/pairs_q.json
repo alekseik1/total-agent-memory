@@ -1,0 +1,138 @@
+{
+ "bench": "locomo",
+ "split": "test",
+ "limit": 0,
+ "cross_rerank": "off",
+ "search_limit": 10,
+ "entity_graph": false,
+ "graph": [],
+ "configs": {
+  "slots_off": [
+   {
+    "fts": 1.0,
+    "semantic": 1.2,
+    "hyde": 1.0,
+    "multi_repr": 1.0,
+    "fuzzy": 0.5,
+    "graph": 0.3,
+    "episode": 0.9,
+    "atomic_facts": 1.0,
+    "directives": 1.0,
+    "multi_query": 0.0,
+    "query_entity": 0.0
+   },
+   {
+    "MEMORY_RECALL_COMPOUND_SLOTS": "off"
+   }
+  ],
+  "slots_on": [
+   {
+    "fts": 1.0,
+    "semantic": 1.2,
+    "hyde": 1.0,
+    "multi_repr": 1.0,
+    "fuzzy": 0.5,
+    "graph": 0.3,
+    "episode": 0.9,
+    "atomic_facts": 1.0,
+    "directives": 1.0,
+    "multi_query": 0.0,
+    "query_entity": 0.0
+   },
+   {
+    "MEMORY_RECALL_COMPOUND_SLOTS": "on"
+   }
+  ]
+ },
+ "results": {
+  "slots_off": {
+   "all": {
+    "n": 318,
+    "R@1": 0.4025,
+    "R@5": 0.7484,
+    "R@10": 0.8019,
+    "MRR": 0.5413
+   },
+   "pair-question": {
+    "n": 318,
+    "R@1": 0.4025,
+    "R@5": 0.7484,
+    "R@10": 0.8019,
+    "MRR": 0.5413
+   },
+   "tier_fired": {
+    "fts": 1.0,
+    "semantic": 1.0,
+    "hyde": 0.0,
+    "multi_repr": 0.0,
+    "fuzzy": 0.0,
+    "graph": 0.0,
+    "episode": 0.0,
+    "atomic_facts": 0.0,
+    "directives": 0.0,
+    "multi_query": 0.0,
+    "query_entity": 0.0
+   },
+   "latency_ms": {
+    "p50": 40.3,
+    "p95": 61.0
+   },
+   "coverage@10": 0.5829,
+   "compound": {
+    "n": 0,
+    "coverage@5": 0.0,
+    "coverage@10": 0.0
+   },
+   "fired": {
+    "compound": 0,
+    "historical": 4,
+    "fts_damped": 0
+   }
+  },
+  "slots_on": {
+   "all": {
+    "n": 318,
+    "R@1": 0.4025,
+    "R@5": 0.7484,
+    "R@10": 0.8522,
+    "MRR": 0.5465
+   },
+   "pair-question": {
+    "n": 318,
+    "R@1": 0.4025,
+    "R@5": 0.7484,
+    "R@10": 0.8522,
+    "MRR": 0.5465
+   },
+   "tier_fired": {
+    "fts": 1.0,
+    "semantic": 1.0,
+    "hyde": 0.0,
+    "multi_repr": 0.0,
+    "fuzzy": 0.0,
+    "graph": 0.0,
+    "episode": 0.0,
+    "atomic_facts": 0.0,
+    "directives": 0.0,
+    "multi_query": 0.0,
+    "query_entity": 0.0
+   },
+   "latency_ms": {
+    "p50": 62.5,
+    "p95": 87.5
+   },
+   "coverage@10": 0.6292,
+   "compound": {
+    "n": 318,
+    "coverage@5": 0.522,
+    "coverage@10": 0.6292
+   },
+   "fired": {
+    "compound": 318,
+    "historical": 4,
+    "fts_damped": 0
+   }
+  }
+ },
+ "seconds": 39.1
+}

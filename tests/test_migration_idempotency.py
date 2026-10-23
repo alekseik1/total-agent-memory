@@ -381,3 +381,12 @@ def test_no_column_is_added_by_both_python_and_sql_migrations():
         f"{sorted(overlap)} added by both Store._migrate() and a SQL migration — "
         "whichever runs second will fail on a fresh database"
     )
+
+
+def test_migration_version_prefixes_are_unique():
+    # The runner records only the numeric prefix, so a second file with the same
+    # prefix (two branches both adding 038_*) would be skipped forever, silently.
+    stems = sorted(p.stem for p in (ROOT / "migrations").glob("*.sql"))
+    versions = [stem.split("_", 1)[0] for stem in stems]
+    duplicates = sorted({v for v in versions if versions.count(v) > 1})
+    assert not duplicates, [s for s in stems if s.split("_", 1)[0] in duplicates]

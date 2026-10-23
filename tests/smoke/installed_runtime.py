@@ -154,7 +154,9 @@ class Scenario:
                 finally:
                     process.stdout.close()
                     reader.shutdown(wait=True)
-            assert process.returncode == 0, process.returncode
+            if process.returncode != 0:
+                errors.seek(0)
+                raise AssertionError(f'MCP exited with {process.returncode}; stderr:\n{errors.read()}')
         assert 'protocolVersion' in replies[1]['result'], replies[1]
         assert 'error' not in replies[2], replies[2]
         assert not replies[2]['result'].get('isError'), replies[2]

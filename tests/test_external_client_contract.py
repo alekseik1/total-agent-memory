@@ -18,19 +18,27 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "src" / "server.py"
-PASSED_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "HF_HOME", "FASTEMBED_CACHE_PATH")
+# Windows CPython cannot open sockets without SYSTEMROOT, and Path.home() reads USERPROFILE, not HOME.
+PASSED_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "HF_HOME", "FASTEMBED_CACHE_PATH",
+              "SYSTEMROOT", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP")
 
 FACTS = [
     "The chief executive officer of Microsoft is Satya Nadella",
     "The capital of Tang Empire is Chang'an",
     "The chief executive officer of Microsoft is Steve Jobs",
 ]
+# Generous for a cold CI runner; a server that ignores SIGTERM never exits at all.
+SIGTERM_EXIT_TIMEOUT_SEC = 30
 
 
 class StdioClient:
@@ -71,7 +79,7 @@ class StdioClient:
     def close(self) -> None:
         self.proc.stdin.close()
         self.proc.terminate()
-        self.proc.wait(timeout=30)
+        self.proc.wait(timeout=SIGTERM_EXIT_TIMEOUT_SEC)
 
 
 def test_memoryagentbench_adapter_contract(tmp_path):
@@ -98,3 +106,31 @@ def test_memoryagentbench_adapter_contract(tmp_path):
         assert by_content[FACTS[0]]["created_at"] < by_content[FACTS[2]]["created_at"]
     finally:
         client.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_sigterm_stops_the_server_while_stdin_stays_open(tmp_path):
+    # Regression: SIGTERM became a SystemExit, and interpreter shutdown then joined
+    # the stdin reader thread, which never returns while the client holds the pipe.
+    client = StdioClient(tmp_path)
+    try:
+        client.request("initialize", {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "memoryagentbench", "version": "1"},
+        })
+        client.notify("notifications/initialized")
+        client.call("memory_save", {"content": FACTS[0], "type": "fact", "project": "mab"})
+        client.proc.terminate()
+        assert client.proc.wait(timeout=SIGTERM_EXIT_TIMEOUT_SEC) == 128 + signal.SIGTERM
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
+            client.proc.wait()
+        client.proc.stdin.close()
+        client.proc.stdout.close()
+    conn = sqlite3.connect(tmp_path / "memory.db")
+    try:
+        tools = [tool for (tool,) in conn.execute("SELECT tool FROM tool_calls")]
+    finally:
+        conn.close()
+    assert tools == ["memory_save"], "exit hooks must still flush buffered tool telemetry"

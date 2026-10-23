@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -15,6 +17,15 @@ import pytest
 
 ROOT = Path(__file__).parent.parent
 SCRIPT = ROOT / "scripts" / "dashboard-service.sh"
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="scripts/dashboard-service.sh is a bash script managing launchd/systemd/profile units; Windows has no POSIX dashboard service",
+)
+# Cold interpreter start plus the dashboard's import chain (pydantic, cryptography) on a CI runner.
+DASHBOARD_READY_TIMEOUT = 10.0
+# /status runs a launchctl probe and DB counts; one request must still answer well inside this.
+STATUS_REQUEST_TIMEOUT = 5.0
 
 
 def _free_port() -> int:
@@ -54,12 +65,16 @@ def _run_helper(
 def _base_env(tmp_path: Path) -> dict[str, str]:
     home = tmp_path / "home"
     home.mkdir()
-    return {
+    env = {
         **os.environ,
         "HOME": str(home),
         "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
         "CTM_UNAME": "Linux",
     }
+    # The helper hands the dashboard CLAUDE_MEMORY_DIR; an inherited TAM_MEMORY_DIR
+    # (CI sets one) outranks it and would point the dashboard at a shared directory.
+    env.pop("TAM_MEMORY_DIR", None)
+    return env
 
 
 def _read(path: Path) -> str:
@@ -115,18 +130,48 @@ exec "{sys.executable}" "$@"
     )
 
 
-def _poll_status(port: int, timeout: float = 10.0) -> dict:
-    deadline = time.time() + timeout
+def _get_json(port: int, path: str, timeout: float) -> dict:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def _dashboard_output(log_dir: Path) -> str:
+    parts = []
+    for name in ("dashboard.log", "dashboard.err"):
+        path = log_dir / name
+        text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else "<missing>"
+        parts.append(f"--- {name} ---\n{text[-4000:]}")
+    return "\n".join(parts)
+
+
+def _listeners(port: int) -> str:
+    lsof = shutil.which("lsof")
+    if lsof is None:
+        return "<lsof not available>"
+    result = subprocess.run([lsof, "-nP", f"-iTCP:{port}"], capture_output=True, text=True, timeout=10)
+    return result.stdout or "<nothing on the port>"
+
+
+def _wait_until_live(port: int, log_dir: Path, pid_path: Path,
+                     timeout: float = DASHBOARD_READY_TIMEOUT) -> dict:
+    """Poll the liveness probe (no subprocess, no DB) until the dashboard answers."""
+    deadline = time.monotonic() + timeout
     last_error: Exception | None = None
-    url = f"http://127.0.0.1:{port}/status"
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=1) as resp:
-                return json.loads(resp.read())
-        except Exception as exc:  # pragma: no cover - diagnostic only
+            return _get_json(port, "/healthz", timeout=1)
+        except OSError as exc:
             last_error = exc
             time.sleep(0.1)
-    raise AssertionError(f"dashboard never became ready on port {port}: {last_error}")
+    listeners = _listeners(port)
+    if pid_path.exists():
+        # PYTHONFAULTHANDLER makes a stuck dashboard print every thread's stack to dashboard.err.
+        with contextlib.suppress(ProcessLookupError):  # it may already have exited
+            os.kill(int(pid_path.read_text(encoding="utf-8").strip()), signal.SIGABRT)
+            time.sleep(1)
+    raise AssertionError(
+        f"dashboard never became ready on port {port}: {last_error}\n--- listeners ---\n{listeners}\n"
+        f"{_dashboard_output(log_dir)}")
 
 
 def test_fallback_install_is_idempotent_and_writes_profile_hook(tmp_path):
@@ -164,7 +209,10 @@ def test_fallback_install_starts_dashboard_and_serves_status(tmp_path):
     memory_dir.mkdir()
     pid_path = tmp_path / "dashboard.pid"
     wrapper = bin_dir / "python-wrapper"
+    launchctl_log = tmp_path / "launchctl.log"
     _write_systemctl_stub(bin_dir, tmp_path / "systemctl.log", show_env_exit=1)
+    # /status lists LaunchAgents; the test must not depend on the host's launchd.
+    _write_launchctl_stub(bin_dir, launchctl_log)
     _write_exec_python_wrapper(wrapper, pid_path)
 
     env = _base_env(tmp_path)
@@ -173,21 +221,29 @@ def test_fallback_install_starts_dashboard_and_serves_status(tmp_path):
     except RuntimeError as exc:
         pytest.skip(str(exc))
     env["DASHBOARD_PORT"] = str(port)
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONFAULTHANDLER"] = "1"
 
     try:
         _run_helper("install", str(wrapper), str(ROOT), str(memory_dir), env=env)
-        status = _poll_status(port)
+        log_dir = memory_dir / "logs"
+        health = _wait_until_live(port, log_dir, pid_path)
+        assert health["db_path"] == str(memory_dir / "memory.db")
+
+        status = _get_json(port, "/status", timeout=STATUS_REQUEST_TIMEOUT)
         assert status["status"] == "running"
         assert status["port"] == port
+        assert "list" in _read(launchctl_log).split()
 
-        log_path = memory_dir / "logs" / "dashboard.log"
+        log_path = log_dir / "dashboard.log"
         deadline = time.time() + 5
         while time.time() < deadline and not log_path.exists():
             time.sleep(0.1)
         assert log_path.exists()
     finally:
         if pid_path.exists():
-            os.kill(int(pid_path.read_text(encoding="utf-8").strip()), signal.SIGTERM)
+            with contextlib.suppress(ProcessLookupError):  # the readiness probe may have aborted it
+                os.kill(int(pid_path.read_text(encoding="utf-8").strip()), signal.SIGTERM)
 
 
 def test_fallback_install_does_not_start_second_dashboard_when_port_in_use(tmp_path):

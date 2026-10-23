@@ -2,6 +2,14 @@
 """
 cm-import — Import existing documentation into Claude Memory
 
+Legacy, author-specific script: it reads fixed paths (~/.claude/rules and an
+Obsidian vault under ~/Documents/project/Projects) and writes memory.db
+directly, bypassing redaction and embedding. Use the generic importer instead:
+
+    tam import markdown <notes-dir> --project <name> [--dry-run]
+
+(also: tam import chatgpt|claude|mem0 <export.json>; see docs/importing.md).
+
 Imports:
 1. ~/.claude/rules/*.md — coding conventions per language
 2. Obsidian Projects/*/Memory.md — project memory

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,11 @@ import pytest
 ROOT = Path(__file__).parent.parent
 INSTALL_SH = ROOT / "install.sh"
 SYSTEMD_DIR = ROOT / "systemd"
+
+posix_installer = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="install.sh is the POSIX installer; Windows uses install.ps1 (tests/test_windows_installer_runtime.py)",
+)
 
 
 # ---------- helpers ----------
@@ -118,6 +124,7 @@ def test_templates_use_placeholders():
 # ---------- linux branch detection ----------
 
 
+@posix_installer
 def test_linux_branch_creates_systemd_user_files(sandbox_home: Path, tmp_path: Path):
     # systemctl stub where bus is "available" so enable runs too
     systemctl_log = tmp_path / "systemctl.log"
@@ -146,6 +153,7 @@ def test_linux_branch_creates_systemd_user_files(sandbox_home: Path, tmp_path: P
     assert not missing, f"missing units in {target}: {missing}"
 
 
+@posix_installer
 def test_linux_templates_are_substituted(sandbox_home: Path, tmp_path: Path):
     stub = _write_systemctl_stub(tmp_path / "bin", tmp_path / "systemctl.log", show_env_exit=0)
     result = _run_install(sandbox_home, "--ide", "claude-code", fake_systemctl=stub)
@@ -160,6 +168,7 @@ def test_linux_templates_are_substituted(sandbox_home: Path, tmp_path: Path):
     assert str(sandbox_home / ".tam") in dashboard, "MEMORY_DIR must be substituted to ~/.tam"
 
 
+@posix_installer
 def test_linux_enables_units_when_bus_available(sandbox_home: Path, tmp_path: Path):
     systemctl_log = tmp_path / "systemctl.log"
     stub = _write_systemctl_stub(tmp_path / "bin", systemctl_log, show_env_exit=0)
@@ -179,6 +188,7 @@ def test_linux_enables_units_when_bus_available(sandbox_home: Path, tmp_path: Pa
 # ---------- WSL2 detection + graceful fallback ----------
 
 
+@posix_installer
 def test_graceful_fallback_when_systemd_bus_unavailable(sandbox_home: Path, tmp_path: Path):
     # show-environment exits 1 → bus unavailable → install.sh should WARN
     # but still drop the files and not crash.
@@ -197,6 +207,7 @@ def test_graceful_fallback_when_systemd_bus_unavailable(sandbox_home: Path, tmp_
     assert "WARN" in combined, "user must see a warning about systemd being unavailable"
 
 
+@posix_installer
 def test_no_systemctl_available_still_stages_files(sandbox_home: Path, tmp_path: Path):
     # Stub systemctl that ALWAYS returns non-zero for show-environment AND
     # otherwise acts as if present but non-functional (simulates minimal
@@ -222,6 +233,7 @@ def test_no_systemctl_available_still_stages_files(sandbox_home: Path, tmp_path:
 # ---------- hooks copy parity on Linux ----------
 
 
+@posix_installer
 def test_linux_hooks_and_mcp_config_created_same_as_macos(sandbox_home: Path, tmp_path: Path):
     stub = _write_systemctl_stub(tmp_path / "bin", tmp_path / "systemctl.log", show_env_exit=0)
     result = _run_install(sandbox_home, "--ide", "claude-code", fake_systemctl=stub)
@@ -245,6 +257,7 @@ def test_linux_hooks_and_mcp_config_created_same_as_macos(sandbox_home: Path, tm
 # ---------- uninstall path ----------
 
 
+@posix_installer
 def test_uninstall_on_linux_removes_systemd_files(sandbox_home: Path, tmp_path: Path):
     # First install → then uninstall → files must be gone.
     systemctl_log = tmp_path / "systemctl.log"
@@ -269,6 +282,7 @@ def test_uninstall_on_linux_removes_systemd_files(sandbox_home: Path, tmp_path: 
     assert "--user disable --now claude-memory-check-updates.timer" in calls
 
 
+@posix_installer
 def test_uninstall_on_darwin_does_not_touch_systemd(sandbox_home: Path, tmp_path: Path):
     # Sanity: on macOS the Linux branch must NOT run.
     # We don't care if real launchctl exists — just that install.sh exits 0.
@@ -283,6 +297,7 @@ def test_uninstall_on_darwin_does_not_touch_systemd(sandbox_home: Path, tmp_path
 # ---------- fake_uname shields Linux-specific tests on macOS hosts ----------
 
 
+@posix_installer
 def test_fake_uname_linux_activates_linux_branch_on_darwin_host(sandbox_home: Path, tmp_path: Path):
     # Even when the real host is Darwin, FAKE_UNAME=Linux must route install.sh
     # through the Linux branch (this is the whole point of the override).

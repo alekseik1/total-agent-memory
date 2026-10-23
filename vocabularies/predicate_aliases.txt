@@ -1,0 +1,34 @@
+# Temporal KG predicate vocabulary (src/predicate_vocab.py).
+#
+# Lines starting with `#` are comments and ignored.
+# Each non-blank line is `canonical, alias1, alias2, ...`.
+# Matching is case-insensitive; spaces and hyphens are read as underscores, so
+# "Lives In" and "lives-in" are the alias "lives_in".
+#
+# temporal_kg.add_fact closes the current assertion of (subject, predicate)
+# when a new object arrives. Predicates on one line are the same relation, so
+# `city=Berlin` followed by `lives_in=Paris` supersedes Berlin. The predicate a
+# caller sent is still stored as given (display); only matching is canonical.
+#
+# Extend without editing this file: MEMORY_PREDICATE_VOCAB_EXTRA names one or
+# more extra files (os.pathsep-separated) in the same format. A form may belong
+# to one canonical only; the loader rejects conflicts.
+
+# ── Residence ───────────────────────────────────
+lives_in, city, current_city, location, residence, home_city, lives_at, based_in, resides_in, место_жительства, живет_в, живёт_в, город, проживает_в, местоположение
+
+# ── Employment ──────────────────────────────────
+works_at, job, employer, works_for, employed_by, current_employer, место_работы, работает_в, работодатель
+
+# ── Role ────────────────────────────────────────
+job_title, job_role, occupation, должность, профессия
+
+# ── Relationships ───────────────────────────────
+married_to, spouse, husband, wife, супруг, супруга, жена, муж, женат_на, замужем_за
+
+# ── Origin ──────────────────────────────────────
+citizenship, nationality, citizen_of, гражданство, национальность
+
+# ── Contact ─────────────────────────────────────
+email, email_address, e_mail, почта, электронная_почта
+phone, phone_number, telephone, mobile, телефон, номер_телефона
