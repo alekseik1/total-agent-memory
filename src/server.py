@@ -6562,7 +6562,7 @@ async def _call_tool_impl(name, args) -> tuple[list[TextContent], bool]:
     inside the result so the model can see and self-correct, rather than as a
     protocol-level error.
     """
-    failed = False
+    is_error = True  # until the call completes; a BaseException never assigns it
     started = time.perf_counter()
     args_bytes = 0
     error_class = None
@@ -6578,7 +6578,6 @@ async def _call_tool_impl(name, args) -> tuple[list[TextContent], bool]:
         r = await _do(name, args)
         content, is_error = [TextContent(type="text", text=r)], False
     except Exception as e:
-        failed = True
         LOG(f"Error in {name}: {e}")
         error_class = type(e).__name__
         content, is_error = [TextContent(type="text", text=f"Error: {e}")], True
@@ -6590,7 +6589,7 @@ async def _call_tool_impl(name, args) -> tuple[list[TextContent], bool]:
         if store is not None and getattr(store.db, "in_transaction", False):
             try:
                 store.db.rollback()
-                LOG(f"leaked transaction after {name} (ok={not failed}), rolled back")
+                LOG(f"leaked transaction after {name} (ok={not is_error}), rolled back")
             except Exception as e:
                 LOG(f"rollback after {name} failed: {e}")
     _observe_tool_call(name, started, content, is_error, error_class, args_bytes)
