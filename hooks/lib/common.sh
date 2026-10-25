@@ -16,6 +16,8 @@
 # Reading payload fields (one python spawn per hook, done here on source):
 #   hook_get '.tool_input.file_path'     -> value or empty
 #   $HOOK_EVENT $HOOK_EXIT_CODE $HOOK_ERROR_TEXT $HOOK_INTERRUPTED (normalized)
+#   $HOOK_QUIET_SUBAGENT=1 — a subagent call (payload agent_id) and
+#                            TAM_HOOKS_IN_SUBAGENTS is not 1: hint hooks stay silent
 #
 # Sending text to the model:
 #   hook_set_event PostToolUse            # default when the payload lacks hook_event_name
@@ -91,6 +93,7 @@ HOOK_EVENT=""
 HOOK_EXIT_CODE=""
 HOOK_ERROR_TEXT=""
 HOOK_INTERRUPTED="0"
+HOOK_QUIET_SUBAGENT="0"
 HOOK_FIELDS_PARSED=""
 if [ "${HOOK_PARSE_FIELDS:-1}" != "0" ] && [ -n "$HOOK_INPUT" ]; then
     HOOK_FIELD_ASSIGNMENTS=$(printf '%s' "$HOOK_INPUT" | hook_helper fields)

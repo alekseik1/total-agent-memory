@@ -91,6 +91,14 @@ reach the same log through `hooks/codex-notify.sh` (`notify = [".../hooks/codex-
 `install-docker.sh` writes) the hooks run these commands inside the container with `docker exec -i
 tam-mcp python -m ambient <command>`, forwarding the `TAM_*` settings above.
 
+Hint hooks, read from the environment only (bash hooks):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TAM_PRE_EDIT_GUARD` | on | `0` or `false` silences the PreToolUse `file_context` guard (`hooks/pre-edit.sh`). |
+| `TAM_AUTO_CAPTURE_HINT` | on | `0` or `false` silences the PostToolUse `MEMORY_HINT` (`hooks/auto-capture.sh`). |
+| `TAM_HOOKS_IN_SUBAGENTS` | _unset_ | Calls from a subagent (payload `agent_id`) get no pre-edit guard, `MEMORY_HINT`, rule reminder or `MEMORY_NUDGE`, and do not count toward the nudge; `1` restores them. Error hooks and prompt/session hooks fire as before. |
+
 ### v10 + earlier
 
 | Variable | Default | Purpose |

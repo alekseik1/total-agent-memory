@@ -222,6 +222,53 @@ class TestNudgeJson:
         assert "MEMORY_NUDGE [soft]" in context_of(outputs[2], "PostToolUse")
 
 
+SUBAGENT = {"agent_id": "a1", "agent_type": "general-purpose"}
+EDIT = {"hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_input": {"file_path": "/w/a.py"}}
+WRITE = {"hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": {"file_path": "/w/app/main.go"}}
+
+
+class TestQuietHooks:
+    @pytest.mark.parametrize("hook,payload", [("pre-edit.sh", EDIT), ("auto-capture.sh", WRITE)])
+    def test_hint_hooks_are_silent_in_subagents(self, bash, world, hook, payload):
+        proc = run_hook(bash, hook, {**payload, **SUBAGENT}, hook_env(world))
+        assert proc.returncode == 0 and proc.stdout == b""
+
+    @pytest.mark.parametrize("hook,payload,text", [
+        ("pre-edit.sh", EDIT, "file_context("), ("auto-capture.sh", WRITE, "MEMORY_HINT")])
+    def test_override_restores_hint_hooks_in_subagents(self, bash, world, hook, payload, text):
+        proc = run_hook(bash, hook, {**payload, **SUBAGENT}, hook_env(world, TAM_HOOKS_IN_SUBAGENTS="1"))
+        assert text in context_of(proc, payload["hook_event_name"])
+
+    @pytest.mark.parametrize("value", ["0", "false"])
+    @pytest.mark.parametrize("hook,payload,switch", [
+        ("pre-edit.sh", EDIT, "TAM_PRE_EDIT_GUARD"), ("auto-capture.sh", WRITE, "TAM_AUTO_CAPTURE_HINT")])
+    def test_env_switch_silences_hint_hook(self, bash, world, hook, payload, switch, value):
+        proc = run_hook(bash, hook, payload, hook_env(world, **{switch: value}))
+        assert proc.returncode == 0 and proc.stdout == b""
+
+    def test_subagent_edits_neither_nudge_nor_count(self, bash, world):
+        env = hook_env(world)
+        payload = {"hook_event_name": "PostToolUse", "tool_name": "Edit", "session_id": "sa", "cwd": "/w/proj",
+                   **SUBAGENT}
+        outputs = [run_hook(bash, "post-tool-use.sh", payload, env) for _ in range(3)]
+        assert all(proc.returncode == 0 and proc.stdout == b"" for proc in outputs)
+        assert not (world["mem"] / "state" / "nudge-sa.json").exists()
+
+    def test_override_restores_nudge_in_subagents(self, bash, world):
+        env = hook_env(world, TAM_HOOKS_IN_SUBAGENTS="1")
+        payload = {"hook_event_name": "PostToolUse", "tool_name": "Edit", "session_id": "sb", "cwd": "/w/proj",
+                   **SUBAGENT}
+        outputs = [run_hook(bash, "post-tool-use.sh", payload, env) for _ in range(3)]
+        assert "MEMORY_NUDGE [soft]" in context_of(outputs[2], "PostToolUse")
+
+    def test_error_learning_still_fires_in_subagents(self, bash, world):
+        proc = run_hook(bash, "memory-trigger.sh", {
+            "hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "cwd": str(world["tmp"] / "proj"),
+            "session_id": "s1", "tool_input": {"command": "pytest -x"}, "error": "Exit code 1\nboom",
+            **SUBAGENT}, hook_env(world))
+        assert "SELF_LEARNING_ERROR" in context_of(proc, "PostToolUseFailure")
+
+
 # ──────────────────────────────────────────────
 # Stop
 # ──────────────────────────────────────────────
