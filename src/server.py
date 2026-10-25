@@ -6930,28 +6930,53 @@ async def _do(name, a):
         # Skip for index/timeline modes — those are intentionally minimal.
         if mode_param == "search":
             try:
+                from recall_modes import _first_line
                 ce = _get_v5("cognitive", store.db)
                 cognitive_ctx = ce.on_query(a["query"], a.get("project"))
+                brief = detail_param in ("compact", "summary")
+
+                def _cut(items, key):
+                    if not brief:
+                        return items
+                    out = []
+                    for item in items:
+                        text = item.get(key)
+                        if text is not None and not isinstance(text, str):
+                            text = json.dumps(text, ensure_ascii=False)
+                        if isinstance(text, str):
+                            item = {**item, key: text[:150] + ("..." if len(text) > 150 else "")}
+                        out.append(item)
+                    return out
+
                 # Append cognitive enrichment to result
                 enrichment = {}
                 if cognitive_ctx.get("activated_concepts"):
                     enrichment["activated_concepts"] = cognitive_ctx["activated_concepts"][:10]
                 if cognitive_ctx.get("relevant_rules"):
-                    enrichment["relevant_rules"] = cognitive_ctx["relevant_rules"]
+                    enrichment["relevant_rules"] = _cut(cognitive_ctx["relevant_rules"], "content")
                 if cognitive_ctx.get("past_failures"):
-                    enrichment["past_failures"] = cognitive_ctx["past_failures"]
+                    enrichment["past_failures"] = _cut(cognitive_ctx["past_failures"], "narrative")
                 if cognitive_ctx.get("available_solutions"):
                     # Deduplicate against already-returned results
                     existing_ids = set()
                     for group in result.get("results", {}).values():
                         for item in group:
                             existing_ids.add(item.get("id"))
-                    enrichment["additional_solutions"] = [
+                    # The engine's concept-activation path ignores the project.
+                    solutions = [
                         s for s in cognitive_ctx["available_solutions"]
                         if s.get("id") not in existing_ids
+                        and (not a.get("project") or s.get("project") == a["project"])
                     ][:5]
+                    if detail_param == "compact":
+                        solutions = [{"id": s["id"], "project": s["project"], "title": _first_line(s["content"])}
+                                     for s in solutions]
+                    elif detail_param == "summary":
+                        solutions = [{"id": s["id"], "project": s["project"], "content": s["content"]}
+                                     for s in _cut(solutions, "content")]
+                    enrichment["additional_solutions"] = solutions
                 if cognitive_ctx.get("applicable_skills"):
-                    enrichment["applicable_skills"] = cognitive_ctx["applicable_skills"]
+                    enrichment["applicable_skills"] = _cut(cognitive_ctx["applicable_skills"], "steps")
                 if cognitive_ctx.get("competency"):
                     enrichment["competency"] = cognitive_ctx["competency"]
                 if enrichment:
@@ -7092,6 +7117,8 @@ async def _do(name, a):
             result = evidence_response(store, recall, a, result)
         elif mode_param == "search":
             result = _without_null_hit_fields(recall_output.shape(result))
+            if "cognitive" in result:
+                result["total_tokens"] += Store._estimate_tokens(json.dumps(result["cognitive"], default=str))
         return J(result)
 
     elif name == "memory_timeline":

@@ -356,3 +356,95 @@ def test_mode_search_backward_compat(store_backend, monkeypatch, tmp_path):  # n
         s.db.close()
     except Exception:
         pass
+
+
+# ── integration: cognitive block follows detail= ──────────────
+
+_LONG = "x" * 5000
+_FAKE_COGNITIVE = {
+    "activated_concepts": [{"node_id": "n1", "activation": 0.5}],
+    "relevant_rules": [{"id": 1, "content": "rule " + _LONG}],
+    "past_failures": [{"id": 2, "narrative": "failure " + _LONG}],
+    "available_solutions": (
+        [{"id": 100 + i, "project": "demo", "content": f"Solution {i}\n" + _LONG} for i in range(6)]
+        + [{"id": 900, "project": "other", "content": "Foreign solution\n" + _LONG}]
+    ),
+    "applicable_skills": [{"id": 3, "name": "skill", "steps": ["step " + _LONG]}],
+    "competency": None,
+}
+
+
+class _FakeCognitive:
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+    def on_query(self, query, project=None):
+        return json.loads(json.dumps(self.ctx))
+
+
+def _recall_with_fake_cognitive(store_backend, monkeypatch, tmp_path, calls, ctx=_FAKE_COGNITIVE):  # noqa: F811
+    (tmp_path / "blobs").mkdir(exist_ok=True)
+    (tmp_path / "chroma").mkdir(exist_ok=True)
+
+    import server
+    monkeypatch.setattr(server, "MEMORY_DIR", tmp_path)
+    s = server.Store(database=store_backend)
+    server.store = s
+    server.recall = server.Recall(s)
+    server.SID = "sess-cognitive-1"
+    server.BRANCH = ""
+    s.db.execute(
+        "INSERT INTO sessions (id, started_at, project, status) VALUES (?, ?, ?, ?)",
+        (server.SID, "2026-04-14T00:00:00Z", "demo", "open"),
+    )
+    s.db.commit()
+    s.save_knowledge(sid=server.SID, content="Use Argon2id for password hashing in auth layer.",
+                     ktype="solution", project="demo", tags=["auth"])
+    monkeypatch.setattr(server, "_get_v5", lambda name, db: _FakeCognitive(ctx))
+    try:
+        return [json.loads(asyncio.run(server._do("memory_recall", {"query": "password hashing", **args})))
+                for args in calls]
+    finally:
+        s.db.close()
+
+
+@pytest.mark.parametrize("detail", ["compact", "summary"])
+def test_cognitive_bounded_by_detail(store_backend, monkeypatch, tmp_path, detail):  # noqa: F811
+    [out] = _recall_with_fake_cognitive(store_backend, monkeypatch, tmp_path, [{"project": "demo", "detail": detail}])
+    cog = out["cognitive"]
+    assert len(cog["relevant_rules"][0]["content"]) == 153
+    assert len(cog["past_failures"][0]["narrative"]) == 153
+    assert isinstance(cog["applicable_skills"][0]["steps"], str)
+    assert len(cog["applicable_skills"][0]["steps"]) == 153
+    solutions = cog["additional_solutions"]
+    assert len(solutions) == 5
+    if detail == "compact":
+        assert solutions[0] == {"id": 100, "project": "demo", "title": "Solution 0"}
+    else:
+        assert set(solutions[0]) == {"id", "project", "content"}
+        assert len(solutions[0]["content"]) == 153
+    assert len(json.dumps(cog)) < 3000
+
+
+def test_cognitive_full_detail_unchanged(store_backend, monkeypatch, tmp_path):  # noqa: F811
+    [out] = _recall_with_fake_cognitive(store_backend, monkeypatch, tmp_path, [{"project": "demo", "detail": "full"}])
+    cog = out["cognitive"]
+    assert cog["relevant_rules"] == _FAKE_COGNITIVE["relevant_rules"]
+    assert cog["past_failures"] == _FAKE_COGNITIVE["past_failures"]
+    assert cog["applicable_skills"] == _FAKE_COGNITIVE["applicable_skills"]
+    assert cog["additional_solutions"] == _FAKE_COGNITIVE["available_solutions"][:5]
+
+
+def test_cognitive_solutions_from_other_projects_dropped(store_backend, monkeypatch, tmp_path):  # noqa: F811
+    foreign_first = {**_FAKE_COGNITIVE, "available_solutions": _FAKE_COGNITIVE["available_solutions"][::-1]}
+    scoped, unscoped = _recall_with_fake_cognitive(
+        store_backend, monkeypatch, tmp_path,
+        [{"project": "demo", "detail": "compact"}, {"detail": "compact"}], ctx=foreign_first)
+    assert {s["project"] for s in scoped["cognitive"]["additional_solutions"]} == {"demo"}
+    assert 900 in {s["id"] for s in unscoped["cognitive"]["additional_solutions"]}
+
+
+def test_total_tokens_counts_cognitive(store_backend, monkeypatch, tmp_path):  # noqa: F811
+    [out] = _recall_with_fake_cognitive(store_backend, monkeypatch, tmp_path, [{"project": "demo", "detail": "full"}])
+    hits_tokens = sum(hit["_tokens"] for hits in out["results"].values() for hit in hits)
+    assert out["total_tokens"] == hits_tokens + len(json.dumps(out["cognitive"])) // 4
