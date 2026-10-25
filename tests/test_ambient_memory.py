@@ -778,6 +778,17 @@ def test_hooks_drive_the_whole_turn(mem, tmp_path):
 
 
 @needs_bash
+@pytest.mark.parametrize("override,reminded", [({}, False), ({"TAM_HOOKS_IN_SUBAGENTS": "1"}, True)])
+def test_rule_reminder_is_silent_in_subagents(mem, tmp_path, override, reminded):
+    add_rule(mem, SUDO_RULE, priority=8)
+    proc = run_hook("rule-reminder.sh", {
+        "session_id": "SA", "cwd": "/w/proj", "agent_id": "a1", "hook_event_name": "PreToolUse",
+        "tool_name": "Bash", "tool_input": {"command": SUDO_COMMAND}}, hook_env(mem, tmp_path, **override))
+    assert proc.returncode == 0
+    assert ("forbids: sudo" in proc.stdout.decode()) is reminded
+
+
+@needs_bash
 def test_ambient_hooks_stay_silent_without_src_or_store(tmp_path):
     mem = tmp_path / "mem"
     mem.mkdir()

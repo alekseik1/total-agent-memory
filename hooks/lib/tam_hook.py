@@ -9,8 +9,9 @@ Commands (all read the hook payload JSON from stdin unless noted):
 
   fields                     shell assignments ``HOOK_F_<path>=...`` plus the
                              normalized ``HOOK_EVENT``/``HOOK_EXIT_CODE``/
-                             ``HOOK_ERROR_TEXT``/``HOOK_INTERRUPTED``; meant
-                             for ``eval`` in bash (values are shlex-quoted)
+                             ``HOOK_ERROR_TEXT``/``HOOK_INTERRUPTED``/
+                             ``HOOK_QUIET_SUBAGENT``; meant for ``eval`` in
+                             bash (values are shlex-quoted)
   emit EVENT                 stdin is plain text; prints one
                              ``hookSpecificOutput.additionalContext`` object
   system-message             stdin is plain text; prints ``{"systemMessage"}``
@@ -291,12 +292,18 @@ def is_failure(code: str) -> bool:
     return code not in ("", "0", "null")
 
 
+def quiet_in_subagent(payload: JsonDict) -> bool:
+    """Only subagent calls carry ``agent_id``; the hint hooks keep out of them unless TAM_HOOKS_IN_SUBAGENTS=1."""
+    return bool(payload.get("agent_id")) and os.environ.get("TAM_HOOKS_IN_SUBAGENTS") != "1"
+
+
 def derived_fields(payload: JsonDict) -> dict[str, str]:
     return {
         "HOOK_EVENT": str(payload.get("hook_event_name") or ""),
         "HOOK_EXIT_CODE": exit_code(payload),
         "HOOK_ERROR_TEXT": truncate(error_text(payload), FIELD_MAX_CHARS),
         "HOOK_INTERRUPTED": "1" if interrupted(payload) else "0",
+        "HOOK_QUIET_SUBAGENT": "1" if quiet_in_subagent(payload) else "0",
     }
 
 
@@ -1224,6 +1231,11 @@ def cmd_system_message(_args: argparse.Namespace) -> int:
 
 def cmd_nudge(args: argparse.Namespace) -> int:
     payload = read_payload()
+    if quiet_in_subagent(payload):
+        # Subagent saves land in the parent's counters; a save never emits a nudge.
+        if classify_tool(str(payload.get("tool_name") or "").strip()) == "memory_saves":
+            nudge(payload, Path(args.memory_dir))
+        return 0
     message = nudge(payload, Path(args.memory_dir))
     if not message:
         return 0
@@ -1320,6 +1332,8 @@ def cmd_prompt_context(args: argparse.Namespace) -> int:
 
 def cmd_rule_reminder(args: argparse.Namespace) -> int:
     payload = read_payload()
+    if quiet_in_subagent(payload):
+        return 0
     text = ambient_call("rule-reminder", hook_call(payload, project_of(payload)), Path(args.memory_dir),
                         Path(args.src))
     return print_context(event_for(payload, args.emit), [text])

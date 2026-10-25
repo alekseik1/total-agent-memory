@@ -10,7 +10,8 @@
 # rule is reminded at most once per 15 minutes per session. No permission
 # decision is ever made.
 #
-# Env: TAM_RULE_REMINDERS=false disables it (also settable in the dashboard)
+# Env: TAM_RULE_REMINDERS=false disables it (also settable in the dashboard);
+#      silent in subagents unless TAM_HOOKS_IN_SUBAGENTS=1
 #
 # Hook: PreToolUse (matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit")
 # ===========================================

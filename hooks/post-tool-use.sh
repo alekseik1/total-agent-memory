@@ -19,6 +19,7 @@
 # Env:
 #   MEMORY_POST_TOOL_CAPTURE  — "1" to enable observation capture
 #   MEMORY_NUDGE_DISABLE      — "1" to disable nudges entirely
+#   TAM_HOOKS_IN_SUBAGENTS    - "1" to count subagent edits and nudge them too
 #   MEMORY_NUDGE_SOFT/HARD/STEP — tune thresholds (see lib/tam_hook.py)
 #   TAM_MEMORY_DIR / CLAUDE_MEMORY_INSTALL_DIR — resolved by lib/common.sh
 #

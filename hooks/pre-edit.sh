@@ -6,12 +6,18 @@
 # Delivered as hookSpecificOutput.additionalContext (plain stdout of
 # PreToolUse never reaches the model). No permission decision is made.
 #
+# Env: TAM_PRE_EDIT_GUARD=0|false disables it; silent in subagents unless
+#      TAM_HOOKS_IN_SUBAGENTS=1
+#
 # Hook: PreToolUse (matcher: "Write|Edit")
 # ===========================================
 
 # shellcheck source=lib/common.sh
 source "$(dirname "$0")/lib/common.sh"
 hook_set_event "PreToolUse"
+
+[ "$HOOK_QUIET_SUBAGENT" = "1" ] && exit 0
+case "${TAM_PRE_EDIT_GUARD:-}" in 0|false) exit 0 ;; esac
 
 TOOL=$(hook_get '.tool_name')
 FILE_PATH=$(hook_get '.tool_input.file_path')
