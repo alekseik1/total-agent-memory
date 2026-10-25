@@ -16,7 +16,7 @@
 # Reading payload fields (one python spawn per hook, done here on source):
 #   hook_get '.tool_input.file_path'     -> value or empty
 #   $HOOK_EVENT $HOOK_EXIT_CODE $HOOK_ERROR_TEXT $HOOK_INTERRUPTED (normalized)
-#   $HOOK_QUIET_SUBAGENT=1 — a subagent call (payload agent_id) and
+#   $HOOK_QUIET_SUBAGENT=1 - a subagent call (payload agent_id) and
 #                            TAM_HOOKS_IN_SUBAGENTS is not 1: hint hooks stay silent
 #
 # Sending text to the model:

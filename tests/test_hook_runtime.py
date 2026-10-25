@@ -254,6 +254,15 @@ class TestQuietHooks:
         assert all(proc.returncode == 0 and proc.stdout == b"" for proc in outputs)
         assert not (world["mem"] / "state" / "nudge-sa.json").exists()
 
+    def test_subagent_save_counts_for_parent(self, bash, world):
+        env = hook_env(world)
+        base = {"hook_event_name": "PostToolUse", "session_id": "sd", "cwd": "/w/proj"}
+        saved = run_hook(bash, "post-tool-use.sh", {**base, "tool_name": "mcp__memory__memory_save", **SUBAGENT}, env)
+        outputs = [run_hook(bash, "post-tool-use.sh", {**base, "tool_name": "Edit"}, env) for _ in range(3)]
+        assert saved.stdout == b"" and all(proc.stdout == b"" for proc in outputs)
+        state = json.loads((world["mem"] / "state" / "nudge-sd.json").read_text())
+        assert state["memory_saves"] == 1 and state["edits"] == 3
+
     def test_override_restores_nudge_in_subagents(self, bash, world):
         env = hook_env(world, TAM_HOOKS_IN_SUBAGENTS="1")
         payload = {"hook_event_name": "PostToolUse", "tool_name": "Edit", "session_id": "sb", "cwd": "/w/proj",

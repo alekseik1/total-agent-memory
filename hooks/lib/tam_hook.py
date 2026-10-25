@@ -1232,6 +1232,9 @@ def cmd_system_message(_args: argparse.Namespace) -> int:
 def cmd_nudge(args: argparse.Namespace) -> int:
     payload = read_payload()
     if quiet_in_subagent(payload):
+        # Subagent saves land in the parent's counters; a save never emits a nudge.
+        if classify_tool(str(payload.get("tool_name") or "").strip()) == "memory_saves":
+            nudge(payload, Path(args.memory_dir))
         return 0
     message = nudge(payload, Path(args.memory_dir))
     if not message:

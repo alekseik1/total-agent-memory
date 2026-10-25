@@ -7,12 +7,15 @@ and versions use [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed - hint hooks stay out of subagents
-- The pre-edit `file_context` guard, `MEMORY_HINT`, rule reminders and
-  `MEMORY_NUDGE` are skipped for calls whose payload carries `agent_id`
-  (subagents only); `TAM_HOOKS_IN_SUBAGENTS=1` restores them. Error hooks
-  are unchanged.
-- `TAM_PRE_EDIT_GUARD=0` and `TAM_AUTO_CAPTURE_HINT=0` switch off the
-  pre-edit guard and `MEMORY_HINT`; both stay on by default.
+- Rule reminders and `MEMORY_NUDGE` are skipped for calls whose payload
+  carries `agent_id` (subagents only), on bash and PowerShell; the pre-edit
+  `file_context` guard and `MEMORY_HINT` are skipped too, bash hooks only for
+  now. `TAM_HOOKS_IN_SUBAGENTS=1` restores them. Error hooks are unchanged.
+- Subagent calls no longer count edits toward the nudge; their
+  `memory_save` calls still count.
+- `TAM_PRE_EDIT_GUARD=0|false` and `TAM_AUTO_CAPTURE_HINT=0|false` switch off
+  the pre-edit guard and `MEMORY_HINT` (bash hooks only for now); both stay
+  on by default.
 
 ### Fixed - a failed write left the connection's transaction open
 - A write that failed with `database is locked` (or one a helper swallowed)
