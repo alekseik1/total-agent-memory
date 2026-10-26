@@ -48,7 +48,11 @@ ROOT = Path(__file__).resolve().parents[1]
 OPTIONAL = {
     "apscheduler",  # reflection scheduler — falls back to manual drain
     "watchdog",     # file watcher — falls back to polling
+    "pymacos",      # image OCR — manual opt-in, falls back to pyobjc, then pytesseract
 }
+
+# Distributions whose import name differs from the name they are declared by.
+IMPORT_NAMES = {"pymacos": "macos"}
 
 
 def _name(spec: str) -> str:
@@ -57,7 +61,7 @@ def _name(spec: str) -> str:
 
 def _requirements() -> set[str]:
     out = set()
-    for line in (ROOT / "requirements.txt").read_text().splitlines():
+    for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines():
         line = line.split("#")[0].strip()
         if line and not line.startswith("-"):
             out.add(_name(line))
@@ -65,19 +69,19 @@ def _requirements() -> set[str]:
 
 
 def _pyproject() -> set[str]:
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     return {_name(d) for d in data["project"]["dependencies"]}
 
 
 def _extras() -> dict[str, set[str]]:
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     raw = data["project"].get("optional-dependencies", {})
     return {group: {_name(d) for d in specs} for group, specs in raw.items()}
 
 
 def _requirements_file(name: str) -> set[str]:
     out = set()
-    for line in (ROOT / name).read_text().splitlines():
+    for line in (ROOT / name).read_text(encoding="utf-8").splitlines():
         line = line.split("#")[0].strip()
         if line and not line.startswith("-"):
             out.add(_name(line))
@@ -111,16 +115,17 @@ def test_the_http_transport_dependencies_are_declared():
 @pytest.mark.parametrize("package", sorted(OPTIONAL))
 def test_optional_packages_really_are_optional(package: str):
     """An entry in OPTIONAL must be imported defensively somewhere in src/."""
+    module = IMPORT_NAMES.get(package, package)
     hits = [
         path
         for path in (ROOT / "src").rglob("*.py")
-        if package in path.read_text(errors="replace").lower()
+        if module in path.read_text(errors="replace", encoding="utf-8").lower()
     ]
     assert hits, f"{package} is marked optional but src/ never mentions it"
     guarded = any(
         re.search(
-            rf"try:[^\n]*\n(?:.*\n)*?\s*(?:from|import)\s+{package}",
-            path.read_text(errors="replace"),
+            rf"try:[^\n]*\n(?:.*\n)*?\s*(?:from|import)\s+{module}\b",
+            path.read_text(errors="replace", encoding="utf-8"),
             re.IGNORECASE,
         )
         for path in hits
@@ -185,6 +190,15 @@ def test_the_ocr_extra_carries_what_the_ocr_module_imports():
     assert not OCR_STACK & _pyproject(), "pyobjc is macOS-only and stays out of the base install"
 
 
+def test_pymacos_is_declared_nowhere_and_stays_a_manual_opt_in():
+    """It loads into the MCP server process: the user installs it, we do not ship it."""
+    assert "pymacos" not in _pyproject()
+    assert all("pymacos" not in names for names in _extras().values())
+    for path in ROOT.glob("requirements*.txt"):
+        assert "pymacos" not in _requirements_file(path.name), path.name
+    assert "pymacos" in OPTIONAL  # imported behind a guard, used only when importable
+
+
 def test_the_ocr_requirements_file_mirrors_the_extra():
     """install.sh / Docker users get the extra through a requirements file."""
     mirrored = _requirements_file("requirements-ocr.txt")
@@ -196,7 +210,7 @@ def test_the_ocr_requirements_file_mirrors_the_extra():
 
 
 def test_the_ocr_extra_is_macos_only():
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     for spec in data["project"]["optional-dependencies"]["ocr"]:
         assert "sys_platform == 'darwin'" in spec, f"{spec} would be resolved on Linux and Windows too"
 
@@ -213,7 +227,7 @@ def test_the_installers_do_not_warm_a_model_they_cannot_load():
         # explain what the old warm-up did wrong and name it on purpose.
         text = "\n".join(
             line.split("#")[0]
-            for line in (ROOT / script).read_text().splitlines()
+            for line in (ROOT / script).read_text(encoding="utf-8").splitlines()
         )
         assert "SentenceTransformer(" not in text, (
             f"{script} warms the model through sentence-transformers, which the "

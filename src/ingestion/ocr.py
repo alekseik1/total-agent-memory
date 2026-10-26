@@ -2,12 +2,12 @@
 """
 OCR module using Apple Vision Framework (macOS).
 
-Uses pyobjc to access macOS Vision.framework for free, fast, local OCR
-(install with: pip install "total-agent-memory[ocr]").
-Supports: PNG, JPG, TIFF, BMP, PDF (first page, rendered through Quartz).
+Uses macOS Vision.framework for free, fast, local OCR, through pymacos or
+through pyobjc (install with: pip install "total-agent-memory[ocr]").
+Supports: PNG, JPG, TIFF, BMP, PDF (first page, drawn as an image).
 Languages: English, Russian (configurable).
 
-Fallback: If pyobjc not available, tries pytesseract, then returns empty.
+Fallback: If neither is available, tries pytesseract, then returns empty.
 
 Usage:
     from ingestion.ocr import OCREngine
@@ -30,22 +30,51 @@ PDF_RENDER_LONG_SIDE = 2048
 # Recognized lines below this confidence are noise (smudges, texture).
 MIN_LINE_CONFIDENCE = 0.3
 
-_HAS_VISION = False
-try:
-    import Quartz
-    from Foundation import NSURL
-    from Vision import (
-        VNImageRequestHandler,
-        VNRecognizeTextRequest,
-        VNRequestTextRecognitionLevelAccurate,
-    )
+# Apple Vision through pymacos (ctypes, no dependencies of its own). When it
+# loads, the pyobjc probe below is skipped.
+_HAS_PYMACOS = False
+if sys.platform == "darwin":
+    try:
+        import macos  # the pymacos package
 
-    _HAS_VISION = True
-    LOG("Apple Vision framework: available")
-except ImportError:
-    LOG('Apple Vision framework: not available (pip install "total-agent-memory[ocr]")')
-except Exception as e:
-    LOG(f"Apple Vision framework error: {e}")
+        _HAS_PYMACOS = True
+        LOG("Apple Vision framework: available (pymacos)")
+    except ImportError:
+        pass
+    except Exception as e:
+        LOG(f"Apple Vision framework error (pymacos): {e}")
+
+_HAS_VISION = False
+_PYOBJC_PROBED = False
+
+
+def _probe_pyobjc() -> bool:
+    """Import the pyobjc Vision classes once; True when they are usable."""
+    global _HAS_VISION, _PYOBJC_PROBED
+    global Quartz, NSURL, VNImageRequestHandler, VNRecognizeTextRequest, VNRequestTextRecognitionLevelAccurate
+    if _PYOBJC_PROBED:
+        return _HAS_VISION
+    _PYOBJC_PROBED = True
+    try:
+        import Quartz
+        from Foundation import NSURL
+        from Vision import (
+            VNImageRequestHandler,
+            VNRecognizeTextRequest,
+            VNRequestTextRecognitionLevelAccurate,
+        )
+
+        _HAS_VISION = True
+        LOG("Apple Vision framework: available")
+    except ImportError:
+        LOG('Apple Vision framework: not available (pip install "total-agent-memory[ocr]")')
+    except Exception as e:
+        LOG(f"Apple Vision framework error: {e}")
+    return _HAS_VISION
+
+
+if not _HAS_PYMACOS:
+    _probe_pyobjc()
 
 
 def _perform_outcome(result) -> tuple[bool, object]:
@@ -96,7 +125,7 @@ class OCREngine:
 
     def _detect_method(self) -> str:
         """Detect available OCR method."""
-        if _HAS_VISION:
+        if _HAS_PYMACOS or _HAS_VISION:
             return "apple_vision"
         # Try pytesseract
         try:
@@ -141,6 +170,13 @@ class OCREngine:
 
     def _extract_vision(self, image_path: str) -> str:
         """Extract text using Apple Vision framework (accurate recognition)."""
+        if _HAS_PYMACOS:
+            text = self._extract_pymacos(image_path)
+            if text is not None:
+                return text
+            if not (_HAS_VISION or _probe_pyobjc()):
+                return ""
+            LOG(f"event=ocr_fallback from=pymacos to=pyobjc image={image_path}")
         try:
             handler = self._vision_handler(image_path)
             if handler is None:
@@ -166,6 +202,18 @@ class OCREngine:
         except Exception as e:
             LOG(f"Vision OCR error for {image_path}: {e}")
             return ""
+
+    def _extract_pymacos(self, image_path: str) -> str | None:
+        """Extract text through pymacos (accurate recognition); None when pymacos failed."""
+        try:
+            image = image_path
+            if Path(image_path).suffix.lower() == ".pdf":
+                image = macos.pdf.render(image_path, 1, size=PDF_RENDER_LONG_SIDE)
+            lines = macos.vision.lines(image, languages=self.languages)
+            return "\n".join(line.text for line in lines if line.confidence > MIN_LINE_CONFIDENCE)
+        except Exception as e:
+            LOG(f"event=ocr_error engine=pymacos image={image_path} error={e!r}")
+            return None
 
     def _vision_handler(self, image_path: str):
         """Request handler for an image file, or for the first page of a PDF drawn as an image."""
