@@ -31,8 +31,37 @@ _CODE_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _URL_RE = re.compile(r"https?://[^\s<>`'\"()]+")
 _URL_TRAILING_PUNCT = ".,;:!?"
 
-# Absolute paths: /Users/..., /etc/..., /home/...  AND tilde paths ~/...
-_PATH_RE = re.compile(r"(?:~|/[A-Za-z0-9_.-])(?:/[A-Za-z0-9_.\-]+)+/?")
+# Absolute paths (/Users/..., /etc/...) and tilde paths (~/...).
+# A slash may only start a path at the beginning of the text/line or after
+# whitespace/quote/bracket/`=`/`:`/`,`/`|`/`<`/`>`/`;`/backtick/`*`, so prose
+# like "EU/Russia" is ignored while "db=/var/x", "|/etc/hosts|" and
+# "**/etc/hosts**" are still matched.
+_PATH_BOUNDARY = r"""(?:(?<=^)|(?<=[\s'"(\[{=:,|<>;`*]))"""
+
+# Extensions that make a single-segment absolute path (/README.md) count.
+_CODE_EXT = r"(?:py|sql|md|json|ya?ml|toml|sh|ts|js|txt|ini|cfg|go|rs|tsx|jsx)"
+
+_SEG = r"[A-Za-z0-9_.\-]+"
+# Absolute body: either >=2 segments or a trailing slash (single `(seg/)+`
+# repetition with an empty final segment covers both), or a single segment
+# with a recognized extension (/README.md). This is what excludes bare
+# single-segment slash tokens like slash-commands ("/compact", "/jira-task").
+_ABS_MULTI_OR_TRAILING = rf"(?:{_SEG}/)+(?:{_SEG})?"
+_ABS_EXT_SINGLE = rf"{_SEG}\.{_CODE_EXT}\b"
+_ABS_BODY = rf"(?:{_ABS_MULTI_OR_TRAILING}|{_ABS_EXT_SINGLE})"
+
+# Tilde paths count from one segment (~/.bashrc).
+_TILDE_BODY = rf"{_SEG}(?:/{_SEG})*/?"
+
+_PATH_RE = re.compile(
+    _PATH_BOUNDARY + rf"(?:~/{_TILDE_BODY}|/{_ABS_BODY})",
+    re.MULTILINE,
+)
+
+# Right edge of a kept path: the next character must not extend the name
+# ("/etc/hosts" is not kept by "/etc/hostsfile", "/etc/hosts-old" or
+# "/etc/hosts.bak"), while sentence punctuation and a trailing slash are fine.
+_PATH_KEPT_END = r"(?![A-Za-z0-9\-]|\.[A-Za-z0-9])"
 
 # Markdown headings (line-starting #..######).
 _HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S", re.MULTILINE)
@@ -90,6 +119,11 @@ def _extract_urls(text: str) -> set[str]:
         if raw:
             urls.add(raw)
     return urls
+
+
+def _path_kept(path: str, text: str) -> bool:
+    """True if ``path`` (trailing slash aside) appears in ``text`` as a whole name."""
+    return re.search(re.escape(path.rstrip("/")) + _PATH_KEPT_END, text) is not None
 
 
 def _extract_paths(text: str) -> set[str]:
@@ -158,10 +192,11 @@ class ContentValidator:
             errors.append(f"url lost: {u}")
 
         # ── Paths
-        orig_paths = _extract_paths(original)
-        trans_paths = _extract_paths(transformed)
-        for p in orig_paths - trans_paths:
-            errors.append(f"path lost: {p}")
+        # Kept if the path text survives anywhere, so formatting added around
+        # it in the transformed text cannot fail the check.
+        for p in _extract_paths(original):
+            if not _path_kept(p, transformed):
+                errors.append(f"path lost: {p}")
 
         # ── Inline code
         orig_inline = _extract_inline_code(original)
