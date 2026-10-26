@@ -262,6 +262,24 @@ def test_serve_runs_without_the_postgres_extra(tmp_path, monkeypatch, capsys):
     assert wiring['maintenance'] is None and wiring['migration'] is None and wiring['database'] is None
 
 
+def test_serve_bounds_graceful_shutdown(tmp_path, monkeypatch, capsys):
+    # Without a bound a reset client connection on Windows hangs shutdown in Server.wait_closed().
+    import uvicorn
+
+    from team_memory import app as team_app
+    from team_memory import cli as team_cli
+    from team_memory.database_contracts import DATABASE_URL_ENV
+
+    monkeypatch.delenv(DATABASE_URL_ENV, raising=False)
+    monkeypatch.setattr(team_cli, 'postgres_available', lambda: False)
+    captured = {}
+    monkeypatch.setattr(uvicorn, 'run', lambda app, **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(team_app, 'create_app', lambda service, dashboard, **kwargs: object())
+    code, _, err = run_cli(monkeypatch, capsys, tmp_path / 'server', 'serve', '--port', '0')
+    assert code == 0, err
+    assert captured['timeout_graceful_shutdown'] == team_cli.GRACEFUL_SHUTDOWN_SEC > 0
+
+
 def test_serve_wires_one_maintenance_gate_on_sqlite(tmp_path, monkeypatch, capsys):
     # The gate belongs to database settings and migration, which need the [postgres] extra.
     pytest.importorskip("psycopg")

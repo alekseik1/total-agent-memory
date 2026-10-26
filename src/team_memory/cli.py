@@ -32,6 +32,9 @@ MUTATING_COMMANDS = frozenset({"user-add", "team-add", "member", "bootstrap-admi
                                "token-revoke"})
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 3737
+# Bounds the whole uvicorn shutdown, including asyncio Server.wait_closed(), which never returns on
+# Windows when a client resets its connection (proactor skips detaching the transport).
+GRACEFUL_SHUTDOWN_SEC = 10
 WILDCARD_HOSTS = ("0.0.0.0", "::", "")
 LOGGER = logging.getLogger(__name__)
 
@@ -269,7 +272,8 @@ def run_server(registry: Registry, args) -> None:
     with contextlib.ExitStack() as stack:
         if lease is not None:
             stack.enter_context(lease)
-        uvicorn.run(app, host=args.host, port=args.port, access_log=False)
+        uvicorn.run(app, host=args.host, port=args.port, access_log=False,
+                    timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SEC)
     state = gate.state() if gate is not None else None
     if state is not None and state.reason is MaintenanceReason.LEASE_LOST:
         LOGGER.error(json.dumps({"event": "server_stopped_lease_lost"}))
