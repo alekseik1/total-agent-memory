@@ -113,3 +113,20 @@ def test_non_retryable_client_error_propagates(monkeypatch):
     with pytest.raises(urllib.error.HTTPError):
         llm_provider._http_post_json("http://x/api", json.loads("{}"), {}, 1.0)
     assert calls["n"] == 1
+
+
+def test_a_rejected_key_does_not_mark_another_key_unavailable():
+    rejected = llm_provider._cache_key("openai", "https://api.example.test", "key-a")
+    other = llm_provider._cache_key("openai", "https://api.example.test", "key-b")
+    with pytest.raises(llm_provider.ProviderAuthError):
+        with llm_provider._mark_unavailable_on_auth_error(rejected):
+            raise llm_provider.ProviderAuthError("rejected")
+    assert llm_provider._cache_get_available(rejected) is False
+    assert llm_provider._cache_get_available(other) is None
+    assert llm_provider._cache_key("openai", "https://api.example.test", "key-a") == rejected
+
+
+def test_the_availability_cache_key_is_not_a_fast_hash_of_the_secret():
+    import hashlib
+    key = llm_provider._cache_key("anthropic", "", "secret-value")
+    assert hashlib.sha1(b"secret-value").hexdigest()[:16] not in key

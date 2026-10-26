@@ -24,7 +24,6 @@ Design notes:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import random
@@ -116,14 +115,15 @@ def _read_capped(resp) -> bytes:
 # ──────────────────────────────────────────────
 # Availability probe cache
 # ──────────────────────────────────────────────
-# Short-TTL cache keyed by (provider_name, api_base, key_hash). Reuses the
+# Short-TTL cache keyed by (provider_name, api_base, api_key). Reuses the
 # same TTL config.has_llm()/detect_ollama() use so env tuning is consistent.
+# The cache never leaves this process, which already holds the key, so the key
+# is compared as is: a hash would add nothing and a fast one invites misuse.
 _available_cache: dict[tuple[str, str, str], tuple[bool, float]] = {}
 
 
 def _cache_key(provider: str, api_base: str, api_key: str | None) -> tuple[str, str, str]:
-    key_hash = hashlib.sha1((api_key or "").encode("utf-8")).hexdigest()[:16]
-    return (provider, api_base or "", key_hash)
+    return (provider, api_base or "", api_key or "")
 
 
 def _cache_get_available(key: tuple[str, str, str]) -> bool | None:
