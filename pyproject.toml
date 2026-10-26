@@ -203,6 +203,8 @@ src = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# pytest-timeout: a hung test fails with its name and stack instead of stalling a CI job until the job timeout.
+timeout = 600
 norecursedirs = ["backups", ".git", ".venv", "node_modules"]
 markers = [
     "slow: heavy tests (network/model download); set RUN_RERANKER_SLOW=1 to enable",

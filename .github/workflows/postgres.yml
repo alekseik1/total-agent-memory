@@ -57,7 +57,7 @@ jobs:
           sudo apt-get install -y postgresql-client-18
           echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
       - name: Install package with the postgres extra
-        run: python -m pip install -e ".[postgres]" pytest
+        run: python -m pip install -e ".[postgres]" pytest pytest-timeout
       - name: Warm the embedding model
         run: python tests/smoke/prewarm_models.py
       - name: PostgreSQL-marked tests

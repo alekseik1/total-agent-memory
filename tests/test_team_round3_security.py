@@ -359,10 +359,16 @@ def asgi_request(app, path, *, method='POST', client='203.0.113.1', headers=None
              'headers': [(b'host', b'testserver'), *[(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]],
              'client': (client, 5000), 'server': ('testserver', 80)}
     sent = []
+    delivered = asyncio.Event()
 
     async def receive():
+        # Like a real client: the body once, then nothing until the connection closes. Newer Starlette (1.10) keeps
+        # calling receive() to watch for a disconnect; answering at once would spin the event loop forever.
+        if delivered.is_set():
+            await asyncio.Event().wait()
         if stall is not None:
             await stall.wait()
+        delivered.set()
         return {'type': 'http.request', 'body': body, 'more_body': False}
 
     async def send(message):
