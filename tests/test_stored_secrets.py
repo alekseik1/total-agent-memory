@@ -48,7 +48,7 @@ def test_scan_counts_without_changing_anything(old_install):
     assert result["tables"]["knowledge"] == 1
     assert result["raw_logs"] == 1
     assert (old_install / "memory.db").read_bytes() == before
-    assert ANTHROPIC in (old_install / "raw" / "s.jsonl").read_text()
+    assert ANTHROPIC in (old_install / "raw" / "s.jsonl").read_text(encoding="utf-8")
 
 
 def test_redact_cleans_rows_json_fts_and_logs_after_a_private_backup(old_install):

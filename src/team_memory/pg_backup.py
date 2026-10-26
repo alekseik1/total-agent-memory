@@ -106,7 +106,7 @@ def _tool(name: str, variable: str, environ: Mapping[str, str]) -> str:
 
 
 def _tool_major(path: str) -> int:
-    result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=VERSION_TIMEOUT_SECONDS,
+    result = subprocess.run([path, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=VERSION_TIMEOUT_SECONDS,
                             check=False)
     match = TOOL_VERSION.search(result.stdout)
     if result.returncode != 0 or match is None:
@@ -154,7 +154,7 @@ def _uri_without_password(dsn: DatabaseDsn) -> str:
 
 def _run(command: list[str], env: dict[str, str], timeout: int, what: str) -> subprocess.CompletedProcess[str]:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, env=env, timeout=timeout, check=False)
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
         raise Conflict(f"{what} did not finish within {timeout} seconds") from exc
     if result.returncode != 0:

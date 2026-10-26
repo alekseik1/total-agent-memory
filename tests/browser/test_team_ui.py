@@ -34,7 +34,7 @@ def browser(request):
 
 def login(page, server, user):
     page.goto(server.url)
-    page.locator('#token').fill((server.root / f'{user}.token').read_text().strip())
+    page.locator('#token').fill((server.root / f'{user}.token').read_text(encoding="utf-8").strip())
     page.get_by_role('button', name='Подключиться', exact=True).click()
     playwright.expect(page.locator('#main')).to_be_visible()
 
@@ -148,7 +148,7 @@ def dashboard(server):
     import total_agent_memory
     from team_memory.registry import Registry
     registry = Registry(server.root)
-    actor = registry.authenticate((server.root / 'vasya.token').read_text().strip())
+    actor = registry.authenticate((server.root / 'vasya.token').read_text(encoding="utf-8").strip())
     workspace = next(w for w in registry.workspaces(actor) if w.scope.kind.value == 'personal')
     server.call('vasya', 'memory_save', {'content': 'Browser dashboard fixture: launch checklist approved.'})
     with socket.socket() as sock:

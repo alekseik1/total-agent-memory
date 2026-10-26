@@ -17,10 +17,8 @@ Usage (standalone):
 """
 
 import json
-import os
 import re
 import sqlite3
-import subprocess
 import sys
 import time
 import uuid
@@ -29,12 +27,16 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from background_writes import save_background_knowledge  # noqa: E402
+from tool_support import ollama_generate  # noqa: E402
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-MEMORY_DIR = Path(
-    os.environ.get("CLAUDE_MEMORY_DIR", os.path.expanduser("~/.claude-memory"))
-)
-OLLAMA_BIN = "/usr/local/bin/ollama"
+from paths import memory_dir  # noqa: E402
+
+MEMORY_DIR = memory_dir()
 TELEGRAM_ENV_PATH = Path(__file__).parent.parent.parent / "telegram" / ".env"
 
 LOG = lambda msg: sys.stderr.write(
@@ -52,7 +54,7 @@ def _load_dotenv(path: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     if not path.is_file():
         return result
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -70,41 +72,16 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07", "", text)
 
 
-def _ollama_generate(prompt: str, model: str = "vitalii-brain", timeout: int = 300) -> str:
-    """Generate text with Ollama CLI. Returns generated text or empty string."""
-    try:
-        env = os.environ.copy()
-        env["NO_COLOR"] = "1"
-        result = subprocess.run(
-            [OLLAMA_BIN, "run", model, prompt],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
-        return _strip_ansi(result.stdout).strip()
-    except subprocess.TimeoutExpired:
-        LOG(f"Ollama timeout after {timeout}s")
-        return ""
-    except FileNotFoundError:
-        LOG(f"Ollama binary not found at {OLLAMA_BIN}")
-        return ""
-    except Exception as e:
-        LOG(f"Ollama error: {e}")
-        return ""
+def _ollama_generate(prompt: str, model: str | None = None, timeout: int = 300) -> str:
+    """Generate text with the Ollama CLI (prompt on stdin). Returns "" on failure."""
+    return ollama_generate(prompt, model, timeout, log=LOG)
 
 
 def _make_ssl_context():
-    """Create SSL context using certifi certs if available."""
-    import ssl
+    """Verified TLS context: certifi, else the platform store, never unverified."""
+    from tls_context import verified_context
 
-    try:
-        import certifi
-
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
-
+    return verified_context()
 
 def _telegram_send(token: str, chat_id: int, text: str, parse_mode: str = "HTML") -> bool:
     """Send a Telegram message via Bot API. Returns True on success."""
@@ -144,23 +121,11 @@ def _save_knowledge_record(
     db = sqlite3.connect(db_path)
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        db.execute(
-            """INSERT INTO knowledge
-               (session_id, type, content, project, tags, source,
-                confidence, created_at, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
-            (
-                f"{source}_{now}_{uuid.uuid4().hex[:6]}",
-                record_type,
-                content,
-                project,
-                json.dumps(tags or []),
-                source,
-                confidence,
-                now,
-            ),
+        save_background_knowledge(
+            db, content=content, ktype=record_type, project=project,
+            session_id=f"{source}_{now}_{uuid.uuid4().hex[:6]}",
+            tags=tags or [], source=source, confidence=confidence, created_at=now,
         )
-        db.commit()
     except Exception as e:
         LOG(f"Error saving knowledge ({source}): {e}")
     finally:

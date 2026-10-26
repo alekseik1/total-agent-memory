@@ -51,7 +51,7 @@ def cdb():
     )
     migration = (
         Path(__file__).parent.parent / "migrations" / "016_contradictions.sql"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     db.executescript(migration)
     yield db
     db.close()

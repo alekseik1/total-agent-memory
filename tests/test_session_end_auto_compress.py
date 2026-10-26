@@ -28,7 +28,7 @@ def sc_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     migration = Path(__file__).parent.parent / "migrations" / "010_session_continuity.sql"
-    conn.executescript(migration.read_text())
+    conn.executescript(migration.read_text(encoding="utf-8"))
     # Also need a `knowledge` table so _collect_session_context doesn't blow up.
     conn.executescript(
         """CREATE TABLE IF NOT EXISTS knowledge (

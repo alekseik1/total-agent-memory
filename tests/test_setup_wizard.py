@@ -75,7 +75,7 @@ class World:
         return code, out.getvalue()
 
     def json(self, relative):
-        return json.loads((self.home / relative).read_text())
+        return json.loads((self.home / relative).read_text(encoding="utf-8"))
 
 
 def saved_settings(world):
@@ -90,20 +90,20 @@ def test_personal_interactive_registers_clients_hides_key_and_writes_record(tmp_
     assert code == 0, out
     entry = world.json('.claude.json')['mcpServers']['memory']
     assert 'OPENAI_API_KEY' not in entry['env'] and 'MEMORY_LLM_PROVIDER' not in entry['env']
-    assert SECRET not in (world.home / '.claude.json').read_text()
+    assert SECRET not in (world.home / '.claude.json').read_text(encoding="utf-8")
     assert entry['env']['TAM_MEMORY_DIR'] == str((world.home / '.tam').resolve())
     assert entry['env']['MEMORY_TEXT_EMBED_MODEL'] == 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
-    codex = tomllib.loads((world.home / '.codex' / 'config.toml').read_text())['mcp_servers']['memory']
+    codex = tomllib.loads((world.home / '.codex' / 'config.toml').read_text(encoding="utf-8"))['mcp_servers']['memory']
     assert 'OPENAI_API_KEY' not in codex['env'] and codex['command'] == entry['command']
-    assert SECRET not in (world.home / '.tam' / 'settings.json').read_text()
+    assert SECRET not in (world.home / '.tam' / 'settings.json').read_text(encoding="utf-8")
     saved = saved_settings(world)
     assert saved['OPENAI_API_KEY'] == SECRET and saved['MEMORY_LLM_PROVIDER'] == 'openai'
     if os.name == 'posix':
         assert stat.S_IMODE((world.home / '.tam' / 'master.key').stat().st_mode) == 0o600
-    record = json.loads(world.record.read_text())
+    record = json.loads(world.record.read_text(encoding="utf-8"))
     assert record['mode'] == 'personal' and record['personal']['clients'] == ['claude-code', 'codex']
     assert record['personal']['llm_key_set'] is True and record['personal']['hooks'] is True
-    assert SECRET not in world.record.read_text() and SECRET not in out
+    assert SECRET not in world.record.read_text(encoding="utf-8") and SECRET not in out
     assert len(script.hidden) == 1 and 'hidden' in script.hidden[0]
     settings = world.json('.claude/settings.json')
     commands = [h['command'] for blocks in settings['hooks'].values() for b in blocks for h in b['hooks']]
@@ -117,11 +117,11 @@ def test_existing_configs_keep_other_servers_and_unmanaged_env(tmp_path):
     world = World(tmp_path, dirs=('.cursor',))
     cursor = world.home / '.cursor' / 'mcp.json'
     cursor.write_text(json.dumps({'mcpServers': {'github': {'command': 'gh-mcp'}, 'memory': {
-        'command': 'old', 'env': {'CUSTOM_FLAG': '1', 'OPENAI_API_KEY': 'stale-key-value-0000'}}}, 'theme': 'dark'}))
+        'command': 'old', 'env': {'CUSTOM_FLAG': '1', 'OPENAI_API_KEY': 'stale-key-value-0000'}}}, 'theme': 'dark'}), encoding="utf-8")
     code, out = world.run(['--non-interactive', '--mode', 'personal', '--clients', 'cursor', '--llm', 'none',
                            '--skip-verify'])
     assert code == 0, out
-    data = json.loads(cursor.read_text())
+    data = json.loads(cursor.read_text(encoding="utf-8"))
     assert data['theme'] == 'dark' and data['mcpServers']['github'] == {'command': 'gh-mcp'}
     env = data['mcpServers']['memory']['env']
     assert env['CUSTOM_FLAG'] == '1' and 'OPENAI_API_KEY' not in env and 'MEMORY_LLM_ENABLED' not in env
@@ -131,11 +131,11 @@ def test_existing_configs_keep_other_servers_and_unmanaged_env(tmp_path):
 def test_unparseable_config_aborts_before_any_write(tmp_path):
     world = World(tmp_path, dirs=('.cursor', '.claude'))
     cursor = world.home / '.cursor' / 'mcp.json'
-    cursor.write_text('{"mcpServers": {broken')
+    cursor.write_text('{"mcpServers": {broken', encoding="utf-8")
     code, out = world.run(['--non-interactive', '--mode', 'personal', '--clients', 'claude-code,cursor',
                            '--skip-verify'])
     assert code == 1 and 'not valid JSON' in out and 'Nothing was changed' in out
-    assert cursor.read_text() == '{"mcpServers": {broken'
+    assert cursor.read_text(encoding="utf-8") == '{"mcpServers": {broken'
     assert not (world.home / '.claude.json').exists() and not world.record.exists()
 
 
@@ -213,7 +213,7 @@ def test_ctrl_c_during_apply_waits_for_a_complete_write(tmp_path, monkeypatch):
     assert code == CANCELLED and 'applied' in out and 'Checking' not in out
     assert len(calls) == 2
     assert (world.home / '.claude.json').exists() and (world.home / '.codex' / 'config.toml').exists()
-    assert json.loads(world.record.read_text())['personal']['clients'] == ['claude-code', 'codex']
+    assert json.loads(world.record.read_text(encoding="utf-8"))['personal']['clients'] == ['claude-code', 'codex']
 
 
 def test_autorun_only_for_a_person_at_a_terminal(tmp_path, monkeypatch):
@@ -233,7 +233,7 @@ def test_autorun_only_for_a_person_at_a_terminal(tmp_path, monkeypatch):
         assert should_autorun({**env, **extra}, tty, tty) is False, extra
     assert should_autorun({**env, 'CI': 'false'}, tty, tty) is True
     (tmp_path / 'mem').mkdir()
-    (tmp_path / 'mem' / 'setup.json').write_text('{}')
+    (tmp_path / 'mem' / 'setup.json').write_text('{}', encoding="utf-8")
     assert should_autorun(env, tty, tty) is False
 
 
@@ -260,7 +260,7 @@ def test_tam_setup_subcommand_runs_the_wizard(tmp_path):
     completed, home = _entry_point(tmp_path, ['setup', '--non-interactive', '--mode', 'personal', '--clients', 'none',
                                               '--skip-verify'], '')
     assert completed.returncode == 0, completed.stderr
-    assert json.loads((home / '.tam' / 'setup.json').read_text())['personal']['clients'] == []
+    assert json.loads((home / '.tam' / 'setup.json').read_text(encoding="utf-8"))['personal']['clients'] == []
 
 
 def test_verification_starts_the_real_server(tmp_path):
@@ -296,14 +296,14 @@ def test_company_interactive_creates_admin_departments_providers_and_service(tmp
     invite = re.search(r'^ {4}([A-Z0-9]{4}(?:-[A-Z0-9]{4}){4}) ', out, re.MULTILINE).group(1)
     Accounts(registry).redeem_invite('alice', invite, PASSWORD, 'ip')
     assert out.count(invite) == 1 and SECRET not in out
-    unit = (root / 'deploy' / 'tam-team.service').read_text()
+    unit = (root / 'deploy' / 'tam-team.service').read_text(encoding="utf-8")
     assert '--host 0.0.0.0 --port 3999' in unit and 'Restart=on-failure' in unit
     if os.name == 'posix':  # systemd units are Linux-only; a Windows data path is never rendered into one
         assert f'--root {root}' in unit
     assert 'https://memory.acme.test/dashboard/' in out and 'https://memory.acme.test/mcp/' in out
     assert out.count(SUPPORT_URL) == 1 and SUPPORT_LINE in out
     assert not list(root.parent.glob('.tam-setup-*'))
-    record = json.loads(world.record.read_text())['company']
+    record = json.loads(world.record.read_text(encoding="utf-8"))['company']
     assert record['departments'] == ['engineering', 'sales'] and record['deploy'] == 'service'
 
 
@@ -345,7 +345,7 @@ def test_company_compose_hands_over_to_the_web_wizard(tmp_path):
                            '--port', '3999', '--deploy', 'compose', '--skip-verify'])
     assert code == 0, out
     env_file = world.home / 'srv' / 'deploy' / 'compose.env'
-    assert 'TAM_TEAM_PORT=3999' in env_file.read_text()
+    assert 'TAM_TEAM_PORT=3999' in env_file.read_text(encoding="utf-8")
     if os.name == 'posix':
         assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
     assert 'setup code' in out and not (world.home / 'srv' / 'identity.db').exists()
@@ -366,12 +366,12 @@ def test_company_continuous_backup_to_s3_writes_litestream_service(tmp_path):
                                          '--backup-retention', '72h'))
     assert code == 0, out
     root = (world.home / 'srv').resolve()
-    config = (root / 'deploy' / 'litestream.yml').read_text()
+    config = (root / 'deploy' / 'litestream.yml').read_text(encoding="utf-8")
     assert f'dir: {json.dumps(str(root))}' in config and f'dir: {json.dumps(str(root / "workspaces"))}' in config
     assert 'url: "s3://acme-tam/prod/workspaces"' in config and 'retention: "72h"' in config
-    env = (root / 'deploy' / 'replication.env').read_text()
+    env = (root / 'deploy' / 'replication.env').read_text(encoding="utf-8")
     assert 'TAM_TEAM_REPLICA_URL=s3://acme-tam/prod\n' in env and 'TAM_TEAM_REPLICA_ENDPOINT=https://s3.acme.test' in env
-    unit = (root / 'deploy' / 'tam-team-litestream.service').read_text()
+    unit = (root / 'deploy' / 'tam-team-litestream.service').read_text(encoding="utf-8")
     if os.name == 'posix':  # NTFS has no POSIX mode bits; systemd units are Linux-only
         for name in ('litestream.yml', 'replication.env'):
             assert stat.S_IMODE((root / 'deploy' / name).stat().st_mode) == 0o600
@@ -379,7 +379,7 @@ def test_company_continuous_backup_to_s3_writes_litestream_service(tmp_path):
         assert f'ExecStart=litestream replicate -config {root}/deploy/litestream.yml' in unit
     assert 'AWS_SECRET_ACCESS_KEY=...' in out and 'replication status' in out
     assert 'Continuous backup' in out and 's3://acme-tam/prod' in out
-    assert json.loads(world.record.read_text())['company']['backup_replica'] == 's3://acme-tam/prod'
+    assert json.loads(world.record.read_text(encoding="utf-8"))['company']['backup_replica'] == 's3://acme-tam/prod'
 
 
 def test_company_continuous_backup_with_compose_goes_to_the_env_file(tmp_path):
@@ -388,7 +388,7 @@ def test_company_continuous_backup_with_compose_goes_to_the_env_file(tmp_path):
                            '--port', '3999', '--deploy', 'compose', '--skip-verify', '--backup', 's3',
                            '--backup-url', 's3://acme-tam/prod'])
     assert code == 0, out
-    env = (world.home / 'srv' / 'deploy' / 'compose.env').read_text()
+    env = (world.home / 'srv' / 'deploy' / 'compose.env').read_text(encoding="utf-8")
     assert 'TAM_TEAM_REPLICA_URL=s3://acme-tam/prod' in env and 'AWS_SECRET_ACCESS_KEY=\n' in env
     assert '--profile litestream up -d' in out
     assert not (world.home / 'srv' / 'deploy' / 'litestream.yml').exists()
@@ -407,7 +407,7 @@ def test_company_continuous_backup_to_a_directory_rejects_the_data_directory(tmp
     replica = world.home / 'nas' / 'tam'
     code, out = world.run(_company_flags(world, '--deploy', 'manual', '--backup', 'file', '--backup-url', str(replica)))
     assert code == 0, out
-    config = (world.home / 'srv' / 'deploy' / 'litestream.yml').read_text()
+    config = (world.home / 'srv' / 'deploy' / 'litestream.yml').read_text(encoding="utf-8")
     assert f'url: "{replica.resolve().as_uri()}"' in config and 'endpoint' not in config
     assert 'litestream replicate -config' in out
     assert not (world.home / 'srv' / 'deploy' / 'tam-team-litestream.service').exists()
@@ -417,7 +417,7 @@ def test_company_backup_off_by_default_keeps_setup_unchanged(tmp_path):
     world = World(tmp_path, dirs=())
     assert world.run(_company_flags(world, '--deploy', 'manual'))[0] == 0
     assert not (world.home / 'srv' / 'deploy' / 'litestream.yml').exists()
-    assert json.loads(world.record.read_text())['company']['backup_replica'] is None
+    assert json.loads(world.record.read_text(encoding="utf-8"))['company']['backup_replica'] is None
 
 
 def test_company_backup_step_does_not_apply_to_postgres(tmp_path, monkeypatch):
@@ -426,7 +426,7 @@ def test_company_backup_step_does_not_apply_to_postgres(tmp_path, monkeypatch):
     code, out = world.run(_company_flags(world, '--deploy', 'manual', '--backup', 's3', '--backup-url', 's3://a-b/c'))
     assert code == 0, out
     assert 'PostgreSQL tooling' in out and not (world.home / 'srv' / 'deploy' / 'litestream.yml').exists()
-    assert json.loads(world.record.read_text())['company']['backup_replica'] is None
+    assert json.loads(world.record.read_text(encoding="utf-8"))['company']['backup_replica'] is None
 
 
 def test_health_probe_reports_a_running_server():
@@ -468,7 +468,7 @@ def _existing_install(world):
     (world.home / '.claude.json').write_text(json.dumps({'mcpServers': {'memory': {
         'command': '/opt/tam/.venv/bin/python', 'args': ['/opt/tam/src/server.py'],
         'env': {'TAM_MEMORY_DIR': str(memory), 'MEMORY_LLM_PROVIDER': 'openai', 'OPENAI_API_KEY': SECRET,
-                'V9_EMBED_BACKEND': 'e5-large', 'MEMORY_LLM_MODEL': 'gpt-4.1-mini'}}}}))
+                'V9_EMBED_BACKEND': 'e5-large', 'MEMORY_LLM_MODEL': 'gpt-4.1-mini'}}}}), encoding="utf-8")
     return {path: hashlib.sha256(path.read_bytes()).hexdigest()
             for path in (memory / 'memory.db', world.home / '.claude.json')}
 
@@ -479,14 +479,14 @@ def _unchanged(snapshot):
 
 def test_existing_install_upgrades_silently_as_personal(tmp_path):
     world = World(tmp_path, dirs=('.claude', '.cursor'))
-    (world.home / '.cursor' / 'mcp.json').write_text('{not json')
+    (world.home / '.cursor' / 'mcp.json').write_text('{not json', encoding="utf-8")
     snapshot = _existing_install(world)
     record = adopt_existing(world.env, world.host)
     assert record.mode == 'personal' and record.source == 'upgrade'
     assert record.personal.clients == ['claude-code'] and record.personal.embed_preset == 'multilingual-large'
     assert record.personal.llm_provider == 'openai' and record.personal.llm_key_set is True
     assert record.personal.llm_settings == {'MEMORY_LLM_MODEL': 'gpt-4.1-mini'}
-    assert SECRET not in world.record.read_text()
+    assert SECRET not in world.record.read_text(encoding="utf-8")
     assert _unchanged(snapshot)
     assert adopt_existing(world.env, world.host) is None
     code, out = world.run()
@@ -510,7 +510,7 @@ def test_upgrade_first_start_in_mcp_mode_records_personal_without_prompt(tmp_pat
     replies = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith('{')]
     assert any(reply.get('id') == 1 and 'result' in reply for reply in replies), completed.stderr[-2000:]
     assert 'Welcome' not in completed.stdout
-    record = json.loads((home / '.tam' / 'setup.json').read_text())
+    record = json.loads((home / '.tam' / 'setup.json').read_text(encoding="utf-8"))
     assert record['mode'] == 'personal' and record['source'] == 'upgrade'
     with sqlite3.connect(home / '.tam' / 'memory.db') as db:
         assert db.execute('SELECT content FROM legacy_notes').fetchall() == [('keep me',)]
@@ -527,7 +527,7 @@ def test_company_server_is_added_next_to_personal_memory(tmp_path):
     assert overlap[0] == USAGE_ERROR and 'personal memory' in overlap[1]
     code, out = world.run(_company_flags(world, '--deploy', 'manual'))
     assert code == 0, out
-    record = json.loads(world.record.read_text())
+    record = json.loads(world.record.read_text(encoding="utf-8"))
     assert record['mode'] == 'company' and record['personal']['clients'] == ['claude-code']
     assert record['company']['data_dir'] == str((world.home / 'srv').resolve())
     assert _unchanged(snapshot)
@@ -566,7 +566,7 @@ def test_upgrade_points_at_plain_text_keys_and_reconfigure_moves_them(tmp_path, 
     assert SECRET not in caplog.text
     code, out = world.run(['--reconfigure', '--skip-verify'], Script('', '', '', '', '', '', '', 'n', '', '', 'y'))
     assert code == 0, out
-    assert SECRET not in (world.home / '.claude.json').read_text()
+    assert SECRET not in (world.home / '.claude.json').read_text(encoding="utf-8")
     assert saved_settings(world)['OPENAI_API_KEY'] == SECRET
 
 

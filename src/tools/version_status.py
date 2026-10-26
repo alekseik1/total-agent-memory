@@ -15,7 +15,6 @@ Reports:
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -68,8 +67,9 @@ def applied_migrations(db: sqlite3.Connection) -> list[dict]:
 
 def get_status(db_path: Path | None = None) -> dict[str, Any]:
     if db_path is None:
-        memory_dir = Path(os.environ.get("CLAUDE_MEMORY_DIR", Path.home() / ".claude-memory"))
-        db_path = memory_dir / "memory.db"
+        from paths import memory_dir
+
+        db_path = memory_dir() / "memory.db"
 
     on_disk = discovered_migrations()
     on_disk_versions = [v for v, _ in on_disk]

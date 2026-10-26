@@ -21,8 +21,13 @@ from typing import Any
 from ingestion.chunker import SemanticChunker
 from ingestion.enricher import MetadataEnricher
 from ingestion.extractor import ConceptExtractor
+from queue_retry import ensure_column, next_attempt_iso, now_iso
 
 LOG = lambda msg: sys.stderr.write(f"[memory-ingest] {msg}\n")
+
+# An item whose processing raised is retried with backoff this many times
+# before it is parked as 'error'.
+MAX_INGEST_ATTEMPTS = 3
 
 
 def _now() -> str:
@@ -76,6 +81,8 @@ class IngestGateway:
 
     def __init__(self, db: sqlite3.Connection) -> None:
         self.db = db
+        ensure_column(db, "ingest_queue", "attempts", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(db, "ingest_queue", "next_attempt_at", "TEXT")
         self.chunker = SemanticChunker()
         self.extractor = ConceptExtractor(db)
         self.enricher = MetadataEnricher(db)
@@ -195,9 +202,10 @@ class IngestGateway:
                 """SELECT id, source, content_type, raw_content, text_content, metadata
                    FROM ingest_queue
                    WHERE status = 'pending'
+                     AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                    ORDER BY created_at ASC
                    LIMIT ?""",
-                (limit,),
+                (now_iso(), limit),
             ).fetchall()
         except sqlite3.Error as exc:
             LOG(f"Failed to fetch pending items: {exc}")
@@ -292,8 +300,31 @@ class IngestGateway:
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
             LOG(f"Processing failed for {ingest_id}: {error_msg}")
-            self._update_status(ingest_id, "error", error_message=error_msg)
+            self._schedule_retry_or_fail(ingest_id, error_msg)
             return False
+
+    def _schedule_retry_or_fail(self, ingest_id: str, error_msg: str) -> None:
+        """Re-queue a failed item behind an exponential backoff; park it as 'error' once exhausted."""
+        try:
+            row = self.db.execute(
+                "SELECT attempts FROM ingest_queue WHERE id = ?", (ingest_id,)
+            ).fetchone()
+            attempts = ((row[0] if row else 0) or 0) + 1
+            if attempts >= MAX_INGEST_ATTEMPTS:
+                self.db.execute(
+                    "UPDATE ingest_queue SET status = 'error', attempts = ?, error_message = ?, "
+                    "processed_at = ?, next_attempt_at = NULL WHERE id = ?",
+                    (attempts, error_msg, _now(), ingest_id),
+                )
+            else:
+                self.db.execute(
+                    "UPDATE ingest_queue SET status = 'pending', attempts = ?, error_message = ?, "
+                    "next_attempt_at = ? WHERE id = ?",
+                    (attempts, error_msg, next_attempt_iso(attempts), ingest_id),
+                )
+            self.db.commit()
+        except sqlite3.Error as exc:
+            LOG(f"Failed to schedule retry for {ingest_id}: {exc}")
 
     def _update_status(
         self,

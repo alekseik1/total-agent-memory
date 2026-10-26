@@ -52,7 +52,7 @@ def setup_env() -> None:
 
 
 def import_store():
-    sys.path.insert(0, "/Users/vitalii-macpro/claude-memory-server/src")
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
     import server
     return server
 
@@ -314,7 +314,7 @@ def main() -> int:
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = Path(args.output) if args.output else RESULTS_DIR / f"personal-{int(time.time())}.json"
-    with open(out_path, "w") as fh:
+    with open(out_path, "w", encoding="utf-8") as fh:
         json.dump({
             "overall": overall,
             "per_project": agg_projects,

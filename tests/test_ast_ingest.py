@@ -27,7 +27,7 @@ def tmp_tree(tmp_path):
             """A greeter class."""
             def say(self, name):
                 return greet(name)
-    ''').lstrip())
+    ''').lstrip(), encoding="utf-8")
 
     (tmp_path / "server.go").write_text(textwrap.dedent('''
         package main
@@ -41,7 +41,7 @@ def tmp_tree(tmp_path):
         }
 
         func main() {}
-    ''').lstrip())
+    ''').lstrip(), encoding="utf-8")
 
     (tmp_path / "app.ts").write_text(textwrap.dedent('''
         export function addOne(x: number): number {
@@ -52,7 +52,7 @@ def tmp_tree(tmp_path):
             n = 0
             inc() { this.n += 1 }
         }
-    ''').lstrip())
+    ''').lstrip(), encoding="utf-8")
 
     (tmp_path / "lib.rs").write_text(textwrap.dedent('''
         pub struct Point { pub x: i32, pub y: i32 }
@@ -62,12 +62,12 @@ def tmp_tree(tmp_path):
         impl Point {
             pub fn norm(&self) -> i32 { self.x * self.x + self.y * self.y }
         }
-    ''').lstrip())
+    ''').lstrip(), encoding="utf-8")
 
-    (tmp_path / "README.md").write_text("# skip me")
+    (tmp_path / "README.md").write_text("# skip me", encoding="utf-8")
     skip_dir = tmp_path / "node_modules"
     skip_dir.mkdir()
-    (skip_dir / "junk.js").write_text("function noise() {}")
+    (skip_dir / "junk.js").write_text("function noise() {}", encoding="utf-8")
     return tmp_path
 
 
@@ -186,10 +186,17 @@ def test_parse_directory_include_filter(ing, tmp_tree):
 # Fallback behaviour
 # ──────────────────────────────────────────────
 
-def test_unknown_extension_falls_back_to_file_chunk(ing, tmp_path):
+def test_unknown_extension_is_skipped_by_default(ing, tmp_path):
+    p = tmp_path / "id_rsa"
+    p.write_text("-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----", encoding="utf-8")
+    assert ing.parse_file(p) == []
+
+
+def test_unknown_extension_falls_back_to_file_chunk_when_opted_in(tmp_path):
+    from ast_ingest import ASTIngester
     p = tmp_path / "plain.txt"
-    p.write_text("hello world\nsecond line")
-    chunks = ing.parse_file(p)
+    p.write_text("hello world\nsecond line", encoding="utf-8")
+    chunks = ASTIngester(fallback_unknown_extensions=True).parse_file(p)
     assert len(chunks) == 1
     assert chunks[0].kind == "file"
     assert chunks[0].language == "unknown"
@@ -198,7 +205,7 @@ def test_unknown_extension_falls_back_to_file_chunk(ing, tmp_path):
 
 def test_empty_python_file_produces_file_fallback(ing, tmp_path):
     p = tmp_path / "empty.py"
-    p.write_text("")
+    p.write_text("", encoding="utf-8")
     chunks = ing.parse_file(p)
     assert len(chunks) == 1
     assert chunks[0].kind == "file"
@@ -212,7 +219,7 @@ def test_missing_file_raises(ing, tmp_path):
 def test_oversized_file_skipped(tmp_path):
     ing = ASTIngester(max_file_bytes=10)
     p = tmp_path / "big.py"
-    p.write_text("x = 1\n" * 100)
+    p.write_text("x = 1\n" * 100, encoding="utf-8")
     assert ing.parse_file(p) == []
 
 
@@ -225,3 +232,35 @@ def test_chunk_to_dict_is_json_serializable(ing, tmp_tree):
     chunks = ing.parse_file(tmp_tree / "mod_a.py")
     blob = json.dumps([c.to_dict() for c in chunks])
     assert len(blob) > 0
+
+
+def test_chunk_to_dict_can_omit_source_text(ing, tmp_tree):
+    chunk = ing.parse_file(tmp_tree / "mod_a.py")[0]
+    assert "content" in chunk.to_dict()
+    assert "content" not in chunk.to_dict(include_content=False)
+
+
+def test_parse_directory_skips_symlink_pointing_outside_root(ing, tmp_path, make_symlink):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "leak.py").write_text("def leaked():\n    return 1\n", encoding="utf-8")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "ok.py").write_text("def fine():\n    return 2\n", encoding="utf-8")
+    make_symlink(root / "link.py", outside / "leak.py")
+    names = {c.name for c in ing.parse_directory(root)}
+    assert "fine" in names and "leaked" not in names
+
+
+def test_deeply_nested_file_does_not_abort_directory_walk(ing, tmp_path, monkeypatch):
+    (tmp_path / "a_bad.py").write_text("def bad():\n    pass\n", encoding="utf-8")
+    (tmp_path / "b_good.py").write_text("def good():\n    pass\n", encoding="utf-8")
+    real = ing.parse_source
+
+    def flaky(file, language, source):
+        if file.endswith("a_bad.py"):
+            raise RecursionError
+        return real(file, language, source)
+
+    monkeypatch.setattr(ing, "parse_source", flaky)
+    assert {c.name for c in ing.parse_directory(tmp_path)} == {"good"}

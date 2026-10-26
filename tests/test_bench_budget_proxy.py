@@ -79,7 +79,7 @@ def test_parse_env_file_without_key_returns_none():
 @pytest.mark.skipif(sys.platform == "win32", reason="NTFS has no group/other mode bits")
 def test_load_api_key_refuses_group_readable_file(tmp_path):
     key_file = tmp_path / "openai.env"
-    key_file.write_text("OPENAI_API_KEY=sk-abc\n")
+    key_file.write_text("OPENAI_API_KEY=sk-abc\n", encoding="utf-8")
     os.chmod(key_file, 0o644)
     with pytest.raises(bp.BudgetError, match="chmod 600"):
         bp.load_api_key(key_file, {})
@@ -89,7 +89,7 @@ def test_load_api_key_refuses_group_readable_file(tmp_path):
 
 def test_load_api_key_skips_the_mode_check_without_posix_modes(tmp_path, monkeypatch):
     key_file = tmp_path / "openai.env"
-    key_file.write_text("OPENAI_API_KEY=sk-abc\n")
+    key_file.write_text("OPENAI_API_KEY=sk-abc\n", encoding="utf-8")
     os.chmod(key_file, 0o644)
     monkeypatch.setattr(bp, "POSIX_MODES", False)
     assert bp.load_api_key(key_file, {}) == ("sk-abc", f"file:{key_file}")
@@ -144,7 +144,7 @@ def test_worst_case_bounds_input_by_body_bytes_and_output_by_cap():
 
 def test_load_prices_requires_every_allowed_model(tmp_path):
     table = tmp_path / "prices.json"
-    table.write_text(json.dumps({"models": {"gpt-5.2": {"input": 1.75, "cached_input": 0.175, "output": 14}}}))
+    table.write_text(json.dumps({"models": {"gpt-5.2": {"input": 1.75, "cached_input": 0.175, "output": 14}}}), encoding="utf-8")
     assert bp.load_prices(table, ["gpt-5.2"])["gpt-5.2"] == PRICE
     with pytest.raises(bp.BudgetError, match="no price"):
         bp.load_prices(table, ["gpt-5.2", "gpt-9"])
@@ -201,12 +201,12 @@ def test_proxy_forwards_with_real_key_and_meters_usage(stub_upstream, tmp_path):
         assert status == 200 and "choices" in payload
     finally:
         proxy.stop()
-    assert [json.loads(line)["key_ok"] for line in stub_log.read_text().splitlines()] == [True, True]
-    entries = [json.loads(line) for line in (tmp_path / "ledger.jsonl").read_text().splitlines()]
+    assert [json.loads(line)["key_ok"] for line in stub_log.read_text(encoding="utf-8").splitlines()] == [True, True]
+    entries = [json.loads(line) for line in (tmp_path / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [entry["model"] for entry in entries] == ["gpt-5-mini", "gpt-5.2"]
     assert all(entry["usd"] > 0 and entry["output_tokens"] > 0 for entry in entries)
     assert ledger.summary()["spent_usd_guard"] == pytest.approx(sum(entry["usd"] for entry in entries))
-    assert DUMMY_KEY not in (tmp_path / "ledger.jsonl").read_text()
+    assert DUMMY_KEY not in (tmp_path / "ledger.jsonl").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("body,token,status,code", [
@@ -239,7 +239,7 @@ def test_proxy_returns_402_and_never_forwards_past_the_ceiling(stub_upstream, tm
         proxy.stop()
     assert statuses[0] == 200 and 402 in statuses
     assert statuses[statuses.index(402):] == [402] * (5 - statuses.index(402))
-    assert len(stub_log.read_text().splitlines()) == statuses.index(402)
+    assert len(stub_log.read_text(encoding="utf-8").splitlines()) == statuses.index(402)
     assert ledger.summary()["spent_usd_guard"] <= 0.017
 
 
@@ -262,7 +262,7 @@ def test_openai_sdk_through_proxy_does_not_retry_a_budget_stop(stub_upstream, tm
 
 def _run_guarded(tmp_path: Path, upstream: str, ceiling: str, child_code: str) -> subprocess.CompletedProcess:
     key_file = tmp_path / "dummy.env"
-    key_file.write_text(f'export OPENAI_API_KEY="{DUMMY_KEY}"\n')
+    key_file.write_text(f'export OPENAI_API_KEY="{DUMMY_KEY}"\n', encoding="utf-8")
     os.chmod(key_file, 0o600)
     env = {**os.environ, "SOME_API_KEY": "must-not-reach-child"}
     return subprocess.run(
@@ -292,7 +292,7 @@ def test_run_guarded_completes_and_writes_summary(stub_upstream, tmp_path):
     upstream, _ = stub_upstream
     done = _run_guarded(tmp_path, upstream, "1", CHILD.replace("COUNT", "2").replace("SLEEP", "0"))
     assert done.returncode == 0, done.stderr
-    summary = json.loads((tmp_path / "run" / "budget" / "summary.json").read_text())
+    summary = json.loads((tmp_path / "run" / "budget" / "summary.json").read_text(encoding="utf-8"))
     assert summary["requests"] == 2 and not summary["budget_stop"] and summary["spent_usd_guard"] > 0
     assert DUMMY_KEY not in done.stderr + done.stdout
 
@@ -302,7 +302,7 @@ def test_run_guarded_stops_the_command_on_budget_trip(stub_upstream, tmp_path):
     done = _run_guarded(tmp_path, upstream, "0.017", CHILD.replace("COUNT", "5").replace("SLEEP", "60"))
     assert done.returncode == 3, done.stderr
     assert "status 402" in done.stdout
-    summary = json.loads((tmp_path / "run" / "budget" / "summary.json").read_text())
+    summary = json.loads((tmp_path / "run" / "budget" / "summary.json").read_text(encoding="utf-8"))
     assert summary["budget_stop"] and summary["spent_usd_guard"] <= 0.017
     assert summary["wall_seconds"] < 60
 

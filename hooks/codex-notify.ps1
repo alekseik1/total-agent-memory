@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Codex CLI notify hook — captures every finished Codex turn into TAM
+    Codex CLI notify hook - captures every finished Codex turn into TAM
 
 .DESCRIPTION
     Twin of hooks/codex-notify.sh. Codex runs the notify program with the
@@ -27,7 +27,9 @@ if (-not $HookPython) {
     Write-HookLog "CODEX_NOTIFY_SKIPPED: no python found for tam_hook.py"
     exit 0
 }
-& $HookPython $HookHelper codex-notify --src $HookSrcDir --memory-dir $MemoryDir --payload $Payload 2>&1 |
+# The payload goes through stdin: Windows PowerShell 5.1 strips the double quotes of a JSON string passed
+# as a native-command argument, so python would receive {type:agent-turn-complete,...}.
+$Payload | & $HookPython $HookHelper codex-notify --src $HookSrcDir --memory-dir $MemoryDir 2>&1 |
     ForEach-Object { Write-HookLog "CODEX_NOTIFY: $_" }
 
 if ($env:TAM_HOOK_NOTIFY -ne "0" -and $Payload -match '"agent-turn-complete"') {
@@ -38,7 +40,7 @@ if ($env:TAM_HOOK_NOTIFY -ne "0" -and $Payload -match '"agent-turn-complete"') {
         try {
             $notify.Icon = [System.Drawing.SystemIcons]::Information
             $notify.Visible = $true
-            $notify.ShowBalloonTip(3000, "Total Memory — $Project", "Turn captured in TAM memory",
+            $notify.ShowBalloonTip(3000, "Total Memory - $Project", "Turn captured in TAM memory",
                 [System.Windows.Forms.ToolTipIcon]::Info)
             Start-Sleep -Seconds 3
         } finally {

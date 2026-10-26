@@ -176,7 +176,7 @@ async def main() -> int:
         "with_llm": args.with_llm,
         "rounds": args.rounds,
         "configs": results,
-    }, indent=2))
+    }, indent=2), encoding="utf-8")
     print(f"Wrote {out_path}")
     return 0
 

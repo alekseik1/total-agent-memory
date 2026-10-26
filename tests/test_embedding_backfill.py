@@ -33,8 +33,8 @@ class Clock:
 
 def _schema(db):
     # 039 also alters write_intents; give it the table it expects.
-    db.executescript((Path(__file__).parent.parent / "migrations" / "017_outbox.sql").read_text())
-    db.executescript(MIGRATION.read_text())
+    db.executescript((Path(__file__).parent.parent / "migrations" / "017_outbox.sql").read_text(encoding="utf-8"))
+    db.executescript(MIGRATION.read_text(encoding="utf-8"))
 
 
 @pytest.fixture

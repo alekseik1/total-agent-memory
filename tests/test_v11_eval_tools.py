@@ -143,7 +143,7 @@ def test_memory_eval_locomo_returns_structured_payload(wired_server, tmp_path):
             "must_contain": ["tachyon-eval"],
             "k": 5,
         },
-    ]))
+    ]), encoding="utf-8")
 
     # Seed the store so the scenario can pass.
     wired_server.store.save_knowledge(

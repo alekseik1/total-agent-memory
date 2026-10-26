@@ -114,7 +114,7 @@ def patch_thread_safety(server_mod, store) -> None:
 
 
 def load_dataset(path: Path) -> list[dict]:
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -341,7 +341,7 @@ def _augment_category_prompts(few_shot_path: Path) -> dict[int, str]:
         print(f"[locomo-llm] few-shot file missing: {few_shot_path} — using built-in prompts.")
         return CATEGORY_PROMPTS
     try:
-        bundle = json.loads(few_shot_path.read_text())
+        bundle = json.loads(few_shot_path.read_text(encoding="utf-8"))
     except Exception as e:  # noqa: BLE001
         print(f"[locomo-llm] few-shot parse error: {e} — using built-in prompts.")
         return CATEGORY_PROMPTS
@@ -1283,7 +1283,7 @@ def main() -> int:
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = Path(args.output) if args.output else RESULTS_DIR / f"locomo-llm-{int(time.time())}.json"
-    with open(out_path, "w") as fh:
+    with open(out_path, "w", encoding="utf-8") as fh:
         json.dump({
             "ingest": ingest_stats,
             "aggregate": agg,

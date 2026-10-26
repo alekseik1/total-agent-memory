@@ -39,7 +39,12 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-MEMORY_DIR = Path(os.environ.get("CLAUDE_MEMORY_DIR", os.path.expanduser("~/.claude-memory")))
+from background_writes import save_background_knowledge  # noqa: E402
+from paths import memory_dir  # noqa: E402
+from tool_support import ollama_binary, ollama_generate  # noqa: E402
+
+MEMORY_DIR = memory_dir()
+RETRAIN_MODEL_NAME = os.environ.get("MEMORY_RETRAIN_MODEL_NAME", "vitalii-brain")
 LOG = lambda msg: sys.stderr.write(f"[reflection-scheduler] {datetime.now().strftime('%H:%M:%S')} {msg}\n")
 
 # Try APScheduler
@@ -150,7 +155,6 @@ def run_graph_enrichment(db_path: str) -> None:
         LOG(f"Graph enrichment error: {e}")
 
 
-OLLAMA_BIN = "/usr/local/bin/ollama"
 TELEGRAM_ENV_PATH = Path(__file__).parent.parent.parent / "telegram" / ".env"
 
 
@@ -159,7 +163,7 @@ def _load_dotenv(path: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     if not path.is_file():
         return result
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -173,13 +177,10 @@ def _load_dotenv(path: Path) -> dict[str, str]:
 
 
 def _make_ssl_context() -> ssl.SSLContext:
-    """Create SSL context using certifi certs if available."""
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
+    """Verified TLS context: certifi, else the platform store, never unverified."""
+    from tls_context import verified_context
 
+    return verified_context()
 
 def _telegram_send(token: str, chat_id: int, text: str, parse_mode: str = "HTML") -> bool:
     """Send a Telegram message via Bot API. Returns True on success."""
@@ -210,28 +211,9 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07", "", text)
 
 
-def _ollama_generate(prompt: str, model: str = "vitalii-brain", timeout: int = 120) -> str:
-    """Generate text with Ollama CLI. Returns generated text or empty string."""
-    try:
-        env = os.environ.copy()
-        env["NO_COLOR"] = "1"
-        result = subprocess.run(
-            [OLLAMA_BIN, "run", model, prompt],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
-        return _strip_ansi(result.stdout).strip()
-    except subprocess.TimeoutExpired:
-        LOG(f"Ollama timeout after {timeout}s")
-        return ""
-    except FileNotFoundError:
-        LOG(f"Ollama binary not found at {OLLAMA_BIN}")
-        return ""
-    except Exception as e:
-        LOG(f"Ollama error: {e}")
-        return ""
+def _ollama_generate(prompt: str, model: str | None = None, timeout: int = 120) -> str:
+    """Generate text with the Ollama CLI (prompt on stdin). Returns generated text or empty string."""
+    return ollama_generate(prompt, model, timeout, log=LOG)
 
 
 def _save_insight_to_db(db_path: str, content: str, tags: list[str]) -> None:
@@ -240,19 +222,10 @@ def _save_insight_to_db(db_path: str, content: str, tags: list[str]) -> None:
     db.row_factory = sqlite3.Row
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        db.execute(
-            """INSERT INTO knowledge
-               (session_id, type, content, project, tags, source,
-                confidence, created_at, status)
-               VALUES (?, 'lesson', ?, 'general', ?, 'dream-mode', 0.6, ?, 'active')""",
-            (
-                f"dream_{now}",
-                content,
-                json.dumps(tags),
-                now,
-            ),
+        save_background_knowledge(
+            db, content=content, ktype="lesson", project="general", session_id=f"dream_{now}",
+            tags=tags, source="dream-mode", confidence=0.6, created_at=now,
         )
-        db.commit()
     except Exception as e:
         LOG(f"Error saving dream insight: {e}")
     finally:
@@ -272,23 +245,11 @@ def _save_knowledge_record(
     db = sqlite3.connect(db_path)
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        db.execute(
-            """INSERT INTO knowledge
-               (session_id, type, content, project, tags, source,
-                confidence, created_at, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
-            (
-                f"{source}_{now}_{uuid.uuid4().hex[:6]}",
-                record_type,
-                content,
-                project,
-                json.dumps(tags or []),
-                source,
-                confidence,
-                now,
-            ),
+        save_background_knowledge(
+            db, content=content, ktype=record_type, project=project,
+            session_id=f"{source}_{now}_{uuid.uuid4().hex[:6]}",
+            tags=tags or [], source=source, confidence=confidence, created_at=now,
         )
-        db.commit()
     except Exception as e:
         LOG(f"Error saving knowledge ({source}): {e}")
     finally:
@@ -977,7 +938,7 @@ def run_rss_poll(db_path: str) -> None:
         return
 
     try:
-        with open(feeds_path) as f:
+        with open(feeds_path, encoding="utf-8") as f:
             feeds: list[dict[str, Any]] = json.load(f)
     except (json.JSONDecodeError, IOError) as e:
         LOG(f"Error reading rss_feeds.json: {e}")
@@ -991,7 +952,7 @@ def run_rss_poll(db_path: str) -> None:
     state: dict[str, str] = {}
     if state_path.is_file():
         try:
-            with open(state_path) as f:
+            with open(state_path, encoding="utf-8") as f:
                 state = json.load(f)
         except (json.JSONDecodeError, IOError):
             state = {}
@@ -1063,17 +1024,10 @@ def run_rss_poll(db_path: str) -> None:
                 for item_id, title, link in new_items:
                     content = f"{title}\n{link}" if link else title
                     try:
-                        db.execute(
-                            """INSERT INTO knowledge
-                               (session_id, type, content, project, tags, source,
-                                confidence, created_at, status)
-                               VALUES (?, 'fact', ?, 'general', ?, 'rss', 0.5, ?, 'active')""",
-                            (
-                                f"rss_{now}_{uuid.uuid4().hex[:8]}",
-                                content,
-                                json.dumps(["rss", "news"]),
-                                now,
-                            ),
+                        save_background_knowledge(
+                            db, content=content, ktype="fact", project="general",
+                            session_id=f"rss_{now}_{uuid.uuid4().hex[:8]}",
+                            tags=["rss", "news"], source="rss", confidence=0.5, created_at=now,
                         )
                     except Exception as e:
                         LOG(f"Error saving RSS item: {e}")
@@ -1087,7 +1041,7 @@ def run_rss_poll(db_path: str) -> None:
 
     # Save state
     try:
-        with open(state_path, "w") as f:
+        with open(state_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
     except IOError as e:
         LOG(f"Error saving rss_state.json: {e}")
@@ -1199,7 +1153,7 @@ def run_github_monitor(db_path: str) -> None:
         return
 
     try:
-        with open(repos_path) as f:
+        with open(repos_path, encoding="utf-8") as f:
             repos: list[dict[str, Any]] = json.load(f)
     except (json.JSONDecodeError, IOError) as e:
         LOG(f"Error reading github_repos.json: {e}")
@@ -1213,7 +1167,7 @@ def run_github_monitor(db_path: str) -> None:
     state: dict[str, str] = {}
     if state_path.is_file():
         try:
-            with open(state_path) as f:
+            with open(state_path, encoding="utf-8") as f:
                 state = json.load(f)
         except (json.JSONDecodeError, IOError):
             state = {}
@@ -1262,19 +1216,11 @@ def run_github_monitor(db_path: str) -> None:
                     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                     content = f"New release: {repo_key} {tag}\n{name}\n{html_url}\n{body}".strip()
                     try:
-                        db.execute(
-                            """INSERT INTO knowledge
-                               (session_id, type, content, project, tags, source,
-                                confidence, created_at, status)
-                               VALUES (?, 'fact', ?, 'general', ?, 'github', 0.7, ?, 'active')""",
-                            (
-                                f"github_{now}_{uuid.uuid4().hex[:8]}",
-                                content,
-                                json.dumps(["github", "release", repo]),
-                                now,
-                            ),
+                        save_background_knowledge(
+                            db, content=content, ktype="fact", project="general",
+                            session_id=f"github_{now}_{uuid.uuid4().hex[:8]}",
+                            tags=["github", "release", repo], source="github", confidence=0.7, created_at=now,
                         )
-                        db.commit()
                     except Exception as e:
                         LOG(f"Error saving GitHub release: {e}")
                     finally:
@@ -1292,7 +1238,7 @@ def run_github_monitor(db_path: str) -> None:
 
     # Save state
     try:
-        with open(state_path, "w") as f:
+        with open(state_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
     except IOError as e:
         LOG(f"Error saving github_state.json: {e}")
@@ -1331,7 +1277,7 @@ def run_auto_retrain(db_path: str) -> None:
     state: dict[str, Any] = {}
     if state_path.is_file():
         try:
-            with open(state_path) as f:
+            with open(state_path, encoding="utf-8") as f:
                 state = json.load(f)
         except (json.JSONDecodeError, IOError):
             state = {}
@@ -1363,7 +1309,7 @@ def run_auto_retrain(db_path: str) -> None:
         result = subprocess.run(
             [python_bin, str(export_script), "--mode", "modelfile"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=300,
             cwd=str(project_root),
         )
@@ -1385,11 +1331,16 @@ def run_auto_retrain(db_path: str) -> None:
         LOG(f"Modelfile not found at {modelfile_path}")
         return
 
+    ollama = ollama_binary()
+    if ollama is None:
+        LOG("Auto-retrain skipped: ollama binary not found")
+        return
+
     try:
         result = subprocess.run(
-            [OLLAMA_BIN, "create", "vitalii-brain", "-f", str(modelfile_path)],
+            [ollama, "create", RETRAIN_MODEL_NAME, "-f", str(modelfile_path)],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=600,
             cwd=str(project_root / "ollama"),
         )
@@ -1406,7 +1357,7 @@ def run_auto_retrain(db_path: str) -> None:
     state["last_retrain"] = now
     state["records_at_retrain"] = new_count
     try:
-        with open(state_path, "w") as f:
+        with open(state_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
     except IOError as e:
         LOG(f"Error saving retrain_state.json: {e}")
@@ -1671,19 +1622,14 @@ def run_task_processor(db_path: str) -> None:
 
             # Save condensed learning to knowledge base
             try:
-                db.execute(
-                    """INSERT INTO knowledge
-                       (session_id, type, content, context, project, tags,
-                        status, confidence, source, created_at, last_confirmed, recall_count)
-                       VALUES (?, 'fact', ?, ?, 'self-learning', ?, 'active', 0.7, 'vito-autolearn', ?, ?, 0)""",
-                    (
-                        session_id,
-                        f"[Daily Learning] {domain} ({today_str}):\n{condensed}",
-                        f"Auto-learned by Vito task processor from web research on {today_str}",
-                        json.dumps([domain.lower().replace(" ", "-"), "self-learn", "vito", "daily"]),
-                        now_str,
-                        now_str,
-                    ),
+                save_background_knowledge(
+                    db,
+                    content=f"[Daily Learning] {domain} ({today_str}):\n{condensed}",
+                    ktype="fact", project="self-learning", session_id=session_id,
+                    context=f"Auto-learned by Vito task processor from web research on {today_str}",
+                    tags=[domain.lower().replace(" ", "-"), "self-learn", "vito", "daily"],
+                    source="vito-autolearn", confidence=0.7, created_at=now_str,
+                    extra={"last_confirmed": now_str, "recall_count": 0},
                 )
             except Exception as e:
                 LOG(f"[task-proc] Knowledge save error for {domain}: {e}")

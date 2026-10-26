@@ -1,5 +1,5 @@
 # ===========================================
-# UserPromptSubmit Hook (PowerShell) — prompt capture + ambient recall
+# UserPromptSubmit Hook (PowerShell) - prompt capture + ambient recall
 #
 # Twin of hooks/user-prompt-submit.sh:
 # 1. Caches the hook JSON and hands it to a detached worker
@@ -9,7 +9,7 @@
 #    TAM_AMBIENT_LATENCY_MS / TAM_AMBIENT_TOKEN_BUDGET, deduped per session.
 #
 # Env: TAM_AMBIENT_RECALL=false disables step 2
-#      TAM_MEMORY_DIR / CLAUDE_MEMORY_INSTALL_DIR — resolved by lib/common.ps1
+#      TAM_MEMORY_DIR / CLAUDE_MEMORY_INSTALL_DIR - resolved by lib/common.ps1
 #
 # Hook: UserPromptSubmit (matcher: "")
 # ===========================================

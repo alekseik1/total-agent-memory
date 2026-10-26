@@ -13,7 +13,7 @@ def pm_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     migration = Path(__file__).parent.parent / "migrations" / "009_procedural.sql"
-    conn.executescript(migration.read_text())
+    conn.executescript(migration.read_text(encoding="utf-8"))
     yield conn
     conn.close()
 

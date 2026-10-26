@@ -22,7 +22,7 @@ def cpu_seconds(pool):
     total = usage.ru_utime + usage.ru_stime
     ticks = os.sysconf('SC_CLK_TCK')
     for process, _ in pool.workers.values():
-        values = Path(f'/proc/{process.pid}/stat').read_text().rsplit(')', 1)[1].split()
+        values = Path(f'/proc/{process.pid}/stat').read_text(encoding="utf-8").rsplit(')', 1)[1].split()
         total += (int(values[11]) + int(values[12])) / ticks
     return total
 
@@ -30,7 +30,7 @@ def cpu_seconds(pool):
 def worker_rss_sum_mib(pool):
     kib = 0
     for process, _ in pool.workers.values():
-        fields = Path(f'/proc/{process.pid}/status').read_text().splitlines()
+        fields = Path(f'/proc/{process.pid}/status').read_text(encoding="utf-8").splitlines()
         kib += int(next(line.split()[1] for line in fields if line.startswith('VmRSS:')))
     return kib / 1024
 
@@ -79,4 +79,4 @@ if __name__ == '__main__':
     parser.add_argument('--workers', type=int, default=2)
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
-    args.out.write_text(json.dumps(asyncio.run(profile(args.workers)), indent=2) + '\n')
+    args.out.write_text(json.dumps(asyncio.run(profile(args.workers)), indent=2) + '\n', encoding="utf-8")

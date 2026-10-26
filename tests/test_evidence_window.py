@@ -259,3 +259,25 @@ def test_public_timeline_does_not_leak_other_project(db, monkeypatch):
         )
     )
     assert [hit["id"] for hit in result["results"]] == [2]
+
+
+def test_window_excludes_whole_tags_only(db):
+    hits = [{"id": 1, "content": "The service owner is Morgan."}]
+    scope = SearchScope(project="app")
+    db.execute("UPDATE knowledge SET tags='[\"disaster-recovery\"]' WHERE id=2")
+    kept = EvidenceWindow(db, ("recovery",)).expand(hits, scope=scope, radius=1)
+    assert 2 in [hit["id"] for hit in kept]
+    db.execute("UPDATE knowledge SET tags='[\"x\", \"Recovery\"]' WHERE id=2")
+    dropped = EvidenceWindow(db, ("recovery",)).expand(hits, scope=scope, radius=1)
+    assert 2 not in [hit["id"] for hit in dropped]
+
+
+def test_non_ascii_tags_match_the_way_they_are_stored():
+    from memory_core.evidence_window import NOT_TAGGED_SQL, quoted_tag
+
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE TABLE k (id INTEGER PRIMARY KEY, tags TEXT)")
+    connection.execute("INSERT INTO k VALUES (1, ?), (2, ?)", (json.dumps(["черновик", "x"]), json.dumps(["итог"])))
+    kept = [row[0] for row in connection.execute(
+        f"SELECT id FROM k WHERE {NOT_TAGGED_SQL.replace('k.tags', 'tags')} ORDER BY id", (quoted_tag(" Черновик"),))]
+    assert kept == [2], "the record tagged with the Cyrillic tag must be excluded"

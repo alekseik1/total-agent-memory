@@ -1,7 +1,7 @@
 # ===========================================
-# Auto Capture Hook (PowerShell) — twin of hooks/auto-capture.sh
+# Auto Capture Hook (PowerShell) - twin of hooks/auto-capture.sh
 #
-# PostToolUse:Write|Edit — suggests memory_observe after file changes
+# PostToolUse:Write|Edit - suggests memory_observe after file changes
 # (delivered as hookSpecificOutput.additionalContext).
 #
 # Hook: PostToolUse (matcher: "Write|Edit")
@@ -15,7 +15,7 @@ function Invoke-Hook {
     $filePath = Get-HookField 'tool_input.file_path'
     if (-not $toolName -or -not $filePath) { return }
 
-    # Skip config/doc files — usually not worth observing
+    # Skip config/doc files - usually not worth observing
     $ext = [System.IO.Path]::GetExtension($filePath)
     if ($ext -in ".md", ".txt", ".log", ".json", ".yaml", ".yml", ".toml", ".lock", ".sum") { return }
 

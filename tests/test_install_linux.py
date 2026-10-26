@@ -77,7 +77,7 @@ def _write_systemctl_stub(bin_dir: Path, log_path: Path, show_env_exit: int = 0)
         'if [ "$1" = "--user" ] && [ "$2" = "show-environment" ]; then\n'
         f'  exit {show_env_exit}\n'
         'fi\n'
-        'exit 0\n'
+        'exit 0\n', encoding="utf-8"
     )
     stub.chmod(0o755)
     return stub
@@ -110,7 +110,7 @@ def test_all_systemd_templates_present():
 
 def test_templates_use_placeholders():
     for path in SYSTEMD_DIR.glob("*.service"):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         # Service units must have ExecStart. Reflection and orphan-backfill
         # etc. reference the venv; dashboard references dashboard.py.
         assert "ExecStart=" in text, f"{path.name}: no ExecStart"
@@ -156,7 +156,7 @@ def test_linux_templates_are_substituted(sandbox_home: Path, tmp_path: Path):
     assert result.returncode == 0, result.stderr
 
     target = sandbox_home / ".config" / "systemd" / "user"
-    dashboard = (target / "claude-memory-dashboard.service").read_text()
+    dashboard = (target / "claude-memory-dashboard.service").read_text(encoding="utf-8")
 
     assert "@INSTALL_DIR@" not in dashboard, "placeholder leaked into installed unit"
     assert "@MEMORY_DIR@" not in dashboard
@@ -172,7 +172,7 @@ def test_linux_enables_units_when_bus_available(sandbox_home: Path, tmp_path: Pa
     result = _run_install(sandbox_home, "--ide", "claude-code", fake_systemctl=stub)
     assert result.returncode == 0, result.stderr
 
-    calls = systemctl_log.read_text() if systemctl_log.exists() else ""
+    calls = systemctl_log.read_text(encoding="utf-8") if systemctl_log.exists() else ""
     assert "--user daemon-reload" in calls, "daemon-reload must be called"
     assert "--user enable --now claude-memory-reflection.path" in calls
     assert "--user enable --now claude-memory-dashboard.service" in calls
@@ -219,7 +219,7 @@ def test_no_systemctl_available_still_stages_files(sandbox_home: Path, tmp_path:
     assert (target / "claude-memory-reflection.path").exists()
 
     # And install.sh must NOT have called `enable --now` when the bus is down.
-    calls = systemctl_log.read_text() if systemctl_log.exists() else ""
+    calls = systemctl_log.read_text(encoding="utf-8") if systemctl_log.exists() else ""
     assert "enable --now" not in calls, (
         "install.sh must skip systemctl enable when bus is unavailable"
     )
@@ -238,9 +238,9 @@ def test_linux_hooks_and_mcp_config_created_same_as_macos(sandbox_home: Path, tm
     assert settings.exists(), "claude-code settings.json must be created on Linux too"
 
     import json
-    data = json.loads(settings.read_text())
+    data = json.loads(settings.read_text(encoding="utf-8"))
     # MCP server registered where Claude Code reads it (~/.claude.json), hooks in settings.json
-    assert "memory" in json.loads((sandbox_home / ".claude.json").read_text())["mcpServers"]
+    assert "memory" in json.loads((sandbox_home / ".claude.json").read_text(encoding="utf-8"))["mcpServers"]
     # Hooks registered — same set as macOS
     assert "hooks" in data
     assert "SessionStart" in data["hooks"]
@@ -270,7 +270,7 @@ def test_uninstall_on_linux_removes_systemd_files(sandbox_home: Path, tmp_path: 
     remaining = list(target.glob("claude-memory-*"))
     assert not remaining, f"expected no claude-memory-* units, found: {remaining}"
 
-    calls = systemctl_log.read_text()
+    calls = systemctl_log.read_text(encoding="utf-8")
     assert "--user disable --now claude-memory-reflection.path" in calls
     assert "--user disable --now claude-memory-dashboard.service" in calls
     assert "--user disable --now claude-memory-orphan-backfill.timer" in calls

@@ -156,3 +156,6 @@ hooks/_docker-launchers/
 .coverage
 .coverage.*
 coverage.xml
+
+# Operator host names for scripts/check-no-internal-data.sh (never committed)
+scripts/internal-data-hosts.local.txt

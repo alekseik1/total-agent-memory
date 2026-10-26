@@ -249,6 +249,7 @@ class FactIndex:
             )
             params.append(project)
 
+        project_clause = " AND kk.project = ?" if project else ""
         sql = f"""
             SELECT
                 src.name  AS entity,
@@ -257,7 +258,9 @@ class FactIndex:
                 e.weight  AS weight,
                 e.context AS edge_context,
                 (SELECT kn.knowledge_id FROM knowledge_nodes kn
-                  WHERE kn.node_id = src.id OR kn.node_id = tgt.id
+                  JOIN knowledge kk ON kk.id = kn.knowledge_id
+                  WHERE (kn.node_id = src.id OR kn.node_id = tgt.id)
+                    AND kk.status = 'active'{project_clause}
                   ORDER BY kn.strength DESC LIMIT 1) AS knowledge_id
             FROM graph_edges e
             JOIN graph_nodes src ON src.id = e.source_id
@@ -267,6 +270,9 @@ class FactIndex:
             LIMIT ?
         """
         params.append(int(limit))
+        if project:
+            # The knowledge_id subquery comes first in the statement.
+            params.insert(0, project)
 
         with self._lock:
             cur = self._conn.execute(sql, params)
@@ -340,16 +346,18 @@ class FactIndex:
                 t.name AS value,
                 e.weight AS weight,
                 (SELECT kn.knowledge_id FROM knowledge_nodes kn
-                  WHERE kn.node_id = s.id OR kn.node_id = t.id
+                  JOIN knowledge kk ON kk.id = kn.knowledge_id
+                  WHERE (kn.node_id = s.id OR kn.node_id = t.id) AND kk.status = 'active'
                   ORDER BY kn.strength DESC LIMIT 1) AS knowledge_id,
-                COALESCE(k.project, '') AS project
+                COALESCE((SELECT k.project FROM knowledge k WHERE k.id = (
+                    SELECT kn.knowledge_id FROM knowledge_nodes kn
+                    JOIN knowledge kk ON kk.id = kn.knowledge_id
+                    WHERE (kn.node_id = s.id OR kn.node_id = t.id) AND kk.status = 'active'
+                    ORDER BY kn.strength DESC LIMIT 1)), '') AS project
             FROM graph_edges e
             JOIN graph_nodes s ON s.id = e.source_id
             JOIN graph_nodes t ON t.id = e.target_id
-            LEFT JOIN knowledge_nodes kn ON kn.node_id = s.id
-            LEFT JOIN knowledge k ON k.id = kn.knowledge_id
             WHERE e.relation_type NOT IN ({placeholders})
-            GROUP BY s.id, e.relation_type, t.id
             LIMIT ?
         """
         with self._lock:
@@ -408,7 +416,7 @@ class FactIndex:
         seen: set[tuple] = set()
         for i in top_idx:
             row = self._semantic_rows[int(i)]
-            if project and row[5] and row[5] != project:
+            if project and row[5] != project:
                 continue
             key = (str(row[0]).lower(), row[1], str(row[2]).lower())
             if key in seen:

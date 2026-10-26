@@ -178,7 +178,7 @@ def test_a_failed_fastembed_init_explains_the_memory_cost(tmp_path):
 @pytest.mark.parametrize("module", FORBIDDEN_ON_IMPORT)
 def test_no_module_reintroduces_the_eager_import(module: str):
     """Guard the source itself — a stray top-level import is easy to re-add."""
-    source = (ROOT / "src" / "server.py").read_text()
+    source = (ROOT / "src" / "server.py").read_text(encoding="utf-8")
     header = source[: source.index("class Store")]
     for line in header.splitlines():
         stripped = line.strip()

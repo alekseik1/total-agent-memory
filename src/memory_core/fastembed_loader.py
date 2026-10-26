@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import logging
 import shutil
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 EXTERNAL_DATA_ERROR = "External data path validation failed"
 MATERIALIZED_DIR = "materialized"
+# fastembed >= 0.6 (the pinned range) always pools by mean; the notice about the switch from 0.5 is noise.
+POOLING_NOTICE = r"The model .* now uses mean pooling instead of CLS embedding"
 
 
 _telemetry_disabled = False
@@ -43,14 +46,20 @@ def load_model(factory: Callable[..., object], model: str, **kwargs) -> object:
     """`factory(model, **kwargs)`, retried from a symlink-free copy when onnxruntime refuses the cache."""
     disable_onnxruntime_telemetry()
     try:
-        return factory(model, **kwargs)
+        return _construct(factory, model, **kwargs)
     except Exception as error:
         if EXTERNAL_DATA_ERROR not in str(error):
             raise
     path = materialize(factory, model, kwargs.get("cache_dir"))
     LOGGER.info("Loading fastembed model from a copy without cache symlinks",
                 extra={"model": model, "path": str(path)})
-    return factory(model, specific_model_path=str(path), **kwargs)
+    return _construct(factory, model, specific_model_path=str(path), **kwargs)
+
+
+def _construct(factory: Callable[..., object], model: str, **kwargs) -> object:
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=POOLING_NOTICE, category=UserWarning)
+        return factory(model, **kwargs)
 
 
 def materialize(factory, model: str, cache_dir: str | None) -> Path:

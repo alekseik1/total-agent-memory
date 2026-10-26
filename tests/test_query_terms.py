@@ -66,3 +66,22 @@ def test_fts_query_keeps_english_exact_and_short_stems_unexpanded():
     assert fts_match_query("по на") == '"по" OR "на"'
     assert fts_match_query('say "hi"') == '"say" OR "hi"'
     assert fts_match_query("!!!") == '"!!!"'
+
+
+STEM_THREADS = 8
+STEM_ROUNDS = 300
+STEM_WORDS = ("машинами", "программирование", "серверами", "базами", "запросами")
+
+
+def test_russian_stems_are_stable_across_threads():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from memory_core.query_terms import russian_stem
+
+    expected = {word: russian_stem(word) for word in STEM_WORDS}
+
+    def work(_: int) -> bool:
+        return all(russian_stem(word) == expected[word] for _ in range(STEM_ROUNDS) for word in STEM_WORDS)
+
+    with ThreadPoolExecutor(STEM_THREADS) as pool:
+        assert all(pool.map(work, range(STEM_THREADS)))

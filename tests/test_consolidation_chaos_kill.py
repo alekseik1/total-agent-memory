@@ -81,8 +81,8 @@ def _bootstrap_db(path: Path) -> None:
         );
         """
     )
-    conn.executescript((_MIGRATIONS / "025_consolidation_state.sql").read_text())
-    conn.executescript((_MIGRATIONS / "023_episodes.sql").read_text())
+    conn.executescript((_MIGRATIONS / "025_consolidation_state.sql").read_text(encoding="utf-8"))
+    conn.executescript((_MIGRATIONS / "023_episodes.sql").read_text(encoding="utf-8"))
     base = datetime.now(timezone.utc)
     for i in range(40):
         conn.execute(

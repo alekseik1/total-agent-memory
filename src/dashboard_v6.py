@@ -457,6 +457,7 @@ V6_PANELS_HTML = r"""
   </div>
 </section>
 <script>
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 (function() {
   async function refreshV6() {
     try {
@@ -478,7 +479,7 @@ V6_PANELS_HTML = r"""
         if (savings.by_filter && savings.by_filter.length) {
           html += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid #333;font-size:11px;">';
           savings.by_filter.forEach(f => {
-            html += `<div>${f.name}: ${f.uses}× avg -${f.avg_pct||0}%</div>`;
+            html += `<div>${esc(f.name)}: ${esc(f.uses)}× avg -${esc(f.avg_pct||0)}%</div>`;
           });
           html += '</div>';
         }
@@ -550,7 +551,7 @@ V6_PANELS_HTML = r"""
             <summary style="cursor:pointer;color:#f55;">recent failures (${enrich.recent_failures.length})</summary>`;
           enrich.recent_failures.forEach(f => {
             html += `<div style="margin:4px 0 0 12px;">id=${f.id} kid=${f.knowledge_id}
-              attempts=${f.attempts}<br/><code style="color:#ea7;">${f.last_error}</code></div>`;
+              attempts=${f.attempts}<br/><code style="color:#ea7;">${esc(f.last_error)}</code></div>`;
           });
           html += `</details>`;
         }
@@ -687,6 +688,7 @@ GRAPH_LIVE_HTML = r"""<!DOCTYPE html>
 </div>
 
 <script>
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // Vivid colors that pop on dark background
 const NODE_COLORS = {
   concept:    '#00ff99',  // bright green
@@ -782,8 +784,8 @@ function initGraph() {
     .nodeOpacity(0.95)
     .nodeLabel(n => `<div style="background:rgba(20,20,30,.95);padding:6px 10px;
                          border:1px solid #444;border-radius:4px;color:#fff;font-size:12px;">
-                         <b style="color:${NODE_COLORS[n.nodeType] || '#fff'}">${n.label}</b><br>
-                         type: ${n.nodeType} · mentions: ${n.mention_count || 0}<br>
+                         <b style="color:${NODE_COLORS[n.nodeType] || '#fff'}">${esc(n.label)}</b><br>
+                         type: ${esc(n.nodeType)} · mentions: ${esc(n.mention_count || 0)}<br>
                          degree: ${edgesByNode.get(n.id) || 0}
                        </div>`)
     .nodeResolution(12)             // smoother spheres
@@ -1311,6 +1313,7 @@ GRAPH_MATRIX_HTML = r"""<!DOCTYPE html>
   <div id="tooltip"></div>
 </div>
 <script>
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const TYPE_COLORS = {
   concept:'#00ff99', technology:'#33aaff', project:'#ff5577',
   person:'#ffaa00', company:'#ffdd00', product:'#bb55ff',
@@ -1402,7 +1405,7 @@ cv.addEventListener('mousemove', e => {
   }
   const w = cellAt.get(`${si},${ti}`);
   if (!w) { tooltip.style.display = 'none'; return; }
-  tooltip.innerHTML = `<b>${nodes[si].name}</b> → <b>${nodes[ti].name}</b><br>weight: ${w}<br>${nodes[si].type} → ${nodes[ti].type}`;
+  tooltip.innerHTML = `<b>${esc(nodes[si].name)}</b> → <b>${esc(nodes[ti].name)}</b><br>weight: ${esc(w)}<br>${esc(nodes[si].type)} → ${esc(nodes[ti].type)}`;
   tooltip.style.display = 'block';
   tooltip.style.left = (e.clientX + 14) + 'px';
   tooltip.style.top = (e.clientY + 14) + 'px';

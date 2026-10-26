@@ -52,7 +52,7 @@ def fixture_arrays() -> tuple[np.ndarray, np.ndarray]:
             f"calibration validation fixture missing at {_FIXTURE}; "
             f"run: python scripts/calibrate.py --generate-fixture"
         )
-    raw = json.loads(_FIXTURE.read_text())
+    raw = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     examples = raw["examples"]
     scores = np.array(
         [float(ex["raw_score"]) for ex in examples], dtype=np.float64
@@ -313,7 +313,7 @@ def test_save_load_roundtrip(tmp_path: Path) -> None:
 def test_load_rejects_wrong_kind(tmp_path: Path) -> None:
     """Loading a JSON with kind != 'platt' raises ValueError."""
     p = tmp_path / "bad.json"
-    p.write_text(json.dumps({"kind": "isotonic", "a": 0.0, "b": 0.0}))
+    p.write_text(json.dumps({"kind": "isotonic", "a": 0.0, "b": 0.0}), encoding="utf-8")
     with pytest.raises(ValueError):
         load(p)
 
@@ -325,7 +325,7 @@ def test_load_rejects_non_finite(tmp_path: Path) -> None:
     check that ``float()`` failure surfaces a ValueError.
     """
     p = tmp_path / "nan.json"
-    p.write_text(json.dumps({"kind": "platt", "a": "not a number", "b": 0.0}))
+    p.write_text(json.dumps({"kind": "platt", "a": "not a number", "b": 0.0}), encoding="utf-8")
     with pytest.raises(ValueError):
         load(p)
 

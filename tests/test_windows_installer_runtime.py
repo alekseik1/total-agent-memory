@@ -59,7 +59,7 @@ def test_windows_invalid_config_is_preserved(tmp_path):
     config.write_text('{broken JSON', encoding='utf-8')
     result = run_installer(tmp_path, '-Ide', 'cursor')
     assert result.returncode != 0
-    assert config.read_text() == '{broken JSON'
+    assert config.read_text(encoding="utf-8") == '{broken JSON'
 
 
 def test_windows_codex_upgrade_does_not_duplicate_env_table(tmp_path):

@@ -20,7 +20,6 @@ Options:
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import sys
 import time
@@ -106,8 +105,9 @@ def main() -> int:
             print(__doc__)
             return 0
 
-    memory_dir = Path(os.environ.get("CLAUDE_MEMORY_DIR", Path.home() / ".claude-memory"))
-    db_path = memory_dir / "memory.db"
+    from paths import memory_dir
+
+    db_path = memory_dir() / "memory.db"
     if not db_path.exists():
         _log(f"db not found at {db_path}")
         return 1

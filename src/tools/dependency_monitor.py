@@ -20,10 +20,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from background_writes import save_background_knowledge  # noqa: E402
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-MEMORY_DIR = Path(os.environ.get("CLAUDE_MEMORY_DIR", os.path.expanduser("~/.claude-memory")))
-OLLAMA_BIN = "/usr/local/bin/ollama"
+from paths import memory_dir  # noqa: E402
+
+MEMORY_DIR = memory_dir()
 TELEGRAM_ENV_PATH = Path(__file__).parent.parent.parent / "telegram" / ".env"
 
 LOG = lambda msg: sys.stderr.write(f"[dep-monitor] {datetime.now().strftime('%H:%M:%S')} {msg}\n")
@@ -33,7 +38,7 @@ def _load_dotenv(path: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     if not path.is_file():
         return result
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -44,12 +49,10 @@ def _load_dotenv(path: Path) -> dict[str, str]:
 
 
 def _make_ssl_context() -> ssl.SSLContext:
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
+    """Verified TLS context: certifi, else the platform store, never unverified."""
+    from tls_context import verified_context
 
+    return verified_context()
 
 def _telegram_send(token: str, chat_id: int, text: str, parse_mode: str = "HTML") -> bool:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -70,12 +73,11 @@ def _save_knowledge_record(db_path: str, content: str, record_type: str = "fact"
     db = sqlite3.connect(db_path)
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        db.execute(
-            """INSERT INTO knowledge (session_id, type, content, project, tags, source, confidence, created_at, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
-            (f"{source}_{now}_{uuid.uuid4().hex[:6]}", record_type, content, project,
-             json.dumps(tags or []), source, confidence, now))
-        db.commit()
+        save_background_knowledge(
+            db, content=content, ktype=record_type, project=project,
+            session_id=f"{source}_{now}_{uuid.uuid4().hex[:6]}",
+            tags=tags or [], source=source, confidence=confidence, created_at=now,
+        )
     except Exception as e:
         LOG(f"Error saving knowledge: {e}")
     finally:
@@ -105,7 +107,7 @@ def _parse_go_mod(path: str) -> list[dict[str, str]]:
 
     deps = []
     in_require = False
-    with open(go_mod) as f:
+    with open(go_mod, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line.startswith("require ("):
@@ -132,7 +134,7 @@ def _parse_composer_json(path: str) -> list[dict[str, str]]:
 
     deps = []
     try:
-        with open(composer) as f:
+        with open(composer, encoding="utf-8") as f:
             data = json.load(f)
         for section in ("require", "require-dev"):
             for pkg, version in data.get(section, {}).items():
@@ -152,7 +154,7 @@ def _parse_package_json(path: str) -> list[dict[str, str]]:
 
     deps = []
     try:
-        with open(pkg_json) as f:
+        with open(pkg_json, encoding="utf-8") as f:
             data = json.load(f)
         for section in ("dependencies", "devDependencies"):
             for pkg, version in data.get(section, {}).items():
@@ -185,7 +187,7 @@ def run_dependency_monitor(db_path: str) -> None:
         return
 
     try:
-        with open(projects_file) as f:
+        with open(projects_file, encoding="utf-8") as f:
             projects = json.load(f)
     except (json.JSONDecodeError, IOError) as e:
         LOG(f"Error reading monitored_projects.json: {e}")

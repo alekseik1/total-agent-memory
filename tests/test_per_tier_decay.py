@@ -115,3 +115,14 @@ def test_fresh_summary_loses_to_fresh_raw_at_same_rank():
         "fts (raw) match must outrank multi_repr (summary) match for "
         "documents of the same age"
     )
+
+
+@pytest.mark.parametrize("raw", ["0", "-30"])
+def test_non_positive_half_life_env_falls_back(monkeypatch, raw):
+    import config
+    monkeypatch.setenv("MEMORY_DECAY_PARENT_DAYS", raw)
+    monkeypatch.setenv("MEMORY_DECAY_RAW_DAYS", raw)
+    monkeypatch.setenv("MEMORY_EDGE_HALF_LIFE_DAYS", raw)
+    assert config.get_parent_half_life_days() == 90
+    assert config.get_repr_half_life_days("raw") == 180
+    assert config.get_edge_half_life_days() == 60

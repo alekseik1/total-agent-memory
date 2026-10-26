@@ -271,12 +271,12 @@ def main() -> int:
                "graph": graph_report, "configs": {name: config_of(name, defaults) for name in names},
                "results": results, "rows": rows_by_config, "seconds": round(time.perf_counter() - started, 1)}
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=1))
+    args.output.write_text(json.dumps(payload, indent=1), encoding="utf-8")
     args.output.with_suffix(".md").write_text(
         f"# {args.bench} {args.split} (cross-rerank {args.cross_rerank}, K={tier_ablation.SEARCH_LIMIT}, "
         f"entity graph {'on' if args.entity_graph else 'off'})\n\n{table}\n\n"
         + "\n".join(f"- {name}: coverage@10 {summary['coverage@10']:.3f}, compound {json.dumps(summary['compound'])}, "
-                    f"fired {json.dumps(summary['fired'])}" for name, summary in results.items()) + "\n")
+                    f"fired {json.dumps(summary['fired'])}" for name, summary in results.items()) + "\n", encoding="utf-8")
     print(table)
     return 0
 

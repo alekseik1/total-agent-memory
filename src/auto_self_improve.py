@@ -22,6 +22,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from paths import memory_dir
+from secret_redaction import redact_secrets
+from stdio_utf8 import use_utf8_stdio
 
 DB_PATH = memory_dir() / "memory.db"
 SESSION_ID = f"hook-{datetime.now(tz=UTC).strftime('%Y%m%d-%H%M%S')}"
@@ -49,6 +51,9 @@ def log_error(
     tags: list[str] | None = None,
 ) -> int:
     """Insert an error record. Returns the new error id."""
+    description = redact_secrets(description)[0]
+    fix = redact_secrets(fix)[0]
+    context = redact_secrets(context)[0]
     now = datetime.now(tz=UTC).isoformat() + "Z"
     status = "resolved" if fix else "open"
     cur = db.execute(
@@ -88,6 +93,7 @@ def log_fix(
     If none found, insert a new resolved error record.
     """
     now = datetime.now(tz=UTC).isoformat() + "Z"
+    fix = redact_secrets(fix)[0]
 
     # Try to resolve the latest open error in same category+project
     row = db.execute(
@@ -252,6 +258,20 @@ def check_patterns(
     return created_insights
 
 
+def _add_description(parser: argparse.ArgumentParser) -> None:
+    """--description-stdin keeps command lines and stderr out of argv, which any local user can read."""
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--description")
+    group.add_argument("--description-stdin", action="store_true")
+
+
+def _resolve_description(args: argparse.Namespace) -> str:
+    if not args.description_stdin:
+        return args.description
+    use_utf8_stdio()
+    return sys.stdin.read()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Direct DB writer for self-improvement pipeline"
@@ -260,7 +280,7 @@ def main() -> None:
 
     # --- error ---
     p_err = sub.add_parser("error", help="Log an error to memory DB")
-    p_err.add_argument("--description", required=True)
+    _add_description(p_err)
     p_err.add_argument("--category", required=True)
     p_err.add_argument("--severity", default="medium", choices=["low", "medium", "high", "critical"])
     p_err.add_argument("--fix", default="")
@@ -269,7 +289,7 @@ def main() -> None:
 
     # --- fix ---
     p_fix = sub.add_parser("fix", help="Resolve a recent error with a fix")
-    p_fix.add_argument("--description", required=True)
+    _add_description(p_fix)
     p_fix.add_argument("--category", required=True)
     p_fix.add_argument("--fix", required=True)
     p_fix.add_argument("--project", default="general")
@@ -280,6 +300,8 @@ def main() -> None:
     p_pat.add_argument("--days", type=int, default=30)
 
     args = parser.parse_args()
+    if args.command in ("error", "fix"):
+        args.description = _resolve_description(args)
     db = get_db()
 
     try:

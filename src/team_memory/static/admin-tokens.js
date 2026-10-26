@@ -16,6 +16,8 @@ window.TamSections.admin_tokens = async (container, ctx) => {
         {title: 'Owner', render: (t) => ui.person(names[t.user_id] || t.user_id, t.user_id)},
         {title: 'Client', render: (t) => h('strong', {text: t.client})},
         {title: 'Created', render: (t) => ui.time(t.created_at, 'unknown')},
+        {title: 'Last used', render: (t) => ui.time(t.last_used_at, 'never')},
+        {title: 'Expires', render: (t) => ui.time(t.expires_at, 'never')},
         {title: 'Status', render: (t) => ui.chip(t.revoked ? 'Revoked' : 'Active', t.revoked ? '' : 'good', {dot: true})},
         {title: '', render: (t) => t.revoked ? '' : h('div', {class: 'row-actions'}, h('button', {type: 'button', class: 'btn danger sm', onclick: async () => {
           if (!await ui.confirm('Revoke this token?', (names[t.user_id] || t.user_id) + "'s " + t.client + ' client stops working immediately.', 'Revoke token')) return;

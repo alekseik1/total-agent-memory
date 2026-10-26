@@ -86,7 +86,7 @@ def test_every_repo_root_dir_the_runtime_reads_is_declared() -> None:
     referenced: set[str] = set()
     for path in ROOT.joinpath("src").rglob("*.py"):
         for match in re.finditer(
-            r'parent\.parent\s*/\s*"([a-z_]+)"', path.read_text(errors="replace")
+            r'parent\.parent\s*/\s*"([a-z_]+)"', path.read_text(errors="replace", encoding="utf-8")
         ):
             referenced.add(match.group(1))
 

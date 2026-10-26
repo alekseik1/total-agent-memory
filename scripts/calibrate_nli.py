@@ -1442,7 +1442,9 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_build_fixture(args)
     if args.tune:
         if not args.output:
-            args.output = "~/.claude-memory/nli_calibration.json"
+            from paths import memory_dir
+
+            args.output = str(memory_dir() / "nli_calibration.json")
         return cmd_tune(args)
 
     p.print_help()

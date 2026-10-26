@@ -191,6 +191,7 @@ def purge_personal(registry: Registry, user_id: str, confirm: str,
         with registry.connect() as db:
             # set_active(False) already did this; repeated so a purge never leaves a way back in.
             db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            db.execute("DELETE FROM known_devices WHERE user_id=?", (user_id,))
             db.execute("DELETE FROM invites WHERE user_id=? AND used_at IS NULL", (user_id,))
             db.execute("UPDATE tokens SET revoked=1 WHERE user_id=? AND revoked=0", (user_id,))
             registry._event(db, "personal_purged", user_id,

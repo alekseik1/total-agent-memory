@@ -15,7 +15,7 @@
  "memory_mode": "fast",
  "llm": "disabled (MEMORY_LLM_ENABLED=false)",
  "tam_team_max_workers_default": 3,
- "src_path": "/private/tmp/claude-501/-Users-vitalii-macpro-PROJECT-claude-memory/f7d28575-4acf-466d-bd6c-d420683474a4/scratchpad/mainbase2/src",
+ "src_path": "/private/tmp/claude-501/-Users-<host>-PROJECT-claude-memory/f7d28575-4acf-466d-bd6c-d420683474a4/scratchpad/mainbase2/src",
  "team_memory_sha256": "bfb7959d7694def1be55615c5f7a9e4a9db87aa988a2b052b8e9079b06ba4027",
  "worktree_src_diff_stat": "",
  "seed": 20260925,

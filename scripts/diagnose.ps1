@@ -22,7 +22,19 @@ $ErrorActionPreference = "Continue"
 
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $InstallDir = Split-Path -Parent $ScriptDir
-$MemoryDir  = if ($env:CLAUDE_MEMORY_DIR) { $env:CLAUDE_MEMORY_DIR } else { Join-Path $env:USERPROFILE ".claude-memory" }
+$HomeDir    = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
+# Same order as src/paths.py memory_dir().
+$MemoryDir  = if ($env:TAM_MEMORY_DIR) {
+    $env:TAM_MEMORY_DIR
+} elseif ($env:CLAUDE_MEMORY_DIR) {
+    $env:CLAUDE_MEMORY_DIR
+} elseif (Test-Path (Join-Path $HomeDir ".tam")) {
+    Join-Path $HomeDir ".tam"
+} elseif (Test-Path (Join-Path $HomeDir ".claude-memory")) {
+    Join-Path $HomeDir ".claude-memory"
+} else {
+    Join-Path $HomeDir ".tam"
+}
 $Port       = if ($env:DASHBOARD_PORT) { $env:DASHBOARD_PORT } else { "37737" }
 
 $script:Failed = 0
@@ -33,9 +45,11 @@ function PrintFail ([string]$msg) { $script:Report += "  FAIL $msg"; $script:Fai
 function PrintWarn ([string]$msg) { $script:Report += "  WARN $msg" }
 
 function Get-OsName {
-    if ($IsWindows -or ($env:OS -eq "Windows_NT")) { return "Windows" }
-    if ($IsMacOS)  { return "macOS" }
-    if ($IsLinux)  { return "Linux" }
+    # $IsWindows/$IsMacOS/$IsLinux do not exist in Windows PowerShell 5.1, and StrictMode makes reading them an error.
+    if ($env:OS -eq "Windows_NT") { return "Windows" }
+    $kernel = (& uname -s 2>$null)
+    if ($kernel -eq "Darwin") { return "macOS" }
+    if ($kernel -eq "Linux") { return "Linux" }
     return "Unknown"
 }
 
@@ -94,7 +108,7 @@ function Check-Dashboard {
 }
 
 function Check-Ollama {
-    # NOTE: $host is a PowerShell automatic variable — use $ollamaHost instead.
+    # NOTE: $host is a PowerShell automatic variable - use $ollamaHost instead.
     $ollamaHost = if ($env:OLLAMA_HOST) { $env:OLLAMA_HOST } else { "http://127.0.0.1:11434" }
     try {
         Invoke-WebRequest -Uri "$ollamaHost/api/tags" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop | Out-Null
@@ -107,7 +121,12 @@ function Check-Ollama {
 function Check-Db ([string]$venvPy) {
     $db = Join-Path $MemoryDir "memory.db"
     if (-not (Test-Path $db)) {
-        PrintFail "DB missing: $db"
+        # install.ps1 creates the directory; the MCP server creates the database on its first start.
+        if (Test-Path $MemoryDir) {
+            PrintWarn "DB not created yet: $db (the MCP server creates it on its first start)"
+        } else {
+            PrintFail "DB missing: $db (no memory dir; run install.ps1)"
+        }
         return
     }
     if (-not $venvPy) {

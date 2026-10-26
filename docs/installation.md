@@ -42,7 +42,7 @@ These are the published distribution channels. Python 3.11 or newer is required 
 | **uvx** (Python via uv) | `uvx total-agent-memory` | One-off run with no install. Best for trying without commitment. |
 | **pipx** (Python isolated) | `pipx install total-agent-memory` | Installs the `total-agent-memory`, `tam`, `tam-lookup`, `lookup-memory` binaries on PATH in an isolated venv. |
 | **brew** (macOS / Linuxbrew) | `brew install vbcherepanov/tap/total-memory` | Bottle-style install with `tam` and legacy `claude-total-memory` symlinks. |
-| **Docker** (multi-arch) | `docker run -p 3737:3737 -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:14.9.0` | Containerized (linux/amd64 + linux/arm64). MCP over HTTP on `:3737/mcp`, dashboard on `:37737`. |
+| **Docker** (multi-arch) | `docker run -p 127.0.0.1:3737:3737 -p 127.0.0.1:37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:14.10.0` | Containerized (linux/amd64 + linux/arm64). MCP over HTTP on `:3737/mcp`, dashboard on `:37737`. |
 | **Claude Code plugin** | `/plugin marketplace add vbcherepanov/total-agent-memory`<br>`/plugin install total-agent-memory@vbcherepanov` | Installs the MCP server, the `memory-protocol` skill and all seven capture hooks in one step, from inside Claude Code. The bootstrap reuses an existing install if it finds one, so nothing is downloaded twice. |
 | **Claude plugin (directory edition)** | `/plugin marketplace add vbcherepanov/total-agent-memory-plugin`<br>`/plugin install total-agent-memory@vbcherepanov` | A small separate repository, [total-agent-memory-plugin](https://github.com/vbcherepanov/total-agent-memory-plugin), for Claude Code, Cowork and Codex (see the next row). Runs the pinned server with `uvx total-agent-memory==14.8.0` and adds the `memory-protocol` skill; no hooks. Needs [uv](https://docs.astral.sh/uv/). Use either this or the plugin above, not both. |
 | **Codex plugin** | `codex plugin marketplace add vbcherepanov/total-agent-memory-plugin`<br>`codex plugin add total-agent-memory@vbcherepanov` | The same plugin repository for Codex CLI: the pinned server and the `memory-protocol` skill. Data goes to `~/.tam/`, shared with Claude Code. Needs [uv](https://docs.astral.sh/uv/). |
@@ -86,6 +86,12 @@ when it is installed).
 pip install "total-agent-memory[ocr]"         # pip / uvx / pipx
 pip install -r requirements-ocr.txt           # clone
 ```
+
+pymacos is an optional alternative backend that avoids installing pyobjc. It is
+not part of the `[ocr]` extra: when it is importable it is tried first,
+otherwise pyobjc is used. Install it yourself with `pip install pymacos`. It is
+a new package with a single maintainer, so review it before putting it into the
+process that serves your memory.
 
 ### Upgrading from v11.x
 
@@ -158,6 +164,8 @@ Brings up 5 services:
 | `ollama` | Local LLM runtime | `127.0.0.1:11434` |
 | `reflection` | File-watch queue drainer | internal |
 | `scheduler` | Ofelia cron (backfill + update check) | internal |
+
+**Network exposure.** Inside the container both servers listen on `0.0.0.0`, so every request must carry the access token from `<data dir>/state/http-token` (created 0600 on first start; override with `TAM_HTTP_TOKEN`): `Authorization: Bearer <token>` for MCP and the API, `/login#token=<token>` once per browser for the dashboard (the fragment is never sent to the server; the page POSTs it, clears it from the address bar and sets an opaque session cookie that never contains the token; `POST /logout` ends it). The pre-14.10 form `/login?token=<token>` still works for one more release: it is exchanged at once and redirected to `/` with `Referrer-Policy: no-referrer`, but a reverse proxy in front may log the query string, so prefer the fragment. `/healthz` stays open. Always publish with `127.0.0.1:` as shown; a bare `-p 3737:3737` exposes the port on every interface. Changing an endpoint setting (`MEMORY_LLM_API_BASE`, `MEMORY_EMBED_API_BASE`, `OLLAMA_URL`) in the dashboard asks for an explicit confirmation because it redirects the stored API key and memory text.
 
 First run pulls `qwen2.5-coder:7b` (~4.7 GB) + `nomic-embed-text` (~275 MB) — 5–10 min cold start.
 

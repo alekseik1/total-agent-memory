@@ -31,19 +31,19 @@ class FakeFactory:
         return SimpleNamespace(sources=SimpleNamespace(hf="qdrant/big-model-onnx"))
 
 
-def cache_with_symlinked_snapshot(root):
+def cache_with_symlinked_snapshot(root, make_symlink):
     repo = root / "models--qdrant--big-model-onnx"
     (repo / "blobs").mkdir(parents=True)
     (repo / "blobs" / "abc").write_bytes(b"weights")
     snapshot = repo / "snapshots" / "rev1"
     snapshot.mkdir(parents=True)
-    (snapshot / "model.onnx_data").symlink_to(repo / "blobs" / "abc")
+    make_symlink(snapshot / "model.onnx_data", repo / "blobs" / "abc")
     (snapshot / "model.onnx").write_bytes(b"graph")
     return snapshot
 
 
-def test_external_data_refusal_loads_from_a_plain_copy(tmp_path):
-    cache_with_symlinked_snapshot(tmp_path)
+def test_external_data_refusal_loads_from_a_plain_copy(tmp_path, make_symlink):
+    cache_with_symlinked_snapshot(tmp_path, make_symlink)
     FakeFactory.calls = []
     model = load_model(FakeFactory, "big", cache_dir=str(tmp_path), threads=2)
     copy = tmp_path / "materialized" / "qdrant--big-model-onnx"
@@ -92,3 +92,20 @@ def test_onnxruntime_telemetry_is_disabled_once_before_loading(monkeypatch):
     assert load_model(factory, "a") == "a"
     assert load_model(factory, "b") == "b"
     assert calls == ["off"]
+
+
+def test_pooling_notice_is_not_shown():
+    import warnings
+
+    from memory_core.fastembed_loader import load_model
+
+    def factory(model, **kwargs):
+        warnings.warn(f"The model {model} now uses mean pooling instead of CLS embedding.", UserWarning, stacklevel=2)
+        return object()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        load_model(factory, "some/model")
+        warnings.warn("another notice", UserWarning, stacklevel=1)
+
+    assert [str(item.message) for item in caught] == ["another notice"]

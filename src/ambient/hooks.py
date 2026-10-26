@@ -22,6 +22,7 @@ from typing import Any, Final
 
 from ambient.actions import ActionLog, build_action, log_event, parse_exit_code, status_for, table_exists
 from ambient.settings import AmbientSettings
+from ambient.state import claim_tool_use
 
 MEMORY_DB_NAME: Final = "memory.db"
 SQLITE_TIMEOUT_SEC: Final = 2.0
@@ -90,6 +91,10 @@ def record_action(call: HookCall, memory_dir: Path) -> str:
                           project=call.project, status=status_for(call.failed, call.interrupted),
                           exit_code=parse_exit_code(call.exit_code))
     if action is None:
+        return ""
+    tool_use_id = call.payload.get("tool_use_id")
+    if isinstance(tool_use_id, str) and tool_use_id and not claim_tool_use(memory_dir, call.session_id, tool_use_id):
+        log_event("action_duplicate", tool_use_id=tool_use_id, tool=call.tool)
         return ""
     db = sqlite3.connect(str(db_path), timeout=SQLITE_TIMEOUT_SEC)
     try:

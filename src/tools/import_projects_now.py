@@ -18,8 +18,6 @@ Usage:
 
 from __future__ import annotations
 
-import json
-import os
 import sqlite3
 import sys
 import time
@@ -30,7 +28,9 @@ HERE = Path(__file__).resolve().parent
 SRC = HERE.parent
 sys.path.insert(0, str(SRC))
 
+from background_writes import save_background_knowledge
 from memory_core.timestamps import utc_now
+from paths import memory_dir as _memory_dir
 
 
 def _log(msg: str) -> None:
@@ -190,7 +190,7 @@ def summarize_project(root: Path, parent_label: str) -> dict | None:
 def bulk_save(records: list[dict], session_id: str) -> int:
     """Insert directly. Mirrors server.Store.save_knowledge minus dedup so
     we can do hundreds in seconds. Returns number inserted."""
-    memory_dir = Path(os.environ.get("CLAUDE_MEMORY_DIR", Path.home() / ".claude-memory"))
+    memory_dir = _memory_dir()
     db_path = memory_dir / "memory.db"
     if not db_path.exists():
         _log(f"db not found at {db_path}")
@@ -211,18 +211,15 @@ def bulk_save(records: list[dict], session_id: str) -> int:
     inserted = 0
     for r in records:
         try:
-            cur = db.execute(
-                """INSERT INTO knowledge
-                     (session_id, type, content, context, project, tags, source,
-                      confidence, created_at, last_confirmed)
-                   VALUES (?, ?, ?, ?, ?, ?, 'project-import', 0.9, ?, ?)""",
-                (
-                    session_id, r["type"], r["content"], "",
-                    r["project"], json.dumps(r["tags"]),
-                    _now(), _now(),
-                ),
+            saved = save_background_knowledge(
+                db, content=r["content"], ktype=r["type"], project=r["project"],
+                session_id=session_id, tags=r["tags"], context="", source="project-import",
+                confidence=0.9, created_at=_now(), extra={"last_confirmed": _now()},
+                queue_embedding=True,
             )
-            kid = cur.lastrowid
+            if saved is None or not saved.created:
+                continue
+            kid = saved.id
 
             # Enqueue in v6 queues so reflection picks it up later
             for tbl in ("triple_extraction_queue", "deep_enrichment_queue",

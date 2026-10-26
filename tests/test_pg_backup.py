@@ -83,7 +83,7 @@ def test_tool_timeout_is_validated():
 
 
 def test_sqlite_snapshots_are_not_postgres_backups(tmp_path):
-    (tmp_path / "manifest.json").write_text(json.dumps({"format_version": 1, "databases": []}))
+    (tmp_path / "manifest.json").write_text(json.dumps({"format_version": 1, "databases": []}), encoding="utf-8")
     assert not pg_backup.is_postgres_backup(tmp_path)
     with pytest.raises(Conflict, match="not a PostgreSQL backup"):
         pg_backup.read_manifest(tmp_path)
@@ -110,7 +110,7 @@ def test_backup_writes_a_verified_private_dump_with_counts(installation, tmp_pat
     assert pg_backup.verify(snapshot) == manifest
     assert pg_backup.is_postgres_backup(snapshot)
     password = dsn.password.get_secret_value()
-    assert password not in (snapshot / "manifest.json").read_text()
+    assert password not in (snapshot / "manifest.json").read_text(encoding="utf-8")
     with pytest.raises(FileExistsError):
         pg_backup.backup(dsn, snapshot)
 

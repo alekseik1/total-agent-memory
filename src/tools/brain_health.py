@@ -57,7 +57,7 @@ def check_launchctl_status() -> dict[str, dict[str, Any]]:
         proc = subprocess.run(
             ["launchctl", "list"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=5,
         )
         for line in proc.stdout.strip().split("\n"):
@@ -248,7 +248,7 @@ def check_ollama() -> HealthResult:
         proc = subprocess.run(
             ["ollama", "list"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=5,
         )
         if proc.returncode != 0:
@@ -319,7 +319,7 @@ def check_config_files() -> list[HealthResult]:
             continue
 
         try:
-            with open(filepath) as f:
+            with open(filepath, encoding="utf-8") as f:
                 data = json.load(f)
 
             count = len(data) if isinstance(data, list) else len(data.keys())
@@ -346,7 +346,7 @@ def check_dashboard_port() -> HealthResult:
         proc = subprocess.run(
             ["lsof", "-i", ":37737", "-sTCP:LISTEN"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=5,
         )
         if proc.stdout.strip():

@@ -784,7 +784,7 @@ def test_cli_bootstrap_user_role_and_invite(tmp_path):
 def test_packaging_ships_dashboard_assets():
     import tomllib
     from fnmatch import fnmatch
-    data = tomllib.loads((ROOT / 'pyproject.toml').read_text())
+    data = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding="utf-8"))
     patterns = data['tool']['setuptools']['package-data']['src']
     static = ROOT / 'src' / 'team_memory' / 'static'
     for asset in static.rglob('*'):
@@ -796,7 +796,7 @@ def test_packaging_ships_dashboard_assets():
         if section.script.startswith('/dashboard/static/'):
             assert (static / section.script.rsplit('/', 1)[1]).is_file()
     for script in static.glob('*.js'):
-        text = script.read_text()
+        text = script.read_text(encoding="utf-8")
         assert 'innerHTML' not in text and 'eval(' not in text and 'console.log' not in text
 
 

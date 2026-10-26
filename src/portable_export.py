@@ -33,6 +33,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import shutil
 import sqlite3
 import stat
@@ -372,6 +373,8 @@ def _jsonl_records(path: Path) -> Iterator[dict[str, Any]]:
                 continue
             try:
                 value = json.loads(line)
+            except RecursionError as error:
+                raise BundleError(f"{RECORDS_MEMBER} line {number} is nested too deeply") from error
             except ValueError as error:
                 raise BundleError(f"{RECORDS_MEMBER} line {number} is not JSON") from error
             if not isinstance(value, dict):
@@ -496,6 +499,34 @@ def _drop_foreign_vectors(staged_db: Path, active_model: str) -> int:
     return int(dropped)
 
 
+SQLITE_SIDE_FILES = ("-wal", "-shm")
+BACKUP_TOKEN_BYTES = 4
+
+
+def _reserve_backup_path(backups: Path, stamp: str) -> tuple[Path, str]:
+    """Create (O_EXCL) a unique, owner-only safety-backup file; two imports in one second never share it."""
+    while True:
+        name = f"pre-import-{stamp}-{secrets.token_hex(BACKUP_TOKEN_BYTES)}"
+        path = backups / f"{name}.db"
+        try:
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_FILE_MODE))
+        except FileExistsError:
+            continue
+        return path, name
+
+
+def _copy_raw_database(live: Path, target: Path) -> None:
+    """Byte copy of memory.db and its -wal/-shm side files, for a store SQLite cannot back up."""
+    shutil.copyfile(live, target)
+    os.chmod(target, PRIVATE_FILE_MODE)
+    for suffix in SQLITE_SIDE_FILES:
+        side = live.with_name(live.name + suffix)
+        if side.is_file():
+            copied = target.with_name(target.name + suffix)
+            shutil.copyfile(side, copied)
+            os.chmod(copied, PRIVATE_FILE_MODE)
+
+
 def _replace(memory_dir: Path, staged: StagedBundle) -> dict[str, Any]:
     from cli_store import open_store
 
@@ -508,8 +539,15 @@ def _replace(memory_dir: Path, staged: StagedBundle) -> dict[str, Any]:
     with open_store(memory_dir) as store:
         active_model = str(store._active_embed_model_name())
     dropped = _drop_foreign_vectors(staged.member(DATABASE_MEMBER), active_model)
-    safety = backups / f"pre-import-{stamp}.db"
-    snapshot_database(live, safety)
+    safety, backup_name = _reserve_backup_path(backups, stamp)
+    warnings: list[str] = []
+    try:
+        snapshot_database(live, safety)
+    except (BundleError, sqlite3.DatabaseError) as error:
+        # Replacing a corrupt store is exactly when --mode replace is needed: keep the raw files instead.
+        LOGGER.warning(json.dumps({"event": "bundle_safety_snapshot_failed", "error": str(error)}))
+        _copy_raw_database(live, safety)
+        warnings.append(f"live database failed its integrity check ({error}); raw files kept at {safety}")
     with closing(sqlite3.connect(str(staged.member(DATABASE_MEMBER)))) as source, \
             closing(sqlite3.connect(str(live), timeout=SQLITE_TIMEOUT_SECONDS)) as target:
         previous_revision = _vector_revision(target)
@@ -518,10 +556,9 @@ def _replace(memory_dir: Path, staged: StagedBundle) -> dict[str, Any]:
     chroma = memory_dir / "chroma"
     chroma_backup = None
     if chroma.is_dir() and any(chroma.iterdir()):
-        chroma_backup = backups / f"pre-import-{stamp}-chroma"
+        chroma_backup = backups / f"{backup_name}-chroma"
         chroma.rename(chroma_backup)
     chroma.mkdir(mode=PRIVATE_DIR_MODE, exist_ok=True)
-    warnings: list[str] = []
     with open_store(memory_dir) as store:
         missing = store.db.execute(
             "SELECT COUNT(*) FROM knowledge k WHERE k.status='active' AND NOT EXISTS "

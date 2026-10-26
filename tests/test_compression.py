@@ -18,7 +18,7 @@ def cmp_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
+    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text(encoding="utf-8"))
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS knowledge (
@@ -27,8 +27,8 @@ def cmp_db():
         );
         """
     )
-    conn.executescript((root / "migrations" / "002_multi_representation.sql").read_text())
-    conn.executescript((root / "migrations" / "005_representations_queue.sql").read_text())
+    conn.executescript((root / "migrations" / "002_multi_representation.sql").read_text(encoding="utf-8"))
+    conn.executescript((root / "migrations" / "005_representations_queue.sql").read_text(encoding="utf-8"))
     yield conn
     conn.close()
 
@@ -118,12 +118,18 @@ def test_queue_stores_valid_compressed(cmp_db):
     assert "https://example.com/api" in kinds["compressed"]
 
 
-def test_queue_rejects_compressed_that_loses_url(cmp_db):
-    """Compressed output missing URLs is silently dropped (raw still stored)."""
+@pytest.mark.parametrize(
+    "original",
+    [
+        pytest.param("Docs at https://critical.example/doc — do not lose this URL. " * 30, id="url"),
+        pytest.param("Edit /Users/alice/project/src/server.py - do not lose this path. " * 30, id="path"),
+    ],
+)
+def test_queue_rejects_compressed_that_loses_url(cmp_db, original):
+    """Compressed output missing URLs or paths is silently dropped (raw still stored)."""
     from representations_queue import RepresentationsQueue
 
     q = RepresentationsQueue(cmp_db)
-    original = "Docs at https://critical.example/doc — do not lose this URL. " * 30
     kid = _add(cmp_db, original)
     q.enqueue(kid)
 

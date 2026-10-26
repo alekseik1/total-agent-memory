@@ -1,5 +1,5 @@
 # ===========================================
-# Session Start Hook (PowerShell) — twin of hooks/session-start.sh
+# Session Start Hook (PowerShell) - twin of hooks/session-start.sh
 #
 # Plain stdout of SessionStart is added to the model context.
 #   startup / clear : memory hint, SOUL rules, error patterns, project

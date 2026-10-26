@@ -142,7 +142,7 @@ class VectorSearch:
             self.cache_bytes -= removed.nbytes
 
     def _patch_groups(self, changed: list[int]) -> None:
-        """Drop cached group lists that lack a group a changed record now belongs to."""
+        """Drop cached group lists that lack a group a changed record now belongs to, or keep one that emptied."""
         found: set[tuple[str | None, tuple]] = set()
         for offset in range(0, len(changed), VECTOR_BATCH_ROWS):
             batch = changed[offset:offset + VECTOR_BATCH_ROWS]
@@ -153,8 +153,22 @@ class VectorSearch:
             ))
         for project in list(self.group_cache):
             cached = set(self.group_cache[project])
-            if any(group not in cached for owner, group in found if project is None or owner == project):
+            present = {group for owner, group in found if project is None or owner == project}
+            if present - cached or any(
+                not self._group_exists(project, group) for group in cached - present
+            ):
                 del self.group_cache[project]
+
+    def _group_exists(self, project: str | None, group: tuple[str, str, int]) -> bool:
+        """Whether an active record still has a vector in `group` (a cached group may have emptied)."""
+        space, model, dimension = group
+        row = self.db.execute(
+            "SELECT 1 FROM embeddings e JOIN knowledge k ON k.id=e.knowledge_id WHERE k.status='active' "
+            "AND COALESCE(e.embedding_space,'text')=? AND e.embed_model=? AND e.embed_dim=?"
+            + (" AND k.project=?" if project is not None else "") + " LIMIT 1",
+            (space, model, dimension, *((project,) if project is not None else ())),
+        ).fetchone()
+        return row is not None
 
     def _patched(self, scope: VectorScope, exact_limit: int, pool: VectorPool,
                  changed: list[int]) -> VectorPool | None:

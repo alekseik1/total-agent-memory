@@ -230,6 +230,12 @@ def _truncate(text: str) -> str:
     return text if len(text) <= MAX_LLM_INPUT_CHARS else text[:MAX_LLM_INPUT_CHARS]
 
 
+def _mark_degraded(out: dict[str, Any], reason: str) -> dict[str, Any]:
+    out["degraded"] = True
+    out["degraded_reason"] = "; ".join(filter(None, [out.get("degraded_reason"), reason]))
+    return out
+
+
 def deep_enrich(
     content: str,
     base_metadata: dict[str, Any] | None = None,
@@ -238,7 +244,9 @@ def deep_enrich(
     """Enrich metadata with LLM-extracted entities/intent/topics.
 
     Short content (< MIN_CHARS_FOR_LLM) gets stub enrichment values (no LLM
-    calls). LLM failures are swallowed so the caller always gets a dict.
+    calls). LLM failures never raise, but they are reported: the result carries
+    ``degraded=True`` plus ``degraded_reason`` so a durable queue can retry the
+    item later instead of storing empty values as a completed enrichment.
 
     `skip` lets callers disable specific keys, e.g. skip={"intent"}.
     """
@@ -258,9 +266,9 @@ def deep_enrich(
     try:
         from config import has_llm
         if not has_llm("enrich"):
-            return out
-    except Exception:
-        pass
+            return _mark_degraded(out, "LLM unavailable")
+    except Exception as e:  # noqa: BLE001
+        LOG(f"has_llm check failed, trying the LLM anyway: {e}")
 
     truncated = _truncate(content)
 
@@ -270,6 +278,7 @@ def deep_enrich(
             out["entities"] = parse_entities(resp)
         except Exception as e:  # noqa: BLE001
             LOG(f"entities LLM failed: {e}")
+            _mark_degraded(out, f"entities: {e}")
 
     if "intent" not in skip:
         try:
@@ -277,6 +286,7 @@ def deep_enrich(
             out["intent"] = parse_intent(resp)
         except Exception as e:  # noqa: BLE001
             LOG(f"intent LLM failed: {e}")
+            _mark_degraded(out, f"intent: {e}")
 
     if "topics" not in skip:
         try:
@@ -284,5 +294,6 @@ def deep_enrich(
             out["topics"] = parse_topics(resp)
         except Exception as e:  # noqa: BLE001
             LOG(f"topics LLM failed: {e}")
+            _mark_degraded(out, f"topics: {e}")
 
     return out

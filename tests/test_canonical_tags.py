@@ -35,7 +35,7 @@ def custom_vocab(tmp_path, monkeypatch):
             golang, go
             performance, perf, optimization
             """
-        ).strip()
+        ).strip(), encoding="utf-8"
     )
     monkeypatch.setenv("MEMORY_TAG_VOCAB_PATH", str(path))
     return path
@@ -66,7 +66,7 @@ def test_load_custom_vocabulary_parses_aliases(custom_vocab):
 
 def test_load_rejects_duplicate_canonicals(tmp_path, monkeypatch):
     path = tmp_path / "dup.txt"
-    path.write_text("database\ndatabase\n")
+    path.write_text("database\ndatabase\n", encoding="utf-8")
     monkeypatch.setenv("MEMORY_TAG_VOCAB_PATH", str(path))
     with pytest.raises(ValueError, match="duplicate canonical"):
         ct.load_vocabulary()

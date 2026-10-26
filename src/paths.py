@@ -161,7 +161,7 @@ def _resolve_memory_dir() -> Path:
     if NEW_DIR.exists():
         return NEW_DIR
 
-    if OLD_DIR.exists() and not OLD_DIR.is_symlink():
+    if OLD_DIR.exists() and not _is_directory_alias(OLD_DIR):
         if _try_migrate():
             return NEW_DIR
         return OLD_DIR
@@ -173,6 +173,46 @@ def _resolve_memory_dir() -> Path:
 def memory_db() -> Path:
     """Convenience: full path to the SQLite memory database."""
     return memory_dir() / "memory.db"
+
+
+def _is_directory_alias(path: Path) -> bool:
+    """True when ``path`` is a symlink, or a directory junction on Windows.
+
+    ``Path.is_symlink()`` is False for a junction, so a legacy directory that
+    was linked with one would be mistaken for a second real directory.
+    """
+    if path.is_symlink():
+        return True
+    if os.name != "nt":
+        return False
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return getattr(info, "st_reparse_tag", 0) == getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
+
+
+def _link_legacy_dir() -> str:
+    """Leave ``OLD_DIR`` pointing at ``NEW_DIR``; return a note for the migration message.
+
+    Creating a symlink on Windows needs Developer Mode or an elevated token and
+    fails with WinError 1314 for a regular user, so a directory junction, which
+    needs no privilege, is the fallback there.
+    """
+    try:
+        os.symlink(str(NEW_DIR), str(OLD_DIR), target_is_directory=True)
+        return "symlink kept for backward-compat"
+    except OSError as symlink_error:
+        failure = symlink_error
+    if os.name == "nt":
+        try:
+            import _winapi
+
+            _winapi.CreateJunction(str(NEW_DIR), str(OLD_DIR))
+            return "junction kept for backward-compat"
+        except (ImportError, AttributeError, OSError) as junction_error:
+            failure = junction_error
+    return f"symlink NOT created ({failure}); scripts pinned to {OLD_DIR} will break"
 
 
 def _try_migrate() -> bool:
@@ -189,7 +229,7 @@ def _try_migrate() -> bool:
 
     if NEW_DIR.exists():
         return True
-    if not OLD_DIR.exists() or OLD_DIR.is_symlink():
+    if not OLD_DIR.exists() or _is_directory_alias(OLD_DIR):
         return False
 
     try:
@@ -202,11 +242,7 @@ def _try_migrate() -> bool:
         )
         return False
 
-    try:
-        os.symlink(str(NEW_DIR), str(OLD_DIR))
-        symlink_note = "symlink kept for backward-compat"
-    except OSError as exc:
-        symlink_note = f"symlink NOT created ({exc}); scripts pinned to {OLD_DIR} will break"
+    symlink_note = _link_legacy_dir()
 
     sys.stderr.write(
         f"[total-agent-memory] Migrated {OLD_DIR} -> {NEW_DIR} ({symlink_note}).\n"
@@ -222,12 +258,12 @@ def migrate_now() -> dict:
     """
     if NEW_DIR.exists() and not OLD_DIR.exists():
         return {"status": "already_migrated", "new": str(NEW_DIR)}
-    if NEW_DIR.exists() and OLD_DIR.is_symlink():
+    if NEW_DIR.exists() and _is_directory_alias(OLD_DIR):
         return {"status": "already_migrated", "new": str(NEW_DIR), "symlink": str(OLD_DIR)}
     if not OLD_DIR.exists():
         NEW_DIR.mkdir(parents=True, exist_ok=True)
         return {"status": "fresh_install", "new": str(NEW_DIR)}
-    if OLD_DIR.is_symlink():
+    if _is_directory_alias(OLD_DIR):
         return {"status": "already_migrated", "new": str(NEW_DIR), "symlink": str(OLD_DIR)}
     if NEW_DIR.exists():
         return {

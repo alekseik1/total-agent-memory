@@ -150,7 +150,7 @@ def test_no_column_is_added_by_both_python_and_sql_migrations():
     python_cols = set(re.findall(r"ADD COLUMN (\w+)", migrate_src))
     sql_cols: set[str] = set()
     for path in (ROOT / "migrations").glob("*.sql"):
-        sql_cols |= set(re.findall(r"ADD COLUMN (\w+)", path.read_text()))
+        sql_cols |= set(re.findall(r"ADD COLUMN (\w+)", path.read_text(encoding="utf-8")))
 
     overlap = python_cols & sql_cols
     assert not overlap, (

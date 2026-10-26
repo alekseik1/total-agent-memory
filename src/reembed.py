@@ -101,6 +101,10 @@ def float32_to_blob(embedding: list[float]) -> bytes:
     return struct.pack(f'{len(embedding)}f', *embedding)
 
 
+DEFAULT_SPACE = "text"
+PROVIDER_LABELS = {"fastembed": "fastembed", "ollama": "ollama", "st": "st"}
+
+
 def ensure_embeddings_table(conn: sqlite3.Connection):
     """Create embeddings table if it doesn't exist."""
     conn.execute("""
@@ -110,10 +114,40 @@ def ensure_embeddings_table(conn: sqlite3.Connection):
             float32_vector BLOB NOT NULL,
             embed_model TEXT NOT NULL,
             embed_dim INTEGER NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            embedding_provider TEXT,
+            embedding_space TEXT,
+            content_type TEXT,
+            language TEXT
         )
     """)
     conn.commit()
+
+
+def upsert_embedding(conn: sqlite3.Connection, knowledge_id: int, embedding: list[float], model: str,
+                     provider: str, created_at: str) -> None:
+    """Write a record's vector columns; the row's space, content type and language stay as they are.
+
+    INSERT OR REPLACE would delete the row and drop every column it does not
+    list, so a record's embedding_space went back to NULL on each re-embed.
+    """
+    conn.execute(
+        """
+        INSERT INTO embeddings
+            (knowledge_id, binary_vector, float32_vector, embed_model, embed_dim, created_at,
+             embedding_provider, embedding_space)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(knowledge_id) DO UPDATE SET
+            binary_vector = excluded.binary_vector,
+            float32_vector = excluded.float32_vector,
+            embed_model = excluded.embed_model,
+            embed_dim = excluded.embed_dim,
+            created_at = excluded.created_at,
+            embedding_provider = excluded.embedding_provider
+        """,
+        (knowledge_id, quantize_binary(embedding), float32_to_blob(embedding), model, len(embedding),
+         created_at, provider, DEFAULT_SPACE),
+    )
 
 
 def main():
@@ -137,8 +171,8 @@ def main():
 
     if args.model is None:
         if args.fastembed:
-            import config as _cfg
-            args.model = os.environ.get("FASTEMBED_MODEL") or _cfg.get_text_embed_model()
+            from memory_core.embedding_spaces import resolve_text_model
+            args.model = resolve_text_model()
         elif args.ollama:
             args.model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
         else:
@@ -197,6 +231,7 @@ def main():
         existing = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
         print(f"SQLite embeddings: {existing} existing")
 
+    backend = PROVIDER_LABELS["fastembed" if args.fastembed else ("ollama" if args.ollama else "st")]
     texts = [f"{r['content']} {r.get('context', '')}" for r in records]
     total_start = time.time()
     all_embeddings: list[list[float]] = []
@@ -246,13 +281,7 @@ def main():
         # Binary quantization → SQLite
         if args.binary and conn:
             for r, emb, _ in valid:
-                binary_blob = quantize_binary(emb)
-                f32_blob = float32_to_blob(emb)
-                conn.execute("""
-                    INSERT OR REPLACE INTO embeddings
-                    (knowledge_id, binary_vector, float32_vector, embed_model, embed_dim, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (r["id"], binary_blob, f32_blob, args.model, len(emb), now))
+                upsert_embedding(conn, r["id"], emb, args.model, backend, now)
             conn.commit()
 
         # ChromaDB (default or --keep-chroma)

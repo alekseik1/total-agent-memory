@@ -25,8 +25,8 @@ def db(tmp_path):
         "CREATE TABLE embeddings(knowledge_id INTEGER PRIMARY KEY,binary_vector BLOB,float32_vector BLOB,"
         "embed_dim INTEGER,embed_model TEXT,embedding_space TEXT);"
     )
-    connection.executescript((MIGRATIONS / "032_vector_index_revision.sql").read_text())
-    connection.executescript((MIGRATIONS / "036_vector_change_log.sql").read_text())
+    connection.executescript((MIGRATIONS / "032_vector_index_revision.sql").read_text(encoding="utf-8"))
+    connection.executescript((MIGRATIONS / "036_vector_change_log.sql").read_text(encoding="utf-8"))
     yield connection
     connection.close()
 
@@ -118,6 +118,16 @@ def test_new_group_drops_cached_groups(db):
     seed(db, 2, [0, 1, 0, 0], model="other")
     search(index)
     assert set(index.groups("p")) == {("text", "m", 4), ("text", "other", 4)}
+
+
+def test_emptied_group_is_dropped_from_cached_groups(db):
+    seed(db, 1, [1, 0, 0, 0])
+    seed(db, 2, [0, 1, 0, 0], model="other")
+    index = VectorSearch(db)
+    assert set(index.groups("p")) == {("text", "m", 4), ("text", "other", 4)}
+    db.execute("DELETE FROM embeddings WHERE knowledge_id=2")
+    db.commit()
+    assert index.groups("p") == (("text", "m", 4),)
 
 
 def test_many_appended_records_stay_sorted(db):

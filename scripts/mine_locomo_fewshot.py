@@ -116,7 +116,7 @@ def mine(
     n_per_category: int,
     seed: int = 1337,
 ) -> dict:
-    raw = json.loads(dataset_path.read_text())
+    raw = json.loads(dataset_path.read_text(encoding="utf-8"))
     rnd = random.Random(seed)
 
     by_cat: dict[int, list[dict]] = {1: [], 2: [], 3: [], 4: [], 5: []}
@@ -330,7 +330,7 @@ def mine_v3(
 
     Deterministic for a fixed (dataset_path content, train_conv_ids, seed).
     """
-    raw = json.loads(dataset_path.read_text())
+    raw = json.loads(dataset_path.read_text(encoding="utf-8"))
     train_set = set(train_conv_ids)
     by_cat = _collect_pairs_v3(raw, train_set)
 
@@ -384,7 +384,7 @@ def main() -> int:
                    help="v3 only: candidate pool size before diversity prune.")
     args = p.parse_args()
 
-    raw = json.loads(args.dataset.read_text())
+    raw = json.loads(args.dataset.read_text(encoding="utf-8"))
     train_ids = _parse_conv_ids(args.train_conv_ids, len(raw))
     print(f"[fewshot] v{args.version} mining from {len(train_ids)} train conversations: {train_ids}")
 
@@ -400,7 +400,7 @@ def main() -> int:
         bundle = mine(args.dataset, train_ids, n_per, seed)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(bundle, indent=2, ensure_ascii=False))
+    out_path.write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
     counts = {k: len(v) for k, v in bundle.items() if k != "_meta"}
     print(f"[fewshot] wrote {sum(counts.values())} pairs → {out_path}")
     print(f"[fewshot] per-category: {counts}")

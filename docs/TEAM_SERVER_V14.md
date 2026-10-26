@@ -48,7 +48,7 @@ docker compose -f docker-compose.team.yml run --rm team-memory python /app/src/t
 docker compose -f docker-compose.team.yml up -d
 ```
 
-Перед запуском проверить порт3738. Веб-интерфейс и `/mcp/` находятся на одном порту. Параметры: `.env`, `TAM_TEAM_PORT`, `TAM_TEAM_PUBLISH_HOST`, `TAM_TEAM_MAX_WORKERS`, `TAM_TEAM_OPERATION_TIMEOUT`, общие настройки LLM. Тома `tam-team-memory-data` и `tam-team-model-cache` можно переименовать переменными Compose. Не подключать старую рабочую БД как team-data: её перенос требует отдельной проверки владельца и резервной копии.
+Перед запуском проверить порт3738. Веб-интерфейс и `/mcp/` находятся на одном порту. Параметры: `.env`, `TAM_TEAM_PORT`, `TAM_TEAM_PUBLISH_HOST`, `TAM_TEAM_MAX_WORKERS`, `TAM_TEAM_OPERATION_TIMEOUT`, `TAM_TEAM_QUEUE_TIMEOUT` (ожидание очереди к области, секунды, по умолчанию 30), общие настройки LLM. Тома `tam-team-memory-data` и `tam-team-model-cache` можно переименовать переменными Compose. Не подключать старую рабочую БД как team-data: её перенос требует отдельной проверки владельца и резервной копии.
 
 Серверный профиль использует внешнюю доступную модель, если включены LLM-задачи. Для Ollama адрес задаётся `OLLAMA_URL`; профиль добавляет `host.docker.internal:host-gateway` для доступа к хосту Docker на Linux. Настройка переопределяется через `TAM_TEAM_HOST_GATEWAY`. Наличие API-адаптера не означает, что выбранная модель поддерживает изображения.
 

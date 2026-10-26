@@ -23,7 +23,7 @@ def merger_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
+    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text(encoding="utf-8"))
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS knowledge (

@@ -1,8 +1,14 @@
 import asyncio
+import hashlib
 import json
+import os
+import re
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from urllib.parse import urlsplit
 
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -10,13 +16,22 @@ from mcp.types import CallToolResult, TextContent, Tool
 from pydantic import ValidationError
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
-from starlette.requests import Request
+from starlette.requests import HTTPConnection, Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Mount, Route
 
 from team_memory.accounts import AccountPolicy, Accounts
 from team_memory.contracts import DomainError, Unauthorized
-from team_memory.dashboard import DashboardConfig, register_database_section
+from team_memory.dashboard import (
+    COOKIE,
+    HSTS_VALUE,
+    SECURE_COOKIE,
+    DashboardConfig,
+    forwarded_client,
+    peer_address,
+    register_database_section,
+    request_is_https,
+)
 from team_memory.dashboard import routes as dashboard_routes
 from team_memory.dashboard_service import DashboardService
 from team_memory.database_contracts import (
@@ -38,10 +53,37 @@ from team_memory.setup_web import routes as setup_routes
 from version import RELEASE_DATE, VERSION
 
 MAX_REQUEST_BYTES = 1_000_000
+# Requests being served for an authenticated caller (default of TAM_TEAM_MAX_PENDING_REQUESTS).
 MAX_PENDING_REQUESTS = 32
+# Requests that have not proven who they are yet (bad bearer tokens being looked up, logins, static files; default
+# of TAM_TEAM_MAX_PENDING_UNAUTHENTICATED). Kept smaller and separate so a flood of anonymous requests fills only
+# this pool and signed-in users and agents keep their own.
+MAX_PENDING_UNAUTHENTICATED = 8
+# Sign-in, invite redemption, static files and the setup wizard (routes that need no credential) are served from
+# their own pool, with a per-client cap, so a slow anonymous body can block neither credential lookups nor each
+# other beyond one client's share.
+MAX_PENDING_PUBLIC = 16
+MAX_PUBLIC_PER_CLIENT = 4
+# A credential that passed a lookup is admitted without one for this long; the service re-checks it on use, so
+# this delays no revocation. It is on the scale of an agent's idle gap, not of a single burst.
+RECENT_CREDENTIAL_SECONDS = 300
+RECENT_CREDENTIAL_ENV = "TAM_TEAM_RECENT_CREDENTIAL_SECONDS"
+RECENT_CREDENTIAL_CAPACITY = 1024
+BEARER = "bearer"
+SESSION = "session"
+PENDING_ENV = "TAM_TEAM_MAX_PENDING_REQUESTS"
+PENDING_UNAUTHENTICATED_ENV = "TAM_TEAM_MAX_PENDING_UNAUTHENTICATED"
+PENDING_PUBLIC_ENV = "TAM_TEAM_MAX_PENDING_PUBLIC"
+PUBLIC_PER_CLIENT_ENV = "TAM_TEAM_MAX_PUBLIC_PER_CLIENT"
 REQUEST_READ_TIMEOUT_SECONDS = 15
+# Anonymous bodies (a password, an invite code) are tiny; a client that cannot send one in this long is not a user.
+PUBLIC_READ_TIMEOUT_SECONDS = 4
 TOKEN: ContextVar[str] = ContextVar("team_memory_token", default="")
 PUBLIC_PATHS = ("/", "/healthz")
+# Tokens are secrets.token_urlsafe(32): 43 URL-safe characters. Anything shaped otherwise cannot be one, so it
+# is refused before it costs a database lookup.
+TOKEN_FORMAT = re.compile(r"[A-Za-z0-9_-]{32,128}")
+WS_POLICY_VIOLATION = 1008
 DEFAULT_BASE_URL = "http://127.0.0.1:3737"
 SESSION_PREFIXES = ("/dashboard", "/learning", "/reports")
 MAINTENANCE_MESSAGES = {
@@ -52,45 +94,226 @@ MAINTENANCE_MESSAGES = {
 }
 
 
+@dataclass(frozen=True)
+class PendingLimits:
+    authenticated: int = MAX_PENDING_REQUESTS
+    unauthenticated: int = MAX_PENDING_UNAUTHENTICATED
+    public: int = MAX_PENDING_PUBLIC
+    public_per_client: int = MAX_PUBLIC_PER_CLIENT
+
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> "PendingLimits":
+        env = os.environ if environ is None else environ
+        limits = cls(authenticated=int(env.get(PENDING_ENV) or MAX_PENDING_REQUESTS),
+                     unauthenticated=int(env.get(PENDING_UNAUTHENTICATED_ENV) or MAX_PENDING_UNAUTHENTICATED),
+                     public=int(env.get(PENDING_PUBLIC_ENV) or MAX_PENDING_PUBLIC),
+                     public_per_client=int(env.get(PUBLIC_PER_CLIENT_ENV) or MAX_PUBLIC_PER_CLIENT))
+        if min(limits.authenticated, limits.unauthenticated, limits.public, limits.public_per_client) < 1:
+            raise ValueError(f"{PENDING_ENV}, {PENDING_UNAUTHENTICATED_ENV}, {PENDING_PUBLIC_ENV} and "
+                             f"{PUBLIC_PER_CLIENT_ENV} must be positive integers")
+        return limits
+
+
+@dataclass(frozen=True)
+class Identity:
+    """Outcome of the credential check: a response to send, or whether the caller is authenticated."""
+    response: JSONResponse | None = None
+    authenticated: bool = False
+    token: str = ""
+
+
+class RecentCredentials:
+    """Credentials that passed a lookup recently. Admission only: a known credential is still checked on every
+    request, inside the authenticated pool, so revocation is never delayed. It lets a signed-in caller skip the
+    anonymous pool while a flood of unknown credentials keeps that pool full."""
+
+    def __init__(self, clock=time.monotonic, ttl: float = RECENT_CREDENTIAL_SECONDS,
+                 capacity: int = RECENT_CREDENTIAL_CAPACITY):
+        self.clock, self.ttl, self.capacity = clock, ttl, capacity
+        self._seen: dict[str, float] = {}
+
+    @staticmethod
+    def _key(kind: str, value: str) -> str:
+        return hashlib.sha256(f"{kind}:{value}".encode()).hexdigest()
+
+    def known(self, kind: str, value: str) -> bool:
+        return self._seen.get(self._key(kind, value), 0.0) > self.clock()
+
+    def remember(self, kind: str, value: str) -> None:
+        now = self.clock()
+        if len(self._seen) >= self.capacity:
+            self._seen = {key: expiry for key, expiry in self._seen.items() if expiry > now}
+            while len(self._seen) >= self.capacity:
+                del self._seen[min(self._seen, key=self._seen.__getitem__)]
+        self._seen[self._key(kind, value)] = now + self.ttl
+
+    def forget(self, kind: str, value: str) -> None:
+        self._seen.pop(self._key(kind, value), None)
+
+
 class Authentication:
-    def __init__(self, app, registry):
-        self.app, self.registry = app, registry
+    def __init__(self, app, registry, config: DashboardConfig | None = None, accounts: Accounts | None = None,
+                 limits: PendingLimits | None = None):
+        self.app, self.registry, self.accounts = app, registry, accounts
+        self.config = config or DashboardConfig()
+        self.limits = limits or PendingLimits.from_env()
+        self.recent = RecentCredentials(ttl=float(os.environ.get(RECENT_CREDENTIAL_ENV) or RECENT_CREDENTIAL_SECONDS))
         self.pending = 0
+        self.unauthenticated = 0
+        self.public = 0
+        self.public_clients: dict[str, int] = {}
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["path"] in PUBLIC_PATHS:
+        kind = scope["type"]
+        if kind == "lifespan":
             await self.app(scope, receive, send)
             return
-        headers = dict(scope["headers"])
-        token = ""
-        # Session paths authenticate by cookie + CSRF in the dashboard layer; everything else needs Bearer.
-        if not scope["path"].startswith(SESSION_PREFIXES):
-            authorization = headers.get(b"authorization", b"").decode("latin-1")
-            if not authorization.startswith("Bearer "):
-                await JSONResponse({"error": "Bearer token required"}, status_code=401,
-                                   headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
-                return
-            token = authorization[len("Bearer "):]
+        if kind != "http":
+            # No route speaks websocket; refusing here keeps the bearer, origin and size checks from being skipped.
+            if kind == "websocket":
+                await send({"type": "websocket.close", "code": WS_POLICY_VIOLATION})
+            return
+        send = self._with_hsts(scope, send)
+        if scope["path"] in PUBLIC_PATHS:
+            await self.app(scope, receive, send)
+            return
+        credential = self._credential(scope)
+        if credential is not None and self.recent.known(*credential):
+            await self._serve_known(scope, receive, send, credential)
+            return
+        if credential is None and scope["path"].startswith(SESSION_PREFIXES):
+            # Nothing to look up: sign-in, static files and the setup wizard go straight to the public pool.
+            await self._serve_public(scope, receive, send)
+            return
+        # Only the credential check runs in the small anonymous pool, so a flood of bad credentials can neither
+        # occupy the thread pool with lookups nor use up the slots of callers that are already authenticated.
+        if self.unauthenticated >= self.limits.unauthenticated:
+            await self._busy(scope, receive, send)
+            return
+        self.unauthenticated += 1
+        try:
+            identity = await self._identify(scope, credential)
+        finally:
+            self.unauthenticated -= 1
+        if identity.response is not None:
+            await identity.response(scope, receive, send)
+        elif identity.authenticated:
+            await self._serve_authenticated(scope, receive, send, identity.token)
+        else:
+            await self._serve_public(scope, receive, send)
+
+    async def _serve_public(self, scope, receive, send):
+        client = forwarded_client(self.config, peer_address(scope.get("client")),
+                                  dict(scope["headers"]).get(b"x-forwarded-for", b"").decode("latin-1"))
+        if self.public >= self.limits.public or self.public_clients.get(client, 0) >= self.limits.public_per_client:
+            await self._busy(scope, receive, send)
+            return
+        self.public += 1
+        self.public_clients[client] = self.public_clients.get(client, 0) + 1
+        try:
+            await self._serve(scope, receive, send, "", PUBLIC_READ_TIMEOUT_SECONDS)
+        finally:
+            self.public -= 1
+            if self.public_clients[client] <= 1:
+                del self.public_clients[client]
+            else:
+                self.public_clients[client] -= 1
+
+    async def _serve_known(self, scope, receive, send, credential: tuple[str, str]):
+        """A recently verified credential is checked again in an authenticated slot, never in the anonymous pool."""
+        if self.pending >= self.limits.authenticated:
+            await self._busy(scope, receive, send)
+            return
+        self.pending += 1
+        try:
+            identity = await self._identify(scope, credential)
+            if identity.response is not None:
+                await identity.response(scope, receive, send)
+            elif identity.authenticated:
+                await self._serve(scope, receive, send, identity.token)
+            else:
+                await self._serve(scope, receive, send, "", PUBLIC_READ_TIMEOUT_SECONDS)
+        finally:
+            self.pending -= 1
+
+    async def _serve_authenticated(self, scope, receive, send, token: str):
+        if self.pending >= self.limits.authenticated:
+            await self._busy(scope, receive, send)
+            return
+        self.pending += 1
+        try:
+            await self._serve(scope, receive, send, token)
+        finally:
+            self.pending -= 1
+
+    @staticmethod
+    def _credential(scope) -> tuple[str, str] | None:
+        """(kind, value) of the credential the route authenticates with, None when it carries none."""
+        if scope["path"].startswith(SESSION_PREFIXES):
+            cookies = HTTPConnection(scope).cookies
+            session_id = cookies.get(SECURE_COOKIE) or cookies.get(COOKIE)
+            return (SESSION, session_id) if session_id else None
+        authorization = dict(scope["headers"]).get(b"authorization", b"").decode("latin-1")
+        return (BEARER, authorization[len("Bearer "):]) if authorization.startswith("Bearer ") else None
+
+    @staticmethod
+    async def _busy(scope, receive, send):
+        await JSONResponse({"error": "Server busy"}, status_code=429)(scope, receive, send)
+
+    async def _identify(self, scope, credential: tuple[str, str] | None) -> Identity:
+        """Bearer routes need a valid token; session routes count as authenticated when the cookie names a live
+        session. Session routes without one (sign-in, static files, the setup wizard) stay in the anonymous pool."""
+        if credential is None:
+            if scope["path"].startswith(SESSION_PREFIXES):
+                return Identity()
+            return Identity(response=JSONResponse({"error": "Bearer token required"}, status_code=401,
+                                                  headers={"WWW-Authenticate": "Bearer"}))
+        kind, value = credential
+        if kind == SESSION:
+            if self.accounts is None:
+                return Identity()
             try:
-                await asyncio.to_thread(self.registry.authenticate, token)
+                await asyncio.to_thread(self.accounts.session, value, False)
+            except DomainError:
+                # Not a live session: the route itself answers 401 (or serves the sign-in page).
+                self.recent.forget(kind, value)
+                return Identity()
+        else:
+            try:
+                if TOKEN_FORMAT.fullmatch(value) is None:
+                    raise Unauthorized("Invalid or revoked token")
+                await asyncio.to_thread(self.registry.authenticate, value)
             except Unauthorized:
-                await JSONResponse({"error": "Invalid or revoked token"}, status_code=401)(scope, receive, send)
-                return
+                self.recent.forget(kind, value)
+                return Identity(response=JSONResponse({"error": "Invalid or revoked token"}, status_code=401))
+        self.recent.remember(kind, value)
+        return Identity(authenticated=True, token=value if kind == BEARER else "")
+
+    def _with_hsts(self, scope, send):
+        """Every response over HTTPS (directly or through a trusted proxy) carries Strict-Transport-Security."""
+        forwarded = dict(scope["headers"]).get(b"x-forwarded-proto", b"").decode("latin-1")
+        if not request_is_https(self.config, scope.get("scheme", "http"), peer_address(scope.get("client")), forwarded):
+            return send
+
+        async def hardened_send(message):
+            if message["type"] == "http.response.start":
+                message = {**message, "headers": [*message.get("headers", []),
+                                                  (b"strict-transport-security", HSTS_VALUE.encode())]}
+            await send(message)
+        return hardened_send
+
+    async def _serve(self, scope, receive, send, token: str, read_timeout: float = REQUEST_READ_TIMEOUT_SECONDS):
+        headers = dict(scope["headers"])
         # Browser cross-origin requests are denied for tokens and sessions alike.
         if b"origin" in headers:
-            from urllib.parse import urlsplit
             origin = urlsplit(headers[b"origin"].decode("latin-1"))
             if origin.netloc.encode() != headers.get(b"host"):
                 await JSONResponse({"error": "Cross-origin request denied"}, status_code=403)(scope, receive, send)
                 return
-        if self.pending >= MAX_PENDING_REQUESTS:
-            await JSONResponse({"error": "Server busy"}, status_code=429)(scope, receive, send)
-            return
-        self.pending += 1
         context = TOKEN.set(token)
         try:
             messages, size = [], 0
-            deadline = time.monotonic() + REQUEST_READ_TIMEOUT_SECONDS
+            deadline = time.monotonic() + read_timeout
             while True:
                 try:
                     message = await asyncio.wait_for(receive(), max(0, deadline - time.monotonic()))
@@ -118,7 +341,6 @@ class Authentication:
             await self.app(scope, buffered_receive, private_send)
         finally:
             TOKEN.reset(context)
-            self.pending -= 1
 
 
 class Maintenance:
@@ -152,6 +374,7 @@ def create_app(service: MemoryService, dashboard: DashboardService | None = None
                base_url: str = DEFAULT_BASE_URL, database: DatabaseConfigService | None = None,
                migration: MigrationRunner | None = None, maintenance: MaintenanceGate | None = None,
                setup_checker: DatabaseChecker | None = None):
+    config = config or DashboardConfig.from_env()
     metrics = dashboard.metrics if dashboard is not None else Metrics()
     dashboard = dashboard or build_dashboard(service, metrics, database, migration, maintenance)
     # The gate given here is the one the middleware enforces; the Database page reports the same one.
@@ -197,6 +420,8 @@ def create_app(service: MemoryService, dashboard: DashboardService | None = None
         await manager.handle_request(scope, receive, send)
 
     async def health(_request):
+        if not config.health_version:
+            return JSONResponse({"status": "ok", "name": "total-agent-memory"})
         return JSONResponse({"status": "ok", "name": "total-agent-memory", "version": VERSION,
                              "release_date": RELEASE_DATE})
 
@@ -239,5 +464,5 @@ def create_app(service: MemoryService, dashboard: DashboardService | None = None
     app.state.setup_database = setup_database
     app.state.migration = dashboard.migration
     app.state.maintenance = maintenance
-    app.state.dashboard_config = config or DashboardConfig.from_env()
-    return RequestMetrics(Authentication(app, service.registry), metrics)
+    app.state.dashboard_config = config
+    return RequestMetrics(Authentication(app, service.registry, config, dashboard.accounts), metrics)

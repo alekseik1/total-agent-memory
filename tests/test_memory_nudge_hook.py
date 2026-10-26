@@ -52,7 +52,7 @@ def run_hook(payload: dict, env_extra: dict | None = None, memory_dir: Path = No
 def state_for(memory_dir: Path, session_id: str) -> dict:
     safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in session_id)
     path = memory_dir / "state" / f"nudge-{safe}.json"
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 class TestCounters:
@@ -104,7 +104,7 @@ class TestCounters:
         # nudge code only creates the file when field is classified;
         # Read isn't classified so file may stay absent.
         if path.exists():
-            s = json.loads(path.read_text())
+            s = json.loads(path.read_text(encoding="utf-8"))
             assert s["edits"] == 0
             assert s["writes"] == 0
 

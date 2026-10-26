@@ -27,15 +27,90 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import sys
 import time
 import urllib.error
 import urllib.request
-from typing import Protocol, runtime_checkable
+from contextlib import contextmanager
+from email.utils import parsedate_to_datetime
+from typing import Iterator, Protocol, runtime_checkable
 
 import config
 
 LOG = lambda msg: sys.stderr.write(f"[llm-provider] {msg}\n")
+
+# Retry policy for transient transport failures (429, 5xx, network errors).
+DEFAULT_MAX_RETRIES = 2
+DEFAULT_RETRY_BASE_SEC = 0.5
+MAX_RETRY_DELAY_SEC = 30.0
+RETRY_JITTER_FRACTION = 0.25
+RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+AUTH_HTTP_STATUS = frozenset({401, 403})
+# A completion is a few KiB of text; anything near this is a broken or hostile peer.
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+class ProviderUnavailable(RuntimeError):
+    """The provider could not serve the request (outage, rate limit, bad credentials).
+
+    Callers that persist the outcome of an LLM step must treat this as a
+    retryable failure, never as an empty-but-successful result.
+    """
+
+
+LLMUnavailable = ProviderUnavailable
+
+
+class ProviderAuthError(ProviderUnavailable):
+    """The provider rejected the credentials (HTTP 401/403); retrying cannot help."""
+
+
+def _env_number(name: str, default: float, cast=float) -> float:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return max(0, cast(raw))
+    except ValueError:
+        return default
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _retry_after_seconds(headers) -> float | None:
+    """Parse a Retry-After header (delta-seconds or HTTP date); None when absent or invalid."""
+    value = headers.get("Retry-After") if headers is not None else None
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        return max(0.0, parsedate_to_datetime(value).timestamp() - time.time())
+    except (TypeError, ValueError):
+        return None
+
+
+def _retry_delay(attempt: int, retry_after: float | None, base: float) -> float:
+    if retry_after is not None:
+        return min(retry_after, MAX_RETRY_DELAY_SEC)
+    delay = min(base * (2 ** attempt), MAX_RETRY_DELAY_SEC)
+    return delay * (1 + random.uniform(0, RETRY_JITTER_FRACTION))  # noqa: S311 - jitter, not security
+
+
+def _read_capped(resp) -> bytes:
+    """Read a response body, refusing anything larger than MAX_RESPONSE_BYTES."""
+    try:
+        raw = resp.read(MAX_RESPONSE_BYTES + 1)
+    except TypeError:  # duck-typed file-likes whose read() takes no size
+        raw = resp.read()
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise ProviderUnavailable(f"LLM response exceeds {MAX_RESPONSE_BYTES} bytes")
+    return raw
 
 
 # ──────────────────────────────────────────────
@@ -129,18 +204,41 @@ def _http_post_json(
         pass
     data = json.dumps(body).encode("utf-8")
     hdrs = {"Content-Type": "application/json", **headers}
-    req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
     ctx = None
     if url.startswith("https://"):
-        import ssl
+        from tls_context import verified_context
+        ctx = verified_context()
+    max_retries = int(_env_number("MEMORY_LLM_MAX_RETRIES", DEFAULT_MAX_RETRIES, int))
+    base_delay = _env_number("MEMORY_LLM_RETRY_BASE_SEC", DEFAULT_RETRY_BASE_SEC)
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
+        req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+        retry_after: float | None = None
         try:
-            import certifi  # type: ignore
-            ctx = ssl.create_default_context(cafile=certifi.where())
-        except ImportError:
-            ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-        raw = resp.read()
-    return json.loads(raw)
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                return json.loads(_read_capped(resp))
+        except urllib.error.HTTPError as exc:
+            if exc.code in AUTH_HTTP_STATUS:
+                raise ProviderAuthError(f"LLM provider rejected credentials (HTTP {exc.code})") from exc
+            if exc.code not in RETRYABLE_HTTP_STATUS:
+                raise
+            retry_after = _retry_after_seconds(exc.headers)
+            last_error = exc
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            last_error = exc
+        if attempt < max_retries:
+            _sleep(_retry_delay(attempt, retry_after, base_delay))
+    raise ProviderUnavailable(f"LLM provider unavailable after {max_retries + 1} attempts: {last_error}") from last_error
+
+
+@contextmanager
+def _mark_unavailable_on_auth_error(cache_key: tuple[str, str, str]) -> Iterator[None]:
+    """Cache a credential rejection as 'unavailable' so callers fall back to another provider."""
+    try:
+        yield
+    except ProviderAuthError:
+        _cache_set_available(cache_key, False)
+        raise
 
 
 # ──────────────────────────────────────────────
@@ -312,12 +410,13 @@ class OpenAIProvider:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        resp = _http_post_json(
-            f"{self.api_base}/chat/completions",
-            body=body,
-            headers=headers,
-            timeout=timeout,
-        )
+        with _mark_unavailable_on_auth_error(_cache_key("openai", self.api_base, self.api_key)):
+            resp = _http_post_json(
+                f"{self.api_base}/chat/completions",
+                body=body,
+                headers=headers,
+                timeout=timeout,
+            )
         try:
             return str(resp["choices"][0]["message"]["content"]).strip()
         except (KeyError, IndexError, TypeError) as exc:
@@ -330,8 +429,9 @@ class OpenAIProvider:
         body = {'model': model or self._default_model or config.get_llm_model_for_provider('openai'),
                 'messages': [{'role': 'user', 'content': prompt}], 'max_tokens': max_tokens, 'temperature': temperature,
                 'response_format': {'type': 'json_schema', 'json_schema': {'name': 'grounded_response', 'strict': True, 'schema': schema}}}
-        response = _http_post_json(f'{self.api_base}/chat/completions', body,
-                                   headers, timeout)
+        with _mark_unavailable_on_auth_error(_cache_key("openai", self.api_base, self.api_key)):
+            response = _http_post_json(f'{self.api_base}/chat/completions', body,
+                                       headers, timeout)
         try:
             message = response['choices'][0]['message']
             if message.get('refusal') or not isinstance(message.get('content'), str):
@@ -364,8 +464,8 @@ class AnthropicProvider:
 
     def available(self) -> bool:
         # Anthropic has no cheap probe endpoint (`/v1/messages` requires a
-        # real body). Trust env: if creds are present, assume reachable and
-        # let `complete()` surface genuine auth errors as runtime exceptions.
+        # real body). Assume reachable while credentials are present; a 401/403
+        # from `complete()` flips the cached verdict to unavailable.
         if not self.api_key or not self.api_base:
             return False
         key = _cache_key("anthropic", self.api_base, self.api_key)
@@ -397,12 +497,13 @@ class AnthropicProvider:
             "x-api-key": self.api_key,
             "anthropic-version": self.API_VERSION,
         }
-        resp = _http_post_json(
-            f"{self.api_base}/messages",
-            body=body,
-            headers=headers,
-            timeout=timeout,
-        )
+        with _mark_unavailable_on_auth_error(_cache_key("anthropic", self.api_base, self.api_key)):
+            resp = _http_post_json(
+                f"{self.api_base}/messages",
+                body=body,
+                headers=headers,
+                timeout=timeout,
+            )
         try:
             content = resp["content"]
             # content is a list of blocks; pick first text block
@@ -431,7 +532,8 @@ class AnthropicProvider:
             "tool_choice": {"type": "tool", "name": STRUCTURED_TOOL_NAME, "disable_parallel_tool_use": True},
         }
         headers = {"x-api-key": self.api_key, "anthropic-version": self.API_VERSION}
-        resp = _http_post_json(f"{self.api_base}/messages", body=body, headers=headers, timeout=timeout)
+        with _mark_unavailable_on_auth_error(_cache_key("anthropic", self.api_base, self.api_key)):
+            resp = _http_post_json(f"{self.api_base}/messages", body=body, headers=headers, timeout=timeout)
         try:
             for block in resp["content"]:
                 if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == STRUCTURED_TOOL_NAME:

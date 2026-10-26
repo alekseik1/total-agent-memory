@@ -19,7 +19,7 @@ import os
 import re
 import sqlite3
 import ssl
-import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,7 +28,12 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
-OLLAMA_BIN = "/usr/local/bin/ollama"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tool_support import ollama_generate  # noqa: E402
+
+LOG = lambda msg: sys.stderr.write(f"[task-manager] {msg}\n")
+
 
 # ---------------------------------------------------------------------------
 # Deadline parsing
@@ -233,13 +238,10 @@ class _SimpleHTMLTextExtractor(HTMLParser):
 
 
 def _make_ssl_context() -> ssl.SSLContext:
-    """Create SSL context using certifi certs if available."""
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
+    """Verified TLS context: certifi, else the platform store, never unverified."""
+    from tls_context import verified_context
 
+    return verified_context()
 
 def web_search(query: str, max_results: int = 5) -> list[dict[str, str]]:
     """Search DuckDuckGo HTML and return list of {title, url, snippet}."""
@@ -332,21 +334,9 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07", "", text)
 
 
-def _ollama_generate(prompt: str, model: str = "vitalii-brain", timeout: int = 120) -> str:
-    """Generate text with Ollama CLI."""
-    try:
-        env = os.environ.copy()
-        env["NO_COLOR"] = "1"
-        result = subprocess.run(
-            [OLLAMA_BIN, "run", model, prompt],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
-        return _strip_ansi(result.stdout).strip()
-    except Exception:
-        return ""
+def _ollama_generate(prompt: str, model: str | None = None, timeout: int = 120) -> str:
+    """Generate text with the Ollama CLI (prompt on stdin). Returns "" on failure."""
+    return ollama_generate(prompt, model, timeout, log=LOG)
 
 
 # ---------------------------------------------------------------------------

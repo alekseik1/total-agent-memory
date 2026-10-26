@@ -32,7 +32,7 @@ def citation_server():
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
+    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text(encoding="utf-8"))
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS knowledge (
@@ -58,7 +58,7 @@ def citation_server():
         "004_deep_enrichment", "005_representations_queue",
         "006_filter_savings", "010_session_continuity",
     ):
-        conn.executescript((root / "migrations" / f"{m}.sql").read_text())
+        conn.executescript((root / "migrations" / f"{m}.sql").read_text(encoding="utf-8"))
 
     # Seed 3 knowledge records; link 1 ↔ 2 via graph_edges (k-1 to k-2).
     # Record 3 is unrelated to test negatives.

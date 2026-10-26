@@ -184,13 +184,13 @@ def test_remote_stdio_to_real_http_mcp(registry, tmp_path):
 
     token = registry.issue_token('vasya', 'remote-client')
     token_file = tmp_path / 'client-token'
-    token_file.write_text(token)
+    token_file.write_text(token, encoding="utf-8")
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
     root = Path(__file__).resolve().parents[1]
     env = {**os.environ, 'PYTHONPATH': str(root / 'src')}
-    with (tmp_path / 'http.log').open('w') as log:
+    with (tmp_path / 'http.log').open('w', encoding="utf-8") as log:
         process = subprocess.Popen([sys.executable, '-m', 'team_memory.cli', '--root', str(registry.root),
                                     'serve', '--port', str(port)], env=env, stdout=log, stderr=log)
         try:

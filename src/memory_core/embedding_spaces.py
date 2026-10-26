@@ -93,6 +93,23 @@ def resolve_space(content_type: str | None, language: str | None = None) -> str:
 # ─── space → model selection ─────────────────────────────────────────
 
 
+def resolve_text_model() -> str:
+    """The model that embeds the text space: the one place every embedder asks.
+
+    The legacy FASTEMBED_MODEL wins, then MEMORY_EMBED_MODEL while the local
+    fastembed provider is configured (for cloud providers it names their own
+    model), then MEMORY_TEXT_EMBED_MODEL.
+    """
+    legacy = os.environ.get("FASTEMBED_MODEL", "").strip()
+    if legacy:
+        return legacy
+    if _cfg.get_embed_provider() == "fastembed":
+        override = os.environ.get("MEMORY_EMBED_MODEL", "").strip()
+        if override:
+            return override
+    return _cfg.get_text_embed_model()
+
+
 def model_for_space(space: str) -> str:
     """Return the embedding model configured for `space`.
 
@@ -102,7 +119,7 @@ def model_for_space(space: str) -> str:
     the requested space, so a future model swap is a one-flag change.
     """
     space = (space or DEFAULT_SPACE).strip().lower()
-    text_model = _cfg.get_text_embed_model()
+    text_model = resolve_text_model()
     if space == "text":
         return text_model
     if space == "code":
@@ -123,5 +140,6 @@ __all__ = [
     "DEFAULT_SPACE",
     "resolve_space",
     "model_for_space",
+    "resolve_text_model",
     "is_space_supported",
 ]

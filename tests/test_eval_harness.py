@@ -20,7 +20,7 @@ def test_load_scenarios_from_list():
 
 def test_load_scenarios_from_file(tmp_path):
     f = tmp_path / "s.json"
-    f.write_text(json.dumps([{"type": "recall", "query": "a", "must_contain": []}]))
+    f.write_text(json.dumps([{"type": "recall", "query": "a", "must_contain": []}]), encoding="utf-8")
     h = EvalHarness()
     loaded = h.load_scenarios(f)
     assert len(loaded) == 1
@@ -28,9 +28,9 @@ def test_load_scenarios_from_file(tmp_path):
 
 def test_load_scenarios_from_dir(tmp_path):
     (tmp_path / "a.json").write_text(json.dumps({"type": "recall", "query": "a",
-                                                  "must_contain": []}))
+                                                  "must_contain": []}), encoding="utf-8")
     (tmp_path / "b.json").write_text(json.dumps([{"type": "recall", "query": "b",
-                                                   "must_contain": []}]))
+                                                   "must_contain": []}]), encoding="utf-8")
     loaded = EvalHarness().load_scenarios(tmp_path)
     assert len(loaded) == 2
 

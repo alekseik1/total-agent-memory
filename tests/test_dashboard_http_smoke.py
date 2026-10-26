@@ -34,7 +34,7 @@ def dashboard_server():
     root = Path(__file__).parent.parent
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
+    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text(encoding="utf-8"))
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS knowledge (
@@ -58,7 +58,7 @@ def dashboard_server():
     for m in ("002_multi_representation", "003_triple_extraction_queue",
               "004_deep_enrichment", "005_representations_queue",
               "006_filter_savings"):
-        conn.executescript((root / "migrations" / f"{m}.sql").read_text())
+        conn.executescript((root / "migrations" / f"{m}.sql").read_text(encoding="utf-8"))
 
     # Seed a filter saving row so savings endpoint has something to return
     conn.execute(

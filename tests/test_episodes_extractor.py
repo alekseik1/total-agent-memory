@@ -57,7 +57,7 @@ def db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(_BASE_KNOWLEDGE_DDL)
-    migration = (_MIGRATIONS_DIR / "023_episodes.sql").read_text()
+    migration = (_MIGRATIONS_DIR / "023_episodes.sql").read_text(encoding="utf-8")
     conn.executescript(migration)
     yield conn
     conn.close()

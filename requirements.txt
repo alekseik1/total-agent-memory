@@ -17,7 +17,7 @@ tree-sitter-language-pack>=1.13
 
 # Default embedding backend (ONNX via onnxruntime — no torch). Declared in
 # pyproject.toml too, so every install channel retrieves with the same model.
-fastembed
+fastembed>=0.6,<0.9
 
 # Russian stemming for the lexical recall tier (FTS5 matches exact word forms).
 snowballstemmer>=2.2

@@ -71,10 +71,14 @@ $env:TAM_HOOK_LOG_FILE = $HookLogFile
 
 $HookPython = $env:HOOK_PYTHON
 if (-not $HookPython) {
-    foreach ($candidate in @(
-            [System.IO.Path]::Combine($InstallDir, ".venv", "Scripts", "python.exe"),
-            [System.IO.Path]::Combine($InstallDir, ".venv", "bin", "python"))) {
-        if (Test-Path $candidate) { $HookPython = $candidate; break }
+    # The checkout's venv, then the server venv the plugin bootstrap creates in the memory dir or ~/.tam.
+    foreach ($base in @($InstallDir, $MemoryDir, (Join-Path $HOME ".tam"))) {
+        foreach ($candidate in @(
+                [System.IO.Path]::Combine($base, ".venv", "Scripts", "python.exe"),
+                [System.IO.Path]::Combine($base, ".venv", "bin", "python"))) {
+            if (Test-Path $candidate) { $HookPython = $candidate; break }
+        }
+        if ($HookPython) { break }
     }
 }
 if (-not $HookPython) {

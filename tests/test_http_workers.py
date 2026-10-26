@@ -42,7 +42,7 @@ def children_of(pid: int) -> set[int]:
     children = set()
     for stat in Path("/proc").glob("[0-9]*/stat"):
         try:
-            fields = stat.read_text().rsplit(")", 1)[1].split()
+            fields = stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
         except OSError:
             continue  # the process exited while we were listing
         if int(fields[1]) == pid:

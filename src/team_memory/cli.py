@@ -29,7 +29,7 @@ CLI_ACTOR = "cli"
 EXIT_LEASE_LOST = 75
 MUTATING_COMMANDS = frozenset({"user-add", "team-add", "member", "bootstrap-admin", "user-role", "invite",
                                "user-disable", "user-enable", "user-purge", "setup-token", "token-create",
-                               "token-revoke"})
+                               "token-revoke", "login-unlock"})
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 3737
 # Bounds the whole uvicorn shutdown, including asyncio Server.wait_closed(), which never returns on
@@ -233,6 +233,7 @@ def run_server(registry: Registry, args) -> None:
     from team_memory.settings import SettingsStore, load_cipher
     from team_memory.worker import (
         DEFAULT_OPERATION_TIMEOUT,
+        DEFAULT_QUEUE_TIMEOUT,
         DEFAULT_WORKERS,
         WorkerPool,
     )
@@ -255,7 +256,8 @@ def run_server(registry: Registry, args) -> None:
     pools = []
     pool = WorkerPool(root, int(os.environ.get("TAM_TEAM_MAX_WORKERS", DEFAULT_WORKERS)),
                       float(os.environ.get("TAM_TEAM_OPERATION_TIMEOUT", DEFAULT_OPERATION_TIMEOUT)),
-                      environment=settings.overrides, registry=registry, maintenance=gate)
+                      environment=settings.overrides, registry=registry, maintenance=gate,
+                      queue_timeout=float(os.environ.get("TAM_TEAM_QUEUE_TIMEOUT", DEFAULT_QUEUE_TIMEOUT)))
     pools.append(pool)
     if gate is not None:
         runner = migration_runner(root, registry, pool, gate, lease, isolated_checks=True)
@@ -300,6 +302,10 @@ def main():
     role.add_argument("role", choices=ORG_ROLES)
     invite = commands.add_parser("invite", help="Issue a one-time dashboard invite / password reset code")
     invite.add_argument("id")
+    unlock = commands.add_parser("login-unlock", help="Clear a user's sign-in lockout (all addresses and devices); "
+                                                      "--ip also clears that address")
+    unlock.add_argument("id")
+    unlock.add_argument("--ip", help="also lift the lock on this client address")
     for command, text in (("user-disable", "Offboard a user: revoke all tokens, end sessions, block sign-in"),
                           ("user-enable", "Lift the block; the user then needs a new invite or token")):
         sub = commands.add_parser(command, help=text)
@@ -396,6 +402,9 @@ def main():
                                      f"--user {args.id} --confirm {args.id}\n")
         except (DomainError, FileExistsError) as exc:
             parser.exit(1, f"{exc}\n")
+    elif args.command == "login-unlock":
+        removed = Accounts(registry, AccountPolicy.from_env()).unlock(args.id, args.ip)
+        sys.stdout.write(f"Cleared {removed} sign-in counters for {args.id}.\n")
     elif args.command == "invite":
         print_invite(Accounts(registry, AccountPolicy.from_env()).issue_invite(args.id))
     elif args.command == "setup-token":
@@ -410,10 +419,10 @@ def main():
                          "Open /dashboard/ on the server and enter it.\n")
     elif args.command == "token-create":
         fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as destination:
+        with os.fdopen(fd, "w", encoding="utf-8") as destination:
             destination.write(registry.issue_token(args.user, args.client) + "\n")
     elif args.command == "token-revoke":
-        registry.revoke(args.file.read_text().strip())
+        registry.revoke(args.file.read_text(encoding="utf-8").strip())
     elif args.command == "serve":
         run_server(registry, args)
     else:

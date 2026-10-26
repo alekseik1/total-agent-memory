@@ -83,7 +83,7 @@ def gate_db(tmp_path):
     )
     migration = (
         Path(__file__).parent.parent / "migrations" / "015_quality_importance.sql"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     # The ALTER TABLE in the migration would fail on the simplified knowledge
     # table above — execute only the quality_gate_log block.
     log_block = migration.split("CREATE TABLE IF NOT EXISTS quality_gate_log", 1)[1]

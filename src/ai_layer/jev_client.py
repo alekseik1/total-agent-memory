@@ -53,12 +53,10 @@ def _validated_key(api_key: str | None) -> str:
 
 
 def _ssl_context() -> ssl.SSLContext:
-    try:
-        import certifi
-    except ImportError:
-        return ssl.create_default_context()
-    return ssl.create_default_context(cafile=certifi.where())
+    """Verified TLS context: certifi, else the platform store, never unverified."""
+    from tls_context import verified_context
 
+    return verified_context()
 
 def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
     lowered = {name.lower(): value for name, value in headers.items()}

@@ -164,3 +164,23 @@ def test_search_fails_loudly_when_query_embedding_is_down(dashscope, monkeypatch
     with pytest.raises(Unavailable, match="semantic retrieval"):
         runtime.search(_search("where does Alice live"))
     runtime.db.close()
+
+
+@pytest.mark.parametrize("code,fails", [("stale_vectors", False), ("provider_fallback", False), ("embed_failed", True)])
+def test_only_real_semantic_failures_make_search_unavailable(dashscope, monkeypatch, code, fails):
+    runtime = Runtime(SETTINGS)
+    runtime.add(_add())
+    real = runtime.recall.search
+
+    def with_diagnostic(*args, **kwargs):
+        result = real(*args, **kwargs)
+        result["semantic_diagnostics"] = [{"space": "text", "code": code}]
+        return result
+
+    monkeypatch.setattr(runtime.recall, "search", with_diagnostic)
+    if fails:
+        with pytest.raises(Unavailable, match="semantic retrieval"):
+            runtime.search(_search("where does Alice live"))
+    else:
+        assert isinstance(runtime.search(_search("where does Alice live")), list)
+    runtime.db.close()

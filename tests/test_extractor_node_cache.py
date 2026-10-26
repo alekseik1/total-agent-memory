@@ -194,7 +194,7 @@ def test_auto_link_reuses_one_extractor_per_connection(tmp_path, monkeypatch):
 
 def test_auto_link_does_not_construct_its_own_extractor():
     """Guard the source: the constructor call is easy to reintroduce."""
-    source = (ROOT / "src" / "graph" / "auto_link.py").read_text()
+    source = (ROOT / "src" / "graph" / "auto_link.py").read_text(encoding="utf-8")
     assert "ConceptExtractor(db)" not in source, (
         "auto_link runs on every save; constructing an extractor there drops "
         "the node cache and makes the write path quadratic"

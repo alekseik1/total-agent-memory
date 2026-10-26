@@ -224,3 +224,28 @@ async def test_team_gateway_redacts_before_the_workspace(team_backend, tmp_path,
             await service.call(token, "memory_save", {"content": "   "})
     finally:
         service.pool.close()
+
+
+@pytest.mark.parametrize("text, secret", [
+    ("token=mysecrettoken", "mysecrettoken"),
+    ("api_key: hunter-two", "hunter-two"),
+    ('{"api_key": "hunter-two"}', "hunter-two"),
+    ("password=hunter2", "hunter2"),
+    ("bearer abcdefghijklmnopqrstuv", "abcdefghijklmnopqrstuv"),
+    ("Bearer AbC12345", "AbC12345"),
+    ("Authorization: Bearer abcdefghijklmnopqrstuv", "abcdefghijklmnopqrstuv"),
+])
+def test_plain_credential_assignments_and_bearer_values_are_redacted(text, secret):
+    cleaned, changed = redact_secrets(text)
+    assert changed
+    assert secret not in cleaned
+
+
+@pytest.mark.parametrize("text", [
+    "the token is valid",
+    "password reset flow",
+    "bearer token refresh flow",
+    "the bearer refresh_token_validation_flow handler",
+])
+def test_prose_with_credential_words_still_survives(text):
+    assert redact_secrets(text) == (text, False)

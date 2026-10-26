@@ -30,7 +30,7 @@ def test_capture_tool_observation_enqueues(tmp_path: Path) -> None:
     )
     assert path is not None
     assert path.exists()
-    payload = json.loads(path.read_text())
+    payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["kind"] == "tool_observation"
     assert payload["tool_name"] == "Bash"
     assert payload["session_id"] == "sess-42"
@@ -50,7 +50,7 @@ def test_capture_tool_observation_flags_errors(tmp_path: Path) -> None:
         queue_dir=tmp_path,
     )
     assert path is not None
-    payload = json.loads(path.read_text())
+    payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["error_candidate"] is True
     assert "error-candidate" in payload["tags"]
 
@@ -70,7 +70,7 @@ def test_capture_tool_observation_truncates_huge_output(tmp_path: Path) -> None:
         "Bash", big, "s", "p", queue_dir=tmp_path,
     )
     assert path is not None
-    payload = json.loads(path.read_text())
+    payload = json.loads(path.read_text(encoding="utf-8"))
     # 10_000 cap + truncation marker
     assert len(payload["output"]) < 50_000
     assert "truncated" in payload["output"]
@@ -149,7 +149,7 @@ def test_post_tool_hook_enqueues_when_enabled(tmp_path: Path) -> None:
         time.sleep(0.05)
 
     assert queued, "expected at least one queued observation file"
-    payload_out = json.loads(queued[0].read_text())
+    payload_out = json.loads(queued[0].read_text(encoding="utf-8"))
     assert payload_out["tool_name"] == "Bash"
     assert payload_out["project"] == "on-proj"
     assert "it worked" in payload_out["output"]

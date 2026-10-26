@@ -23,9 +23,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from background_writes import PRIVATE_PLACEHOLDER, save_background_knowledge
 from memory_core.timestamps import utc_now
 from paths import memory_dir
-from secret_redaction import redact_secrets
+from secret_redaction import redact_secrets, strip_private_blocks
 
 MAX_OUTPUT_KB = 200
 MAX_USER_TEXT = 2000
@@ -33,6 +34,11 @@ MAX_ASSISTANT_TEXT = 500
 MAX_TOOL_INPUT_TEXT = 200
 HEAD_MESSAGES = 20
 TAIL_MESSAGES = 30
+MEMORY_SAVE_PREVIEW_CHARS = 200
+QUEUE_DIR_MODE = 0o700
+QUEUE_FILE_MODE = 0o600
+# A session id becomes part of a file name: no separators, dots or whitespace.
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 # Transcript-only rule on top of the shared list: credential/auth names with a quoted value.
 TRANSCRIPT_PATTERNS = [
@@ -41,7 +47,12 @@ TRANSCRIPT_PATTERNS = [
 
 
 def sanitize(text: str) -> str:
-    """Remove sensitive data from text."""
+    """Remove private blocks and sensitive data from text.
+
+    Private blocks are stripped first, on the whole text: truncating before
+    stripping could cut the closing tag off and leak the head of the block.
+    """
+    text = strip_private_blocks(text, PRIVATE_PLACEHOLDER)
     text, _ = redact_secrets(text)
     for pattern in TRANSCRIPT_PATTERNS:
         text = pattern.sub('[REDACTED]', text)
@@ -63,6 +74,8 @@ def extract_content_text(content) -> str:
 
 def extract(transcript_path: str, session_id: str, output_dir: str) -> dict:
     """Extract transcript. Returns output dict with conversation and metadata."""
+    if not SESSION_ID_RE.match(session_id or ""):
+        raise ValueError(f"invalid session id: {session_id!r}")
     conversation = []
     memory_saves = []
     user_texts = []
@@ -143,7 +156,7 @@ def extract(transcript_path: str, session_id: str, output_dir: str) -> dict:
 
                 text = extract_content_text(content)
                 if text:
-                    clean_text = sanitize(text[:MAX_USER_TEXT])
+                    clean_text = sanitize(text)[:MAX_USER_TEXT]
                     conversation.append({
                         "role": "user",
                         "ts": ts,
@@ -156,7 +169,7 @@ def extract(transcript_path: str, session_id: str, output_dir: str) -> dict:
                 stats["total_messages"] += 1
 
                 if isinstance(content, str) and content.strip():
-                    clean_text = sanitize(content[:MAX_ASSISTANT_TEXT])
+                    clean_text = sanitize(content)[:MAX_ASSISTANT_TEXT]
                     conversation.append({
                         "role": "assistant",
                         "ts": ts,
@@ -170,7 +183,7 @@ def extract(transcript_path: str, session_id: str, output_dir: str) -> dict:
                         ctype = c.get("type", "")
 
                         if ctype == "text" and c.get("text", "").strip():
-                            clean_text = sanitize(c["text"][:MAX_ASSISTANT_TEXT])
+                            clean_text = sanitize(c["text"])[:MAX_ASSISTANT_TEXT]
                             conversation.append({
                                 "role": "assistant",
                                 "ts": ts,
@@ -186,7 +199,7 @@ def extract(transcript_path: str, session_id: str, output_dir: str) -> dict:
 
                             # Track memory_save calls
                             if "memory_save" in tool_name:
-                                content_preview = str(tool_input.get("content", ""))[:200]
+                                content_preview = sanitize(str(tool_input.get("content", "")))[:MEMORY_SAVE_PREVIEW_CHARS]
                                 ktype = tool_input.get("type", "")
                                 project = tool_input.get("project", "")
                                 memory_saves.append(
@@ -205,7 +218,7 @@ def extract(transcript_path: str, session_id: str, output_dir: str) -> dict:
                                 "role": "tool_call",
                                 "ts": ts,
                                 "tool": tool_name,
-                                "input_summary": sanitize(input_str[:MAX_TOOL_INPUT_TEXT]),
+                                "input_summary": sanitize(input_str)[:MAX_TOOL_INPUT_TEXT],
                             })
 
     # Skip empty sessions
@@ -261,13 +274,15 @@ def extract(transcript_path: str, session_id: str, output_dir: str) -> dict:
         output_str = json.dumps(output, ensure_ascii=False)
 
     # Write to extract-queue
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    Path(output_dir).mkdir(parents=True, exist_ok=True, mode=QUEUE_DIR_MODE)
     output_path = Path(output_dir) / f"pending-{session_id}.json"
 
-    # Atomic write: temp file then rename
+    # Atomic write: private temp file (0600 from creation, never wider) then rename
     tmp_path = output_path.with_suffix(".tmp")
-    tmp_path.write_text(output_str, encoding="utf-8")
-    tmp_path.rename(output_path)
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, QUEUE_FILE_MODE)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(output_str)
+    os.replace(tmp_path, output_path)
 
     return output
 
@@ -380,8 +395,8 @@ def auto_save_knowledge(db_path: str, session_id: str, data: dict) -> list:
         db.execute("PRAGMA synchronous=NORMAL")
 
         # Detect whether the agent-lineage columns exist (migration 028).
-        # Older installs without the migration fall back to the legacy INSERT
-        # so this script keeps working across upgrades.
+        # Older installs without the migration skip them so this script keeps
+        # working across upgrades.
         cols = {r[1] for r in db.execute("PRAGMA table_info(knowledge)").fetchall()}
         has_lineage = "agent_id" in cols and "parent_agent_id" in cols
 
@@ -399,43 +414,20 @@ def auto_save_knowledge(db_path: str, session_id: str, data: dict) -> list:
                 continue
 
             row_tags = list(record["tags"]) + extra_tags
-
+            extra: dict = {"last_confirmed": now, "recall_count": 0}
             if has_lineage:
-                cur = db.execute("""
-                    INSERT INTO knowledge (session_id, type, content, context, project, tags,
-                                           source, confidence, created_at, last_confirmed, recall_count,
-                                           agent_id, parent_agent_id)
-                    VALUES (?, ?, ?, ?, ?, ?, 'auto-extract', 0.7, ?, ?, 0, ?, ?)
-                """, (
-                    dedup_key,
-                    record["type"],
-                    sanitize(record["content"]),
-                    record["context"],
-                    project,
-                    json.dumps(row_tags),
-                    now,
-                    now,
-                    session_agent_id,
-                    session_parent_agent_id,
-                ))
-            else:
-                cur = db.execute("""
-                    INSERT INTO knowledge (session_id, type, content, context, project, tags,
-                                           source, confidence, created_at, last_confirmed, recall_count)
-                    VALUES (?, ?, ?, ?, ?, ?, 'auto-extract', 0.7, ?, ?, 0)
-                """, (
-                    dedup_key,
-                    record["type"],
-                    sanitize(record["content"]),
-                    record["context"],
-                    project,
-                    json.dumps(row_tags),
-                    now,
-                    now,
-                ))
-            saved_ids.append(cur.lastrowid)
+                extra["agent_id"] = session_agent_id
+                extra["parent_agent_id"] = session_parent_agent_id
 
-        db.commit()
+            # The shared path strips <private> blocks, redacts, deduplicates and queues the embedding.
+            saved = save_background_knowledge(
+                db, content=sanitize(record["content"]), ktype=record["type"], project=project,
+                session_id=dedup_key, tags=row_tags, context=sanitize(record["context"]),
+                source="auto-extract", confidence=0.7, created_at=now, extra=extra,
+            )
+            if saved is not None:
+                saved_ids.append(saved.id)
+
         db.close()
     except Exception as e:
         print(f"Auto-save to DB failed: {e}", file=sys.stderr)
@@ -456,7 +448,11 @@ def main():
         print(f"Transcript not found: {args.transcript}", file=sys.stderr)
         sys.exit(1)
 
-    data = extract(args.transcript, args.session_id, args.output_dir)
+    try:
+        data = extract(args.transcript, args.session_id, args.output_dir)
+    except ValueError as error:
+        print(f"Invalid argument: {error}", file=sys.stderr)
+        sys.exit(2)
     if not data:
         print("Empty session, nothing to extract", file=sys.stderr)
         return

@@ -169,13 +169,13 @@ def test_module_registers_all_v8_hooks_as_powershell_on_windows(tmp_path):
     assert main(["--client", "claude-code", "--memory-dir", str(home / ".tam"), "--command", "C:/py/python.exe",
                  "--arg", "C:/tam/src/server.py", "--env", "CLAUDE_MEMORY_DIR=C:/tam-data"],
                 environ={"TAM_MEMORY_DIR": str(home / ".tam")}, host=host) == 0
-    hooks = json.loads((home / ".claude" / "settings.json").read_text())["hooks"]
+    hooks = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"]
     for event in ("SessionStart", "SessionEnd", "Stop", "UserPromptSubmit", "PreToolUse", "PostToolUse"):
         commands = [h["command"] for block in hooks[event] for h in block["hooks"]]
         assert commands and all(c.startswith("powershell -ExecutionPolicy Bypass -NoProfile -File") for c in commands)
         assert all(c.rstrip('"').endswith(".ps1") for c in commands)
     assert (home / ".claude" / "hooks" / "session-start.ps1").is_file()
-    entry = json.loads((home / ".claude.json").read_text())["mcpServers"]["memory"]
+    entry = json.loads((home / ".claude.json").read_text(encoding="utf-8"))["mcpServers"]["memory"]
     assert entry["command"] == "C:/py/python.exe" and entry["env"]["CLAUDE_MEMORY_DIR"] == "C:/tam-data"
 
 

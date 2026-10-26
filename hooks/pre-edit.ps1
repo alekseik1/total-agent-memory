@@ -1,5 +1,5 @@
 # ===========================================
-# PreToolUse Hook (PowerShell) — v7.0 file_context guard
+# PreToolUse Hook (PowerShell) - v7.0 file_context guard
 #
 # Twin of hooks/pre-edit.sh. Asks the model to call file_context(path)
 # BEFORE editing a file, delivered as hookSpecificOutput.additionalContext.

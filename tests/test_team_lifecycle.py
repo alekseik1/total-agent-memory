@@ -151,7 +151,7 @@ def test_restore_rejects_a_dsn_for_sqlite_snapshots_and_requires_one_for_postgre
         restore(tmp_path / 'snapshot', tmp_path / 'restored', dsn)
     postgres = tmp_path / 'pg-snapshot'
     postgres.mkdir()
-    (postgres / 'manifest.json').write_text('{"format_version": 2, "backend": "postgres"}')
+    (postgres / 'manifest.json').write_text('{"format_version": 2, "backend": "postgres"}', encoding="utf-8")
     with pytest.raises(Conflict, match='--dsn-env'):
         restore(postgres, tmp_path / 'restored')
 
@@ -202,7 +202,7 @@ def test_cli_checks_migrates_backs_up_and_serves_on_postgres(tmp_path, monkeypat
 
     code, _, err = run_cli(monkeypatch, capsys, root, 'backup', '--out', str(tmp_path / 'pg-snapshot'))
     assert code == 0, err
-    manifest = json.loads((tmp_path / 'pg-snapshot' / 'manifest.json').read_text())
+    manifest = json.loads((tmp_path / 'pg-snapshot' / 'manifest.json').read_text(encoding="utf-8"))
     assert manifest['backend'] == 'postgres' and manifest['format_version'] == 2
     code, out, _ = run_cli(monkeypatch, capsys, root, 'db-migrate', '--dsn-env', PG_DSN_VAR, '--dry-run')
     assert code == 1 and 'already runs on PostgreSQL' in out
@@ -319,12 +319,12 @@ def test_mutating_cli_commands_wait_for_a_running_migration(tmp_path, monkeypatc
     now = datetime.now(UTC)
     progress = MigrationProgress(job_id=uuid4(), plan_id=uuid4(), phase=MigrationPhase.COPY_WORKSPACES,
                                  started_at=now, updated_at=now, started_by='admin', target='postgresql://tam@db/tam')
-    (journal / f'{progress.job_id}.json').write_text(progress.model_dump_json())
+    (journal / f'{progress.job_id}.json').write_text(progress.model_dump_json(), encoding="utf-8")
     code, _, err = run_cli(monkeypatch, capsys, root, 'user-add', 'late', 'Late')
     assert code == 1 and 'migration is running' in err
     assert 'late' not in [user['id'] for user in Registry(root).list_users()]
     finished = progress.model_copy(update={'phase': MigrationPhase.CANCELLED, 'finished_at': now})
-    (journal / f'{progress.job_id}.json').write_text(finished.model_dump_json())
+    (journal / f'{progress.job_id}.json').write_text(finished.model_dump_json(), encoding="utf-8")
     code, _, err = run_cli(monkeypatch, capsys, root, 'user-add', 'late', 'Late')
     assert code == 0, err
 

@@ -101,6 +101,9 @@ def main(argv: list[str] | None = None) -> int:
     except (ImportFormatError, FileNotFoundError, ValueError) as error:
         sys.stderr.write(f"tam import: {error}\n")
         return EXIT_USAGE
+    except RecursionError:
+        sys.stderr.write("tam import: input is nested too deeply\n")
+        return EXIT_USAGE
     except (OSError, sqlite3.Error) as error:
         LOGGER.error(json.dumps({"event": "import_failed", "kind": args.kind, "error": str(error)}))
         sys.stderr.write(f"tam import: failed: {error}\n")

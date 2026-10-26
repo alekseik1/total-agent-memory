@@ -101,7 +101,7 @@ class Scenario:
                                        + log.read().decode('utf-8', errors='replace'))
 
     def call(self, user, name, arguments):
-        token = (self.root / f'{user}.token').read_text().strip()
+        token = (self.root / f'{user}.token').read_text(encoding="utf-8").strip()
         request = urllib.request.Request(self.url + '/api/call', method='POST',
                     data=json.dumps({'name': name, 'arguments': arguments}).encode(),
                     headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
@@ -230,12 +230,12 @@ def main():
         state = root / 'smoke-state.json'
         if args.verify_existing:
             with scenario.server():
-                scenario.verify(json.loads(state.read_text()))
+                scenario.verify(json.loads(state.read_text(encoding="utf-8")))
         else:
             scenario.seed()
             with scenario.server():
                 records = scenario.exercise()
-            state.write_text(json.dumps(records))
+            state.write_text(json.dumps(records), encoding="utf-8")
             if args.server_url is None:
                 with scenario.server():
                     scenario.verify(records)

@@ -70,6 +70,12 @@ class QualityScore:
     provider: str | None = None
     model: str | None = None
     latency_ms: int | None = None
+    llm_down: bool = False  # skipped because the provider could not be reached
+
+    @property
+    def retryable(self) -> bool:
+        """True when the verdict reflects an LLM failure, not a judgement of the content."""
+        return self.decision == "error" or self.llm_down
 
     @property
     def passed(self) -> bool:
@@ -304,6 +310,7 @@ def score_quality(
             verifiability=None,
             reason=f"provider build failed: {exc}",
             threshold=threshold,
+            llm_down=True,
         )
 
     if not provider.available():
@@ -315,6 +322,7 @@ def score_quality(
             verifiability=None,
             reason=f"provider '{getattr(provider, 'name', '?')}' unavailable",
             threshold=threshold,
+            llm_down=True,
         )
 
     prompt = _SCORE_PROMPT.format(
@@ -413,21 +421,22 @@ def log_decision(
     ktype: str | None,
     content: str,
     knowledge_id: int | None = None,
-) -> None:
-    """Persist a single gate decision to `quality_gate_log`.
+) -> int | None:
+    """Persist a single gate decision to `quality_gate_log`; returns the row id.
 
     Always logs `drop` and `error` decisions; logs `pass`/`skip` only when
-    `MEMORY_QUALITY_LOG_ALL=1` (sampling for prompt tuning).
+    `MEMORY_QUALITY_LOG_ALL=1` (sampling for prompt tuning). Returns None when
+    nothing was written.
     """
     if score.decision in ("pass", "skip") and not _log_all():
-        return
+        return None
 
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     preview = (content or "")[:_PREVIEW_CHARS]
 
     try:
-        db.execute(
+        cursor = db.execute(
             """
             INSERT INTO quality_gate_log (
                 created_at, decision, score_total,
@@ -456,5 +465,7 @@ def log_decision(
             ),
         )
         db.commit()
+        return cursor.lastrowid
     except Exception as exc:
         LOG(f"audit log insert failed: {exc}")
+        return None

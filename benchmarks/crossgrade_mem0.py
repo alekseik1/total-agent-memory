@@ -75,7 +75,7 @@ def held_out(bench: str) -> dict[str, dict]:
 
 
 def mem0_answers(bench: str, repo: Path) -> dict[str, str]:
-    rows = json.loads((repo / MEM0_RESULTS[bench]).read_text())["evaluations"]
+    rows = json.loads((repo / MEM0_RESULTS[bench]).read_text(encoding="utf-8"))["evaluations"]
     if bench == "locomo":
         return {f"{row['conversation_idx']}|{row['question']}": row["cutoff_results"]["top_200"]["generated_answer"]
                 for row in rows}
@@ -177,7 +177,7 @@ def main() -> int:
         if not path:
             raise SystemExit(f"--tam expects LABEL=FILE, got {spec!r}")
         systems[label] = {question_key(args.bench, row): row["answer"]
-                          for row in map(json.loads, Path(path).read_text().splitlines()) if row.get("answer")}
+                          for row in map(json.loads, Path(path).read_text(encoding="utf-8").splitlines()) if row.get("answer")}
     common = sorted(set(questions).intersection(*systems.values()))
     if not common:
         raise SystemExit("no held-out question is answered by every system")
@@ -206,7 +206,7 @@ def main() -> int:
 
     report = {"bench": args.bench, "questions": len(common), "judge_models": judge_models,
               "mem0_repo_commit": subprocess.run(["git", "-C", str(args.mem0_repo), "rev-parse", "HEAD"],
-                                                 capture_output=True, text=True, check=False).stdout.strip() or None,
+                                                 capture_output=True, text=True, encoding="utf-8", errors="replace", check=False).stdout.strip() or None,
               "cells": []}
     for (judge, system), values in marks.items():
         by_category: dict[str, list[bool]] = {}
@@ -219,10 +219,10 @@ def main() -> int:
         report["cells"].append(cell)
         print(f"{system:24s} judge={judge:9s} {cell['accuracy']:6.2f}  {cell.get('vs_mem0', '')}")
     report["spent_usd"] = round(client.spent, 4)
-    (args.out / f"crossgrade-{args.bench}.json").write_text(json.dumps(report, indent=2))
+    (args.out / f"crossgrade-{args.bench}.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     (args.out / f"crossgrade-{args.bench}-marks.jsonl").write_text("".join(
         json.dumps({"key": key, **{f"{s}|{j}": marks[(j, s)][i] for (j, s) in marks}}) + "\n"
-        for i, key in enumerate(common)))
+        for i, key in enumerate(common)), encoding="utf-8")
     print(f"spent ${client.spent:.2f}")
     return 0
 

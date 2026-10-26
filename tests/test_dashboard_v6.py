@@ -13,7 +13,7 @@ def dash_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
+    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text(encoding="utf-8"))
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS knowledge (
@@ -26,12 +26,12 @@ def dash_db():
     for m in ("002_multi_representation", "003_triple_extraction_queue",
               "004_deep_enrichment", "005_representations_queue",
               "006_filter_savings"):
-        conn.executescript((root / "migrations" / f"{m}.sql").read_text())
+        conn.executescript((root / "migrations" / f"{m}.sql").read_text(encoding="utf-8"))
     # v10.1 — enrichment_queue migration (separate so older tests still run
     # even if it is missing at runtime).
     eq_sql = root / "migrations" / "020_async_enrichment.sql"
     if eq_sql.exists():
-        conn.executescript(eq_sql.read_text())
+        conn.executescript(eq_sql.read_text(encoding="utf-8"))
     yield conn
     conn.close()
 

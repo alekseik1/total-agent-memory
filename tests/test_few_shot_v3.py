@@ -42,12 +42,12 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def v3_bundle() -> dict:
-    return json.loads(V3_PATH.read_text())
+    return json.loads(V3_PATH.read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")
 def locomo_dataset() -> list:
-    return json.loads(LOCOMO_PATH.read_text())
+    return json.loads(LOCOMO_PATH.read_text(encoding="utf-8"))
 
 
 def test_v3_bundle_has_5_categories(v3_bundle: dict) -> None:
@@ -104,7 +104,7 @@ def test_v3_md5_deterministic(tmp_path: Path) -> None:
         seed=42,
     )
     out = tmp_path / "regen.json"
-    out.write_text(json.dumps(bundle, indent=2, ensure_ascii=False))
+    out.write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
     regen_md5 = hashlib.md5(out.read_bytes()).hexdigest()
     assert regen_md5 == EXPECTED_MD5
 
@@ -162,7 +162,7 @@ def test_v3_only_uses_train_conv_ids(locomo_dataset: list) -> None:
             if q and a:
                 held_pairs.add((q, a))
 
-    bundle = json.loads(V3_PATH.read_text())
+    bundle = json.loads(V3_PATH.read_text(encoding="utf-8"))
     for cat in ("1", "2", "3", "4", "5"):
         for p in bundle[cat]:
             assert (p["q"], p["a"]) not in held_pairs, (

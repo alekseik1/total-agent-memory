@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-PLUGIN = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
-MARKETPLACE = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())
+PLUGIN = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+MARKETPLACE = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
 
 
 # ── Manifest ────────────────────────────────────────────────────────
@@ -63,17 +63,19 @@ def test_plugin_has_no_top_level_bin_dir():
 
 
 def test_mcp_config_points_at_an_existing_bootstrap():
-    cfg = json.loads((ROOT / ".mcp.json").read_text())
+    cfg = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
     server = cfg["mcpServers"]["memory"]
     assert server["command"] == "python3"
     (arg,) = server["args"]
-    assert arg.startswith("${CLAUDE_PLUGIN_ROOT}/")
-    target = ROOT / arg.replace("${CLAUDE_PLUGIN_ROOT}/", "")
+    # The root variable defaults to "." so the file also works when launched from the repo root.
+    prefix = "${CLAUDE_PLUGIN_ROOT:-.}/"
+    assert arg.startswith(prefix)
+    target = ROOT / arg.removeprefix(prefix)
     assert target.is_file(), f"{target} referenced by .mcp.json does not exist"
 
 
 def test_every_hook_command_exists_and_is_executable():
-    cfg = json.loads((ROOT / "hooks" / "hooks.json").read_text())
+    cfg = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     seen = 0
     for event, matchers in cfg["hooks"].items():
         for matcher in matchers:
@@ -91,7 +93,7 @@ def test_every_hook_command_exists_and_is_executable():
 
 
 def test_hook_events_are_real_claude_code_events():
-    cfg = json.loads((ROOT / "hooks" / "hooks.json").read_text())
+    cfg = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     known = {
         "SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
         "PostToolUse", "PostToolUseFailure", "Stop", "SubagentStop",
@@ -104,7 +106,7 @@ def test_hook_events_are_real_claude_code_events():
 def test_the_skill_ships_with_the_plugin():
     skill = ROOT / "skills" / "memory-protocol" / "SKILL.md"
     assert skill.is_file()
-    text = skill.read_text()
+    text = skill.read_text(encoding="utf-8")
     assert text.startswith("---"), "SKILL.md needs YAML frontmatter"
     assert "description:" in text.split("---")[1]
 
@@ -124,7 +126,7 @@ def test_bootstrap_prefers_an_existing_install(bootstrap, tmp_path, monkeypatch)
     bindir = venv / ("Scripts" if os.name == "nt" else "bin")
     bindir.mkdir(parents=True)
     entry = bindir / ("total-agent-memory.exe" if os.name == "nt" else "total-agent-memory")
-    entry.write_text("#!/bin/sh\n")
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setenv("TAM_MEMORY_DIR", str(tmp_path))
 
     assert bootstrap._from_existing_venv() == [str(entry)]

@@ -291,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--quiet", action="store_true", help="Suppress example dump")
     args = p.parse_args(argv)
 
-    with args.result.open() as f:
+    with args.result.open(encoding="utf-8") as f:
         data = json.load(f)
     records = data.get("records", [])
     if not records:
@@ -314,7 +314,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nCSV written: {args.csv} ({len(result['classified'])} rows)", file=sys.stderr)
 
     if args.diff:
-        with args.diff.open() as f:
+        with args.diff.open(encoding="utf-8") as f:
             data_b = json.load(f)
         d = diff_runs(data, data_b)
         print(f"\n=== DIFF vs {args.diff.name} ===")

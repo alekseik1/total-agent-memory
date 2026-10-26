@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import quote
 from uuid import UUID
 
+from stdio_utf8 import use_utf8_stdio
 from tam_db.contracts import (
     CONTROL_SCHEMA,
     EXTENSIONS_SCHEMA,
@@ -381,7 +382,7 @@ class PgDatabaseChecker:
         with tempfile.TemporaryDirectory(prefix="tam-db-check-") as home:
             try:
                 result = subprocess.run([sys.executable, "-m", "team_memory.db_check"], input=request,
-                                        capture_output=True, text=True, env=sanitized_environment(Path(home)),
+                                        capture_output=True, text=True, encoding="utf-8", errors="replace", env=sanitized_environment(Path(home)),
                                         timeout=self.timeout_seconds * ISOLATED_TIMEOUT_FACTOR + ISOLATED_STARTUP_SECONDS,
                                         check=False)
             except subprocess.TimeoutExpired:
@@ -447,6 +448,7 @@ class PgDatabaseChecker:
 
 def _isolated_main() -> None:
     """Child side of an isolated check: request JSON on stdin, CheckReport JSON on stdout."""
+    use_utf8_stdio()
     request = json.loads(sys.stdin.read())
     dsn = DatabaseDsn.parse(request["dsn"], DsnOrigin.WEB)
     instance_id = UUID(request["instance_id"]) if request["instance_id"] else None

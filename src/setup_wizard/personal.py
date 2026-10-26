@@ -19,6 +19,7 @@ from setup_wizard.steps import Action, Context, Plan, Step
 PERSONAL = frozenset(("personal",))
 VERIFY_TIMEOUT_SECONDS = 90
 STOP_TIMEOUT_SECONDS = 10
+GRACEFUL_EXIT_SECONDS = 15
 STDERR_TAIL_CHARS = 1500
 LEGACY_PROTOCOL = "2025-06-18"
 
@@ -304,15 +305,36 @@ def _list_tools(process: subprocess.Popen, frames: list[dict], deadline: float) 
 
 
 def _stop(process: subprocess.Popen) -> None:
+    """End the verification server and everything it started.
+
+    A stdio server leaves on end of input, so closing stdin comes first and
+    lets it flush and close its files. Only a server that stays is stopped by
+    force; on Windows that means its whole process tree, because the venv
+    launcher is a separate process that runs the real interpreter as a child
+    and terminating the launcher alone leaves the child holding the files of
+    the throwaway directory.
+    """
     if process.stdin and not process.stdin.closed:
         process.stdin.close()
-    if process.poll() is None:
+    try:
+        process.wait(timeout=GRACEFUL_EXIT_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    _terminate_tree(process)
+    try:
+        process.wait(timeout=STOP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=STOP_TIMEOUT_SECONDS)
+
+
+def _terminate_tree(process: subprocess.Popen) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, timeout=STOP_TIMEOUT_SECONDS,
+                       check=False)
+    else:
         process.terminate()
-        try:
-            process.wait(timeout=STOP_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=STOP_TIMEOUT_SECONDS)
 
 
 STEPS = [

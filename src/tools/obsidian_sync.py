@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -18,12 +19,20 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-MEMORY_DIR = os.environ.get("CLAUDE_MEMORY_DIR", os.path.expanduser("~/.claude-memory"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from background_writes import save_background_knowledge  # noqa: E402
+from paths import memory_dir  # noqa: E402
+
+MEMORY_DIR = str(memory_dir())
 DB_PATH = os.path.join(MEMORY_DIR, "memory.db")
 SYNC_STATE_PATH = os.path.join(MEMORY_DIR, "obsidian_sync_state.json")
 
 # Knowledge types in display order
 TYPE_ORDER: list[str] = ["decision", "solution", "convention", "fact", "lesson", "reflection"]
+# Types a vault note may declare; anything else is stored as a plain fact.
+IMPORTABLE_TYPES = frozenset(TYPE_ORDER)
+DEFAULT_IMPORT_TYPE = "fact"
 
 # Frontmatter regex: content between --- delimiters at file start
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
@@ -33,7 +42,7 @@ def load_sync_state() -> dict:
     """Load sync state from JSON file."""
     if os.path.exists(SYNC_STATE_PATH):
         try:
-            with open(SYNC_STATE_PATH, "r") as f:
+            with open(SYNC_STATE_PATH, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             pass
@@ -43,7 +52,7 @@ def load_sync_state() -> dict:
 def save_sync_state(state: dict) -> None:
     """Persist sync state to JSON file."""
     os.makedirs(os.path.dirname(SYNC_STATE_PATH), exist_ok=True)
-    with open(SYNC_STATE_PATH, "w") as f:
+    with open(SYNC_STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
 
 
@@ -155,8 +164,12 @@ def export_memory_to_obsidian(
     memory_dir = vault_path / "Memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
 
+    export_root = memory_dir.resolve()
     for project, types_dict in grouped.items():
         proj_dir = memory_dir / _safe_filename(project)
+        if not proj_dir.resolve().is_relative_to(export_root):
+            print(f"  Skipped project {project!r}: export path escapes the Memory/ directory", file=sys.stderr)
+            continue
         proj_dir.mkdir(parents=True, exist_ok=True)
 
         for rtype in TYPE_ORDER:
@@ -245,8 +258,13 @@ def import_obsidian_to_memory(
             continue
 
         # Extract metadata
-        record_type = meta.get("type", "fact")
+        record_type = meta.get("type", DEFAULT_IMPORT_TYPE)
+        if not isinstance(record_type, str) or record_type not in IMPORTABLE_TYPES:
+            print(f"  Unknown type {record_type!r} in {rel_path}; storing as {DEFAULT_IMPORT_TYPE}", file=sys.stderr)
+            record_type = DEFAULT_IMPORT_TYPE
         record_project = meta.get("project", "general")
+        if not isinstance(record_project, str) or not record_project.strip():
+            record_project = "general"
         raw_tags = meta.get("tags", [])
         if isinstance(raw_tags, str):
             raw_tags = [t.strip() for t in raw_tags.split(",")]
@@ -283,22 +301,15 @@ def import_obsidian_to_memory(
         if duplicate_found:
             continue
 
-        # Insert new record
-        cursor.execute("""
-            INSERT INTO knowledge
-                (session_id, type, content, context, project, tags, status,
-                 confidence, source, created_at, last_confirmed)
-            VALUES (?, ?, ?, ?, ?, ?, 'active', 0.8, 'obsidian', ?, ?)
-        """, (
-            session_id,
-            record_type,
-            content,
-            f"Imported from Obsidian: {rel_path}",
-            record_project,
-            json.dumps(tags),
-            timestamp,
-            timestamp,
-        ))
+        # Insert new record (redaction, private-block stripping, embedding queue in the shared helper)
+        saved = save_background_knowledge(
+            conn, content=content, ktype=record_type, project=record_project,
+            session_id=session_id, tags=tags, context=f"Imported from Obsidian: {rel_path}",
+            source="obsidian", confidence=0.8, created_at=timestamp,
+            extra={"last_confirmed": timestamp},
+        )
+        if saved is None:
+            continue
 
         imported += 1
         new_imported.append(rel_path)
@@ -331,7 +342,12 @@ def _parse_tags(tags_str: str) -> list[str]:
 
 def _safe_filename(name: str) -> str:
     """Convert a string to a safe directory/file name."""
-    return re.sub(r"[^\w\-.]", "_", name).strip("_") or "general"
+    # Dots are kept inside a name but never at its edges: ".." must not become a path component.
+    safe = re.sub(r"[^\w\-.]", "_", name).strip("_.")
+    if safe:
+        return safe
+    # Empty or dot-only names get a stable distinct directory instead of colliding with "general".
+    return f"project-{hashlib.sha1(name.encode('utf-8')).hexdigest()[:8]}" if name else "general"
 
 
 def main() -> None:

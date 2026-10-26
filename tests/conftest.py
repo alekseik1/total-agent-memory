@@ -121,6 +121,32 @@ def _disable_async_enrichment_in_tests(monkeypatch):
     yield
 
 
+WINERROR_PRIVILEGE_NOT_HELD = 1314
+
+
+@pytest.fixture
+def make_symlink():
+    """Create a symlink, or skip the test when the OS refuses to.
+
+    A regular Windows user without Developer Mode cannot create symlinks
+    (``WinError 1314``), so a test that needs one has nothing to check there.
+    Any other failure is a real error and propagates.
+    """
+
+    def create(link: Path, target: Path, *, target_is_directory: bool = False) -> Path:
+        try:
+            os.symlink(target, link, target_is_directory=target_is_directory)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == WINERROR_PRIVILEGE_NOT_HELD:
+                pytest.skip("creating symlinks needs Developer Mode or an elevated Windows token")
+            raise
+        except NotImplementedError:
+            pytest.skip("this platform cannot create symlinks")
+        return link
+
+    return create
+
+
 @pytest.fixture
 def llm_enabled(monkeypatch):
     """Declare that a test exercises an LLM-backed code path.
@@ -152,14 +178,14 @@ def db():
 
     # Apply v5 migration
     migration = Path(__file__).parent.parent / "migrations" / "001_v5_schema.sql"
-    conn.executescript(migration.read_text())
+    conn.executescript(migration.read_text(encoding="utf-8"))
 
     # Migration 026 — case-insensitive name normalization for graph_nodes.
     # Tests that touch graph_store rely on name_norm being present so
     # add_node can do its UPSERT lookup.
     m026 = Path(__file__).parent.parent / "migrations" / "026_graph_nodes_dedup.sql"
     if m026.exists():
-        conn.executescript(m026.read_text())
+        conn.executescript(m026.read_text(encoding="utf-8"))
 
     # Add base tables (from main server, not in v5 migration)
     conn.executescript("""

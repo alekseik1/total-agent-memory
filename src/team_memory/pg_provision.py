@@ -56,6 +56,8 @@ CONTROL_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("0002_learning.sql", LEARNING_SCHEMA),
     ("0003_workspaces.sql", CONTROL_SCHEMA),
     ("0004_workspace_fingerprint.sql", CONTROL_SCHEMA),
+    ("0005_token_expiry.sql", CONTROL_SCHEMA),
+    ("0006_known_devices.sql", CONTROL_SCHEMA),
 )
 LEDGER_TABLE = "control_migrations"
 META_INSTANCE_KEY = "instance_id"

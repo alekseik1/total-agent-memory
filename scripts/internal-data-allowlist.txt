@@ -1,0 +1,43 @@
+# Accepted findings of scripts/check-no-internal-data.sh.
+# Format, one entry per line:  <path glob> :: <ERE the matched text must match completely> :: <one-line reason>
+# A line without a reason fails the check. The path glob uses shell `case` rules (* also matches /).
+
+# --- this file quotes what it accepts ---------------------------------------------------------------
+scripts/internal-data-allowlist.txt :: .* :: the allow-list necessarily quotes the fixtures and artifacts it accepts
+
+# --- recorded benchmark and evaluation artifacts (provenance of past runs) --------------------------
+
+
+# --- documented private ranges (the code and docs that classify addresses) ---------------------------
+src/team_memory/dashboard.py :: (10\.0\.0\.0|172\.16\.0\.0|192\.168\.0\.0) :: network blocks of the private-address filter, not hosts
+docs/TEAM_DASHBOARD.md :: (10\.0\.0\.0|172\.16\.0\.0|192\.168\.0\.0) :: documents the private-address blocks the dashboard recognises
+
+# --- test fixtures: addresses only used to exercise bind-address and Host-header handling --------------
+tests/test_team_*.py :: 10\.0\.0\.[0-9]+ :: fixture addresses in the 10/8 block for IP-binding and gateway tests, not real hosts
+tests/test_dashboard_origin_guard.py :: (10\.0\.0\.7|192\.168\.1\.5) :: fixture LAN address for the Host/Origin allow-list test
+tests/test_mcp_http_rebinding.py :: (10\.0\.0\.7|192\.168\.1\.5) :: fixture LAN address for the DNS-rebinding allow-list test
+tests/test_http_access_token.py :: 192\.168\.1\.5 :: fixture LAN address for the loopback-detection test
+tests/test_database_config.py :: 10\.0\.0\.1 :: fixture database host for the config parsing test
+tests/test_database_contracts.py :: 10\.0\.0\.5 :: fixture database host in a DSN redaction test
+
+# --- test fixtures: well-known fake credentials used to prove redaction ---------------------------
+tests/* :: sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 :: fake Anthropic-shaped key used by the redaction tests
+tests/test_secret_redaction.py :: (AKIAIOSFODNN7EXAMPLE|sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789|-----BEGIN OPENSSH PRIVATE KEY-----) :: AWS documentation example key and fake key bodies for the redaction tests
+tests/test_team_replication.py :: AKIAIOSFODNN7EXAMPLE :: AWS documentation example key used by the replication redaction test
+tests/test_team_dashboard.py :: sk-test-plaintext-should-never-leak-[0-9A-Z]+ :: fake key proving the dashboard never echoes secrets
+tests/test_team_gateway_llm.py :: sk-web-dashboard-only-secret-[0-9A-Z]+ :: fake key proving the gateway keeps dashboard secrets out of responses
+tests/test_ast_ingest.py :: -----BEGIN PRIVATE KEY----- :: PEM header inside a source snippet fed to the AST ingester
+
+# --- identifiers that look like host names but are attribute accesses ------------------------------
+src/dashboard_static/vendor/* :: [a-z]\.local :: minified d3 property access (t.local), not a host
+src/tam_daemon/proxy.py :: self\.local :: attribute access on the proxy connection object
+tests/smoke/installed_runtime.py :: (self|scenario)\.local :: attribute access in the smoke harness
+src/dashboard_settings.py :: spec\.local :: attribute of a provider spec
+src/team_memory/overview.py :: spec\.local :: attribute of a provider spec
+src/team_memory/static/settings.js :: provider\.local :: attribute of a provider object
+src/*.py :: threading\.local :: Python thread-local storage, not a host
+scripts/*.py :: threading\.local :: Python thread-local storage, not a host
+docs/benchmarks/longmemeval-v2/tam_memory.py :: threading\.local :: Python thread-local storage, not a host
+
+# --- the check's own tests: sample inputs for each detection class -------------------------------------
+tests/test_check_no_internal_data.py :: (10\.[0-9.]+|172\.20\.0\.9|build-box\.local|threading\.local|-----BEGIN RSA PRIVATE KEY-----) :: sample inputs that prove each detection class fires

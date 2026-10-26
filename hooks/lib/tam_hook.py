@@ -26,6 +26,8 @@ Commands (all read the hook payload JSON from stdin unless noted):
   prompt-context             UserPromptSubmit: applicable rules + background recall
   rule-reminder              PreToolUse: rules matching the command / edit
   codex-notify               Codex notify payload -> action log + turn summary
+  inject-provenance          PreToolUse(mcp__memory__*): tool input + ``_ctx`` (agent, session, workspace)
+                             as hookSpecificOutput.updatedInput; the server strips and records it
 
 The ambient commands (and ``stop --src``) run ``src/ambient/hooks.py``: in-process,
 or with TAM_DOCKER=1 inside the TAM container (``docker exec -i ... python -m
@@ -55,6 +57,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+PRIVATE_FILE_MODE = 0o600
 FIELD_PREFIX = "HOOK_F_"
 FIELD_MAX_CHARS = 16_384
 FIELD_MAX_DEPTH = 3
@@ -83,6 +86,10 @@ RECOVERY_DISPLAY_MAX_CHARS = 3_000
 RECOVERY_HEADER_PREFIX = "<!-- tam-recovery "
 RECOVERY_HEADER_SUFFIX = " -->"
 STOP_SNAPSHOT_MIN_INTERVAL_SEC = 300
+# A Stop snapshot refreshed this recently belongs to a session that is still running.
+ACTIVE_SNAPSHOT_WINDOW_SEC = 2 * STOP_SNAPSHOT_MIN_INTERVAL_SEC
+RECOVERY_KIND_STOP = "stop"
+RECOVERY_KIND_END = "end"
 GIT_TIMEOUT_SEC = 3
 GIT_STATUS_MAX_LINES = 20
 GIT_LOG_ENTRIES = 5
@@ -90,7 +97,7 @@ GIT_LOG_ENTRIES = 5
 SQLITE_TIMEOUT_SEC = 2.0
 NUDGE_STATE_MAX_AGE_DAYS = 7
 # nudge counters and src/ambient/state.py files share the retention.
-SESSION_STATE_GLOBS = ("nudge-*.json", "ambient-*.json")
+SESSION_STATE_GLOBS = ("nudge-*.json", "ambient-*.json", "ambient-unavailable-*", "ambient-tooluse-*.claim")
 NUDGE_DEFAULT_SOFT = 3
 NUDGE_DEFAULT_HARD = 7
 NUDGE_DEFAULT_STEP = 3
@@ -125,6 +132,18 @@ DOCKER_DEFAULT_CONTAINER = "claude-memory-mcp"
 DOCKER_PS_TIMEOUT_SEC = 3
 
 JsonDict = dict[str, Any]
+
+# Used only when src/secret_redaction.py cannot be imported (no checkout next to the hook,
+# e.g. Docker installs): the shapes that most often end up on a command line.
+REDACTED_MARK = "[REDACTED]"
+FALLBACK_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?i)\b([A-Za-z0-9_-]*(?:authorization|token|password|passwd|secret|api[_-]?key)[A-Za-z0-9_-]*)"
+                r"(\s*[:=]\s*)(?:(?:basic|bearer)\s+)?[^\s'\"&;]+"), r"\1\2" + REDACTED_MARK),
+    (re.compile(r"(?i)\b(bearer|basic)(\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1\2" + REDACTED_MARK),
+    (re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-[A-Za-z0-9-]{10,}"
+                r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,})"), REDACTED_MARK),
+    (re.compile(r"(?i)(://[^/\s:@]+:)[^@\s/]+(@)"), r"\1" + REDACTED_MARK + r"\2"),
+)
 
 
 # ──────────────────────────────────────────────
@@ -178,7 +197,10 @@ def read_payload() -> JsonDict:
 def atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(text, encoding="utf-8")
+    # State and recovery files hold session text: owner-only from the first byte.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PRIVATE_FILE_MODE)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
     os.replace(tmp, path)
 
 
@@ -370,21 +392,43 @@ def docker_container() -> str:
             or DOCKER_DEFAULT_CONTAINER)
 
 
-def run_script(src_dir: Path, script: str, args: Sequence[str]) -> bool:
-    """Start ``src/<script>`` detached, output appended to hooks.log. Returns False if it cannot start."""
+def redact_text(text: str, src_dir: Path) -> str:
+    """Credential-free copy of ``text``: the shared redactor from src/, or the built-in fallback patterns."""
+    if not text:
+        return text
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+    try:
+        from secret_redaction import redact_secrets
+    except ImportError as exc:
+        log(f"secret_redaction unavailable from {src_dir}, using fallback patterns only: {exc}")
+        cleaned = text
+    else:
+        cleaned = redact_secrets(text)[0]
+    # The built-in patterns also run after the shared redactor: they cover KEY=value shapes it may miss.
+    for pattern, replacement in FALLBACK_SECRET_PATTERNS:
+        cleaned = pattern.sub(replacement, cleaned)
+    return cleaned
+
+
+def run_script(src_dir: Path, script: str, args: Sequence[str], stdin_text: str | None = None) -> bool:
+    """Start ``src/<script>`` detached, output appended to hooks.log. Returns False if it cannot start.
+
+    ``stdin_text`` carries payloads that must not appear in argv (visible to every local user in ``ps``).
+    """
     log_file = os.environ.get("TAM_HOOK_LOG_FILE")
     if docker_mode():
         container = docker_container()
         try:
             names = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True,
-                                   text=True, timeout=DOCKER_PS_TIMEOUT_SEC, check=False).stdout.split()
+                                   text=True, encoding="utf-8", errors="replace", timeout=DOCKER_PS_TIMEOUT_SEC, check=False).stdout.split()
         except (OSError, subprocess.TimeoutExpired) as exc:
             log(f"docker unavailable, skipped {script}: {exc}")
             return False
         if container not in names:
             log(f"container {container} is not running, skipped {script}")
             return False
-        command = ["docker", "exec", container, "python", f"src/{script}", *args]
+        command = ["docker", "exec", "-i", container, "python", f"src/{script}", *args]
     else:
         path = src_dir / script
         if not path.is_file():
@@ -399,10 +443,18 @@ def run_script(src_dir: Path, script: str, args: Sequence[str]) -> bool:
             except OSError as exc:
                 log(f"cannot open {log_file}, {script} output discarded: {exc}")
         try:
-            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=sink, stderr=sink, **_detached_kwargs())
+            child = subprocess.Popen(command, stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
+                                     stdout=sink, stderr=sink, **_detached_kwargs())
         except OSError as exc:
             log(f"cannot start {script}: {exc}")
             return False
+        if stdin_text is not None and child.stdin is not None:
+            try:
+                child.stdin.write(stdin_text.encode("utf-8"))
+                child.stdin.close()
+            except OSError as exc:
+                log(f"cannot pass stdin to {script}: {exc}")
+                return False
     return True
 
 
@@ -611,22 +663,24 @@ def memory_trigger(payload: JsonDict, state_dir: Path, src_dir: Path, project: s
 
     if is_failure(code):
         category, severity = categorize(stderr)
-        err_short = truncate("\n".join(stderr.splitlines()[:ERROR_MSG_MAX_LINES]), ERROR_MSG_MAX_CHARS)
-        cmd_short = command[:ERROR_CMD_MAX_CHARS]
+        err_short = truncate("\n".join(redact_text(stderr, src_dir).splitlines()[:ERROR_MSG_MAX_LINES]),
+                             ERROR_MSG_MAX_CHARS)
+        cmd_short = redact_text(command, src_dir)[:ERROR_CMD_MAX_CHARS]
         description = f"Command failed: {cmd_short}. Error: {err_short}"
         messages.append(
             f"SELF_LEARNING_ERROR: Bash command failed (exit={code}). You MUST call self_error_log NOW:\n"
             f"  self_error_log(\n    description={description!r},\n    category='{category}',\n"
             f"    severity='{severity}',\n    context='project: {project}',\n    project='{project}'\n  )")
-        runner(src_dir, "auto_self_improve.py", ["error", "--description", description, "--category",
-                                                 category, "--severity", severity, "--project", project])
+        runner(src_dir, "auto_self_improve.py",
+               ["error", "--description-stdin", "--category", category, "--severity", severity,
+                "--project", project], stdin_text=description)
         atomic_write(error_file, json.dumps({"cmd": cmd_short, "msg": err_short, "category": category,
                                              "time": int(time.time())}))
         counts = state_dir / "error-counts"
         counts.mkdir(parents=True, exist_ok=True)
         count_file = counts / safe_name(f"{category}-{project}")
         try:
-            count = int(count_file.read_text().strip() or 0) + 1
+            count = int(count_file.read_text(encoding="utf-8").strip() or 0) + 1
         except FileNotFoundError:
             count = 1
         except (OSError, ValueError) as exc:
@@ -639,14 +693,15 @@ def memory_trigger(payload: JsonDict, state_dir: Path, src_dir: Path, project: s
                 f"project='{project}')")
             count = 0
             runner(src_dir, "auto_self_improve.py", ["check-patterns", "--project", project])
-        count_file.write_text(str(count))
+        count_file.write_text(str(count), encoding="utf-8")
         return messages
 
     previous = load_json_file(error_file)
     if previous is not None:
         if time.time() - int(previous.get("time", 0)) < ERROR_FIX_WINDOW_SEC:
-            prev_cmd = str(previous.get("cmd", ""))
-            prev_msg = str(previous.get("msg", ""))
+            # State files written before redaction existed may still hold a credential.
+            prev_cmd = redact_text(str(previous.get("cmd", "")), src_dir)
+            prev_msg = redact_text(str(previous.get("msg", "")), src_dir)
             same_base = command.split()[:1] == prev_cmd.split()[:1]
             if same_base or FIX_CONFIRM_CMD.search(command):
                 messages.append(
@@ -656,9 +711,10 @@ def memory_trigger(payload: JsonDict, state_dir: Path, src_dir: Path, project: s
                     f"  memory_save(type='solution', content='PROBLEM: {prev_msg}\\nFIX: <describe what "
                     f"fixed it>\\nPROJECT: {project}', project='{project}', tags=['reusable', 'bugfix'])")
                 runner(src_dir, "auto_self_improve.py",
-                       ["fix", "--description", f"Fixed: {prev_cmd}", "--category",
+                       ["fix", "--description-stdin", "--category",
                         str(previous.get("category") or "code_error"), "--fix",
-                        "Command succeeded after previous failure", "--project", project])
+                        "Command succeeded after previous failure", "--project", project],
+                       stdin_text=f"Fixed: {prev_cmd}")
                 unlink(error_file, "error resolved")
         else:
             unlink(error_file, "error expired")
@@ -707,7 +763,7 @@ def recovery_meta(path: Path) -> JsonDict | None:
 
 def _git(cwd: str, *args: str) -> str:
     try:
-        result = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True,
+        result = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
                                 timeout=GIT_TIMEOUT_SEC, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         log(f"git {' '.join(args)} failed in {cwd}: {exc}")
@@ -733,6 +789,7 @@ def write_recovery(recovery_dir: Path, session: str, project: str, cwd: str, rea
     branch, status, recent = git_state(cwd)
     now = datetime.now(timezone.utc)  # noqa: UP017 — must also run on a python3.9 fallback interpreter
     meta = {"session_id": session, "project": project, "cwd": cwd,
+            "kind": RECOVERY_KIND_STOP if min_interval_sec > 0 else RECOVERY_KIND_END,
             "written_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
     lines = [
         RECOVERY_HEADER_PREFIX + json.dumps(meta, ensure_ascii=False) + RECOVERY_HEADER_SUFFIX,
@@ -782,6 +839,9 @@ def pick_recovery(recovery_dir: Path, cwd: str, session: str) -> tuple[JsonDict,
             unlink(path, "legacy recovery snapshot without metadata")
             continue
         if meta.get("session_id") == session or os.path.normpath(str(meta.get("cwd") or "")) != os.path.normpath(cwd):
+            continue
+        if meta.get("kind") == RECOVERY_KIND_STOP and time.time() - _mtime(path) < ACTIVE_SNAPSHOT_WINDOW_SEC:
+            # A parallel session in this directory is still running; leave its snapshot for a crash.
             continue
         if chosen is None:
             chosen = (path, meta)
@@ -954,7 +1014,9 @@ def transcript_messages(transcript: Path, src_dir: Path) -> tuple[str, str]:
     assistants = [m["text"] for m in messages if m.get("role") == "assistant"]
     user = "\n".join(u[:TRANSCRIPT_USER_MSG_CHARS] for u in users[-TRANSCRIPT_USER_MSGS:])
     assistant = "\n".join(assistants[-TRANSCRIPT_ASSISTANT_MSGS:])[:TRANSCRIPT_ASSISTANT_CHARS]
-    return user, assistant
+    # Redacted after truncation could leave half a key; redact the joined text, then bound it again.
+    return (redact_text(user, src_dir)[:TRANSCRIPT_USER_MSGS * TRANSCRIPT_USER_MSG_CHARS],
+            redact_text(assistant, src_dir)[:TRANSCRIPT_ASSISTANT_CHARS])
 
 
 def _line_count(path: Path) -> int:
@@ -966,13 +1028,19 @@ def _line_count(path: Path) -> int:
         return 0
 
 
-def find_transcript(transcript_path: str, cwd: str) -> Path | None:
+def find_transcript(transcript_path: str, cwd: str, session: str = "") -> Path | None:
     if transcript_path and Path(transcript_path).is_file():
         return Path(transcript_path)
     if not cwd:
         return None
     escaped = re.sub(r"[^A-Za-z0-9]", "-", cwd)
-    candidates = sorted((Path.home() / ".claude" / "projects" / escaped).glob("*.jsonl"), key=_mtime, reverse=True)
+    project_dir = Path.home() / ".claude" / "projects" / escaped
+    if session:
+        # The session's own transcript; the newest file may belong to a concurrent session.
+        own = project_dir / f"{safe_name(session)}.jsonl"
+        if own.is_file():
+            return own
+    candidates = sorted(project_dir.glob("*.jsonl"), key=_mtime, reverse=True)
     return candidates[0] if candidates else None
 
 
@@ -982,7 +1050,7 @@ def session_end(payload: JsonDict, src_dir: Path, recovery_dir: Path, project: s
     cwd = str(payload.get("cwd") or os.getcwd())
     session = session_of(payload)
     actions: list[str] = []
-    transcript = find_transcript(str(payload.get("transcript_path") or ""), cwd)
+    transcript = find_transcript(str(payload.get("transcript_path") or ""), cwd, session)
     user = assistant = ""
     events = 0
     if transcript is not None:
@@ -992,8 +1060,8 @@ def session_end(payload: JsonDict, src_dir: Path, recovery_dir: Path, project: s
         path = write_recovery(recovery_dir, session, project, cwd, reason_text, user, assistant, events)
         actions.append(f"recovery saved to {path}")
     if user and runner(src_dir, "auto_session_save.py",
-                       ["--project", project, "--cwd", cwd, "--reason", reason_text, "--user-context", user,
-                        "--assistant-context", assistant[:AUTOSAVE_ASSISTANT_CHARS]]):
+                       ["--project", project, "--cwd", cwd, "--reason", reason_text, "--context-stdin"],
+                       stdin_text=json.dumps({"user": user, "assistant": assistant[:AUTOSAVE_ASSISTANT_CHARS]})):
         actions.append("auto_session_save started")
     if transcript is not None and runner(src_dir, "auto_episode_capture.py",
                                          ["--session-id", transcript.stem, "--project", project,
@@ -1067,9 +1135,9 @@ def capture_observation_from(payload: JsonDict, src_dir: Path, memory_dir: Path)
 # ──────────────────────────────────────────────
 
 # Docker installs: where the image keeps src/, and how long one command may take
-# (inside every client hook timeout of 5 s).
+# (inside every client hook timeout of 5 s: the field parse and the nudge spawn use the rest).
 DOCKER_SRC_DIR = "/app/src"
-DOCKER_AMBIENT_TIMEOUT_SEC = 4.5
+DOCKER_AMBIENT_TIMEOUT_SEC = 3.0
 # Ambient settings forwarded into the container (src/ambient/settings.py SETTING_KEYS).
 AMBIENT_ENV_KEYS = ("TAM_ACTION_LOG", "TAM_ACTION_LOG_RETENTION_DAYS", "TAM_AMBIENT_RECALL",
                     "TAM_AMBIENT_TOKEN_BUDGET", "TAM_AMBIENT_LATENCY_MS", "TAM_RULE_REMINDERS",
@@ -1138,6 +1206,7 @@ def ambient_call(command: str, call: JsonDict, memory_dir: Path, src_dir: Path) 
     if docker_mode():
         return docker_ambient_call(command, call)
     if not load_ambient(src_dir):
+        mark_ambient_unavailable(memory_dir, str(call.get("session_id") or "unknown"))
         return ""
 
     def job() -> str:
@@ -1148,6 +1217,37 @@ def ambient_call(command: str, call: JsonDict, memory_dir: Path, src_dir: Path) 
     return str(run_ambient(command, job, "") or "")
 
 
+AMBIENT_UNAVAILABLE_NOTICE = (
+    "TAM ambient memory is off for this session: the hook interpreter cannot import TAM's packages "
+    "(action log, rule reminders and prompt recall are disabled). Install into the TAM venv "
+    "(~/.tam/.venv or <checkout>/.venv) or set HOOK_PYTHON; details are in hooks.log.")
+
+
+def _ambient_flag(memory_dir: Path, session: str, suffix: str) -> Path:
+    return memory_dir / "state" / f"ambient-unavailable-{safe_name(session)}.{suffix}"
+
+
+def mark_ambient_unavailable(memory_dir: Path, session: str) -> None:
+    """Remember that ambient memory could not run, so the Stop hook can tell the user once."""
+    flag = _ambient_flag(memory_dir, session, "flag")
+    if flag.exists() or _ambient_flag(memory_dir, session, "shown").exists():
+        return
+    atomic_write(flag, "")
+
+
+def ambient_unavailable_notice(memory_dir: Path, session: str) -> str:
+    """The user-facing notice the first time it is asked for after a failure, '' afterwards."""
+    flag = _ambient_flag(memory_dir, session, "flag")
+    if not flag.exists():
+        return ""
+    try:
+        os.replace(flag, _ambient_flag(memory_dir, session, "shown"))
+    except OSError as exc:
+        log(f"cannot update {flag}: {exc}")
+        return ""
+    return AMBIENT_UNAVAILABLE_NOTICE
+
+
 def docker_ambient_call(command: str, call: JsonDict) -> str:
     """The same command inside the TAM container, whose volume holds the store (Docker installs)."""
     forwarded = [arg for key in AMBIENT_ENV_KEYS if os.environ.get(key)
@@ -1155,7 +1255,7 @@ def docker_ambient_call(command: str, call: JsonDict) -> str:
     command_line = ["docker", "exec", "-i", "-w", DOCKER_SRC_DIR, *forwarded, docker_container(),
                     "python", "-m", "ambient", command]
     try:
-        result = subprocess.run(command_line, input=json.dumps(call), capture_output=True, text=True,
+        result = subprocess.run(command_line, input=json.dumps(call), capture_output=True, text=True, encoding="utf-8", errors="replace",
                                 timeout=DOCKER_AMBIENT_TIMEOUT_SEC, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         log(f"{command} in container {docker_container()} did not run: {exc}")
@@ -1221,7 +1321,29 @@ def cmd_memory_trigger(args: argparse.Namespace) -> int:
     return print_context(event_for(payload, args.emit), messages)
 
 
+def check_runtime_version(environ: Any = None) -> bool:
+    """Log (structured, hooks.log/stderr only) when these hook copies were installed from another release
+    than the checkout they run against. True when they match or no stamp/version is available."""
+    env = os.environ if environ is None else environ
+    stamped = env.get("TAM_HOOKS_VERSION", "")
+    install = env.get("CLAUDE_MEMORY_INSTALL_DIR", "")
+    if not stamped or not install:
+        return True
+    try:
+        match = re.search(r'^VERSION\s*=\s*"([^"]+)"', (Path(install) / "src" / "version.py").read_text(
+            encoding="utf-8"), re.MULTILINE)
+    except OSError:
+        return True
+    current = match.group(1) if match else ""
+    if not current or current == stamped:
+        return True
+    log(json.dumps({"event": "hook_runtime_version_mismatch", "installed": stamped, "checkout": current,
+                    "fix": "run update.sh or `python -m setup_wizard.refresh_hooks`"}))
+    return False
+
+
 def cmd_session_start_context(args: argparse.Namespace) -> int:
+    check_runtime_version()
     text = session_start_context(Path(args.db), args.project, args.cwd, args.session, args.source,
                                  Path(args.recovery_dir))
     if text:
@@ -1245,6 +1367,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     notices = [notice or ""]
     if args.src:
         notices.append(ambient_call("turn-end", hook_call(payload, project), memory_dir, Path(args.src)))
+        notices.append(ambient_unavailable_notice(memory_dir, session))
     rendered = system_message_json("\n".join(n for n in notices if n))
     if rendered:
         print(rendered)
@@ -1297,6 +1420,102 @@ def cmd_rule_reminder(args: argparse.Namespace) -> int:
     text = ambient_call("rule-reminder", hook_call(payload, project_of(payload)), Path(args.memory_dir),
                         Path(args.src))
     return print_context(event_for(payload, args.emit), [text])
+
+
+# ──────────────────────────────────────────────
+# Provenance (who wrote a memory): `_ctx` for the server, see src/provenance.py
+# ──────────────────────────────────────────────
+
+PROVENANCE_TOOL = re.compile(r"^mcp__(?:plugin_total-agent-memory_)?memory__")
+PROVENANCE_AGENT = "claude-code"
+PROVENANCE_CTX_KEY = "_ctx"
+PROVENANCE_MARKER = "tam-provenance.json"
+PROVENANCE_FINGERPRINT_KEYS = ("command", "args", "url")
+# Server names Claude Code derives for MCP servers shipped by the TAM plugin itself.
+PROVENANCE_PLUGIN_SERVER = re.compile(r"^plugin_total-agent-memory_memory$")
+
+
+def workspace_of(cwd: str) -> tuple[str, str]:
+    """(repo name, path of cwd relative to the repository root); never an absolute path."""
+    if not cwd:
+        return "", ""
+    root = _git(cwd, "rev-parse", "--show-toplevel") if os.path.isdir(cwd) else ""
+    if not root:
+        return os.path.basename(os.path.normpath(cwd)), ""
+    relative = os.path.relpath(os.path.realpath(cwd), os.path.realpath(root))
+    return os.path.basename(root), "" if relative == "." else relative.replace(os.sep, "/")
+
+
+def _json_file(path: Path) -> JsonDict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _fingerprint(entry: object) -> JsonDict:
+    if not isinstance(entry, dict):
+        return {}
+    return {key: entry[key] for key in PROVENANCE_FINGERPRINT_KEYS if entry.get(key)}
+
+
+def effective_server(name: str, cwd: str, home: Path) -> JsonDict | None:
+    """The registration Claude Code uses for ``name`` at ``cwd``. Precedence follows the documented MCP scope order
+    (code.claude.com/docs/en/mcp, "Scope hierarchy and precedence"): local scope, project .mcp.json, user scope.
+    Local scope belongs to one project path only, so only the working directory and its repository root are
+    looked up there, never their parents."""
+    user_config = _json_file(home / ".claude.json")
+    directories = [Path(cwd), *Path(cwd).parents] if cwd else []
+    projects = user_config.get("projects")
+    # ~/.claude.json keys projects by path, with forward slashes on Windows.
+    by_path = {os.path.normcase(os.path.normpath(str(key))): value for key, value in projects.items()} \
+        if isinstance(projects, dict) else {}
+    project_roots = [cwd, _git(cwd, "rev-parse", "--show-toplevel") if os.path.isdir(cwd) else ""] if cwd else []
+    scopes: list[Any] = [by_path[key].get("mcpServers") for key in (os.path.normcase(os.path.normpath(root))
+                                                                      for root in project_roots if root)
+                         if isinstance(by_path.get(key), dict)]
+    scopes += [_json_file(d / ".mcp.json").get("mcpServers") for d in directories]
+    scopes.append(user_config.get("mcpServers"))
+    for servers in scopes:
+        if isinstance(servers, dict) and isinstance(servers.get(name), dict):
+            return servers[name]
+    return None
+
+
+def is_tam_server(tool_name: str, cwd: str, home: Path) -> bool:
+    """True when the tool belongs to the TAM server: our plugin's, or the "memory" server the installer registered."""
+    match = PROVENANCE_TOOL.match(tool_name)
+    if not match:
+        return False
+    server = match.group(0)[len("mcp__"):-len("__")]
+    if PROVENANCE_PLUGIN_SERVER.match(server):
+        return True
+    recorded = _json_file(home / ".claude" / PROVENANCE_MARKER).get("servers")
+    expected = _fingerprint(recorded.get(server)) if isinstance(recorded, dict) else {}
+    return bool(expected) and _fingerprint(effective_server(server, cwd, home)) == expected
+
+
+def provenance_input(payload: JsonDict, home: Path | None = None) -> JsonDict | None:
+    """The tool input plus ``_ctx`` for a TAM tool call; None for any other call or one that already has it."""
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict) or PROVENANCE_CTX_KEY in tool_input \
+            or not is_tam_server(str(payload.get("tool_name") or ""), str(payload.get("cwd") or ""),
+                                 home or Path.home()):
+        return None
+    repo, workspace = workspace_of(str(payload.get("cwd") or ""))
+    ctx = {"agent": PROVENANCE_AGENT, "session_id": session_of(payload), "workspace": workspace, "repo": repo,
+           "tool_use_id": str(payload.get("tool_use_id") or "")}
+    return {**tool_input, PROVENANCE_CTX_KEY: ctx}
+
+
+def cmd_inject_provenance(_args: argparse.Namespace) -> int:
+    updated = provenance_input(read_payload())
+    if updated is not None:
+        # No permissionDecision: the user's normal permission flow still applies to the (modified) call.
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}},
+                         ensure_ascii=False))
+    return 0
 
 
 def cmd_codex_notify(args: argparse.Namespace) -> int:
@@ -1386,6 +1605,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--emit", default="UserPromptSubmit", metavar="DEFAULT_EVENT")
     p.set_defaults(func=cmd_prompt_context)
 
+    sub.add_parser("inject-provenance", help="PreToolUse(mcp__memory__*): add _ctx to the tool input"
+                   ).set_defaults(func=cmd_inject_provenance)
     p = sub.add_parser("rule-reminder", help="PreToolUse: matching rules as additionalContext")
     p.add_argument("--src", required=True)
     p.add_argument("--memory-dir", required=True)

@@ -147,6 +147,12 @@ def render_human(rows: list[dict]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _src = Path(__file__).resolve().parent.parent / "src"
+    if str(_src) not in sys.path:
+        sys.path.insert(0, str(_src))
+    from stdio_utf8 import never_fail_on_output
+
+    never_fail_on_output()
     p = argparse.ArgumentParser(
         prog="tam-lookup",
         description="Search the total-agent-memory DB from the shell.",
@@ -163,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", dest="json_out", action="store_true",
                    help="Emit machine-readable JSON instead of bullets.")
     p.add_argument("--db", type=Path, default=None,
-                   help="Path to memory.db (default: $CLAUDE_MEMORY_DIR/memory.db).")
+                   help="Path to memory.db (default: <memory dir>/memory.db, see paths.memory_dir()).")
     args = p.parse_args(argv)
 
     db_path = args.db or _resolve_db_path()

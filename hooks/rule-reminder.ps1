@@ -1,5 +1,5 @@
 # ===========================================
-# PreToolUse Hook (PowerShell) — rule reminder before a Bash call or an edit
+# PreToolUse Hook (PowerShell) - rule reminder before a Bash call or an edit
 #
 # Twin of hooks/rule-reminder.sh. Matches the command line (or the edited
 # path plus the new text) against the active SOUL rules

@@ -46,7 +46,7 @@ def main():
         frame = json.loads(line)
         request_id = frame.get("id")
         try:
-            token = token_file.read_text().strip()
+            token = token_file.read_text(encoding="utf-8").strip()
             if not token:
                 raise ValueError("Empty token file")
             request = urllib.request.Request(url, data=line, method="POST", headers={
