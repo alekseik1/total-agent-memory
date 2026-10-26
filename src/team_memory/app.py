@@ -55,11 +55,11 @@ from version import RELEASE_DATE, VERSION
 MAX_REQUEST_BYTES = 1_000_000
 # Requests being served for an authenticated caller (default of TAM_TEAM_MAX_PENDING_REQUESTS).
 MAX_PENDING_REQUESTS = 32
-# Requests that have not proven who they are yet (bad bearer tokens being looked up, logins, static files; default
+# Requests that have not proven who they are yet (bad bearer tokens being looked up, logins; default
 # of TAM_TEAM_MAX_PENDING_UNAUTHENTICATED). Kept smaller and separate so a flood of anonymous requests fills only
 # this pool and signed-in users and agents keep their own.
 MAX_PENDING_UNAUTHENTICATED = 8
-# Sign-in, invite redemption, static files and the setup wizard (routes that need no credential) are served from
+# Sign-in, invite redemption and the setup wizard (routes that need no credential) are served from
 # their own pool, with a per-client cap, so a slow anonymous body can block neither credential lookups nor each
 # other beyond one client's share.
 MAX_PENDING_PUBLIC = 16
@@ -80,6 +80,11 @@ REQUEST_READ_TIMEOUT_SECONDS = 15
 PUBLIC_READ_TIMEOUT_SECONDS = 4
 TOKEN: ContextVar[str] = ContextVar("team_memory_token", default="")
 PUBLIC_PATHS = ("/", "/healthz")
+# The dashboard shell and its assets: bodyless reads of files that need no credential. A browser fetches a dozen
+# of them at once, so they bypass the request pools (which guard slow bodies and credential lookups).
+ASSET_PATHS = ("/dashboard", "/dashboard/")
+ASSET_PREFIX = "/dashboard/static/"
+ASSET_METHODS = ("GET", "HEAD")
 # Tokens are secrets.token_urlsafe(32): 43 URL-safe characters. Anything shaped otherwise cannot be one, so it
 # is refused before it costs a database lookup.
 TOKEN_FORMAT = re.compile(r"[A-Za-z0-9_-]{32,128}")
@@ -174,7 +179,7 @@ class Authentication:
                 await send({"type": "websocket.close", "code": WS_POLICY_VIOLATION})
             return
         send = self._with_hsts(scope, send)
-        if scope["path"] in PUBLIC_PATHS:
+        if scope["path"] in PUBLIC_PATHS or self._is_asset(scope):
             await self.app(scope, receive, send)
             return
         credential = self._credential(scope)
@@ -182,7 +187,7 @@ class Authentication:
             await self._serve_known(scope, receive, send, credential)
             return
         if credential is None and scope["path"].startswith(SESSION_PREFIXES):
-            # Nothing to look up: sign-in, static files and the setup wizard go straight to the public pool.
+            # Nothing to look up: sign-in, invites and the setup wizard go straight to the public pool.
             await self._serve_public(scope, receive, send)
             return
         # Only the credential check runs in the small anonymous pool, so a flood of bad credentials can neither
@@ -201,6 +206,11 @@ class Authentication:
             await self._serve_authenticated(scope, receive, send, identity.token)
         else:
             await self._serve_public(scope, receive, send)
+
+    @staticmethod
+    def _is_asset(scope) -> bool:
+        path = scope["path"]
+        return scope.get("method") in ASSET_METHODS and (path in ASSET_PATHS or path.startswith(ASSET_PREFIX))
 
     async def _serve_public(self, scope, receive, send):
         client = forwarded_client(self.config, peer_address(scope.get("client")),
@@ -262,7 +272,7 @@ class Authentication:
 
     async def _identify(self, scope, credential: tuple[str, str] | None) -> Identity:
         """Bearer routes need a valid token; session routes count as authenticated when the cookie names a live
-        session. Session routes without one (sign-in, static files, the setup wizard) stay in the anonymous pool."""
+        session. Session routes without one (sign-in, invites, the setup wizard) stay in the anonymous pool."""
         if credential is None:
             if scope["path"].startswith(SESSION_PREFIXES):
                 return Identity()

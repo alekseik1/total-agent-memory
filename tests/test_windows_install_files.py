@@ -198,11 +198,12 @@ def test_three_background_tasks_registered(install_text: str):
 
 
 def test_uninstall_removes_all_tasks(install_text: str):
-    """Uninstall branch must Unregister-ScheduledTask for each task.
+    """Uninstall branch must stop and unregister each task.
 
     The function body is allowed to reference tasks by variable (e.g.
     ``$TaskReflection``) as long as those variables are defined at script
-    scope and point at the expected literal task names.
+    scope and point at the expected literal task names. Removal goes through
+    ``Remove-TamScheduledTask``, which stops a running instance first.
     """
     match = re.search(
         r"function\s+Invoke-Uninstall.*?^\}",
@@ -211,7 +212,9 @@ def test_uninstall_removes_all_tasks(install_text: str):
     )
     assert match, "Invoke-Uninstall body not found"
     body = match.group(0)
-    assert "Unregister-ScheduledTask" in body
+    assert "Remove-TamScheduledTask" in body
+    helper = _function_body(install_text, "Remove-TamScheduledTask")
+    assert helper.index("Stop-ScheduledTask") < helper.index("Unregister-ScheduledTask")
 
     task_vars = ("$TaskReflection", "$TaskOrphanBackfill", "$TaskCheckUpdates")
     task_literals = (

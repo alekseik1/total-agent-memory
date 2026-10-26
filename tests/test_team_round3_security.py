@@ -417,3 +417,25 @@ def test_anonymous_body_times_out_quickly(world, monkeypatch):
 def test_recent_credentials_default_covers_an_agents_idle_gap():
     from team_memory.app import RECENT_CREDENTIAL_SECONDS
     assert RECENT_CREDENTIAL_SECONDS >= 120
+
+
+def test_dashboard_assets_load_while_the_request_pools_are_full(world):
+    # A browser fetches the shell and a dozen assets at once; a full public pool or a stale session cookie
+    # must not turn them into 429/503 (the setup wizard and the dashboard then fail to start).
+    authentication = world.app.app
+    client = '203.0.113.7'
+    authentication.public = authentication.limits.public
+    authentication.public_clients[client] = authentication.limits.public_per_client
+    authentication.unauthenticated = authentication.limits.unauthenticated
+    try:
+        stale_cookie = {'Cookie': 'tam_session=stale-session-id'}
+        statuses = [asyncio.run(asgi_request(authentication, path, method=method, client=client, headers=headers))
+                    for path in ('/dashboard/', '/dashboard/static/app.js', '/dashboard/static/setup.js')
+                    for method in ('GET', 'HEAD') for headers in (None, stale_cookie)]
+        sign_in = asyncio.run(asgi_request(authentication, '/dashboard/api/login', client=client, body=b'{}'))
+    finally:
+        authentication.public = 0
+        authentication.public_clients.clear()
+        authentication.unauthenticated = 0
+    assert statuses == [200] * len(statuses)
+    assert sign_in == 429
