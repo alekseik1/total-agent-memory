@@ -281,6 +281,15 @@ def api_graph_matrix(
         return {"nodes": [], "cells": [], "error": str(e)}
 
 
+# Both endpoints of an edge must have at least `min_mentions` mentions. Written as per-edge primary-key
+# lookups: with `source_id IN (...) AND target_id IN (...)` SQLite probes the (source_id, target_id) index
+# with every pair of the two lists, which took minutes on a 58k-node graph.
+EDGE_ENDPOINTS_MIN_MENTIONS = (
+    "EXISTS (SELECT 1 FROM graph_nodes s WHERE s.id = graph_edges.source_id AND s.mention_count >= ?) "
+    "AND EXISTS (SELECT 1 FROM graph_nodes t WHERE t.id = graph_edges.target_id AND t.mention_count >= ?)"
+)
+
+
 def api_graph_delta(
     db: sqlite3.Connection,
     since: str | None = None,
@@ -323,10 +332,7 @@ def api_graph_delta(
         node_conds.append("mention_count >= ?")
         node_params.append(min_mentions)
         # Edge endpoints must also satisfy min_mentions
-        edge_conds.append(
-            "source_id IN (SELECT id FROM graph_nodes WHERE mention_count >= ?) "
-            "AND target_id IN (SELECT id FROM graph_nodes WHERE mention_count >= ?)"
-        )
+        edge_conds.append(EDGE_ENDPOINTS_MIN_MENTIONS)
         edge_params.extend([min_mentions, min_mentions])
 
     if min_edge_weight > 0:
@@ -364,9 +370,7 @@ def api_graph_delta(
                 "SELECT COUNT(*) FROM graph_nodes WHERE mention_count >= ?",
                 (min_mentions,),
             ).fetchone()[0]
-            sql = ("SELECT COUNT(*) FROM graph_edges "
-                   "WHERE source_id IN (SELECT id FROM graph_nodes WHERE mention_count >= ?) "
-                   "  AND target_id IN (SELECT id FROM graph_nodes WHERE mention_count >= ?)")
+            sql = f"SELECT COUNT(*) FROM graph_edges WHERE {EDGE_ENDPOINTS_MIN_MENTIONS}"
             params: list = [min_mentions, min_mentions]
             if min_edge_weight > 0:
                 sql += " AND weight >= ?"
