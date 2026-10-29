@@ -1460,11 +1460,26 @@ def _fingerprint(entry: object) -> JsonDict:
     return {key: entry[key] for key in PROVENANCE_FINGERPRINT_KEYS if entry.get(key)}
 
 
+def _mcpjson_server_approved(name: str, directory: Path, home: Path, project: object) -> bool:
+    """Claude Code starts a server from a project .mcp.json only after approval (enableAllProjectMcpServers or
+    enabledMcpjsonServers), and never one listed in disabledMcpjsonServers. The answers live in the project's
+    settings files, the user settings and the project entry of ~/.claude.json."""
+    sources = [_json_file(directory / ".claude" / "settings.local.json"), _json_file(directory / ".claude" / "settings.json"),
+               _json_file(home / ".claude" / "settings.json"), project if isinstance(project, dict) else {}]
+
+    def listed(key: str) -> bool:
+        return any(isinstance(source.get(key), list) and name in source[key] for source in sources)
+
+    if listed("disabledMcpjsonServers"):
+        return False
+    return listed("enabledMcpjsonServers") or any(source.get("enableAllProjectMcpServers") is True for source in sources)
+
+
 def effective_server(name: str, cwd: str, home: Path) -> JsonDict | None:
     """The registration Claude Code uses for ``name`` at ``cwd``. Precedence follows the documented MCP scope order
     (code.claude.com/docs/en/mcp, "Scope hierarchy and precedence"): local scope, project .mcp.json, user scope.
     Local scope belongs to one project path only, so only the working directory and its repository root are
-    looked up there, never their parents."""
+    looked up there, never their parents. A project .mcp.json server counts only when it is approved."""
     user_config = _json_file(home / ".claude.json")
     directories = [Path(cwd), *Path(cwd).parents] if cwd else []
     projects = user_config.get("projects")
@@ -1475,7 +1490,9 @@ def effective_server(name: str, cwd: str, home: Path) -> JsonDict | None:
     scopes: list[Any] = [by_path[key].get("mcpServers") for key in (os.path.normcase(os.path.normpath(root))
                                                                       for root in project_roots if root)
                          if isinstance(by_path.get(key), dict)]
-    scopes += [_json_file(d / ".mcp.json").get("mcpServers") for d in directories]
+    scopes += [servers for servers, d in ((_json_file(d / ".mcp.json").get("mcpServers"), d) for d in directories)
+               if not (isinstance(servers, dict) and name in servers)
+               or _mcpjson_server_approved(name, d, home, by_path.get(os.path.normcase(os.path.normpath(str(d)))))]
     scopes.append(user_config.get("mcpServers"))
     for servers in scopes:
         if isinstance(servers, dict) and isinstance(servers.get(name), dict):
@@ -1628,7 +1645,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             reconfigure(encoding="utf-8", errors="replace")
     stdin_reconfigure = getattr(sys.stdin, "reconfigure", None)
     if stdin_reconfigure is not None:
-        stdin_reconfigure(encoding="utf-8", errors="replace")
+        # utf-8-sig: Windows PowerShell 5.1 can prefix what it pipes to a native command with a BOM.
+        stdin_reconfigure(encoding="utf-8-sig", errors="replace")
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args))

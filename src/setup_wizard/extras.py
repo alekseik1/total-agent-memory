@@ -215,7 +215,12 @@ def apply_hooks(hook_plan: HookPlan) -> tuple[int, int]:
         if destination.exists() and not hook_plan.overwrite:
             skipped += 1
             continue
-        atomic_write(destination, source.read_text(encoding="utf-8"), EXECUTABLE_MODE)
+        text = source.read_text(encoding="utf-8")
+        if destination.exists() and destination.read_text(encoding="utf-8") != text:
+            # Same rule as refresh_installed_hooks: an overwritten script keeps its previous text as <name>.bak.
+            atomic_write(destination.with_name(destination.name + BACKUP_SUFFIX),
+                         destination.read_text(encoding="utf-8"), EXECUTABLE_MODE)
+        atomic_write(destination, text, EXECUTABLE_MODE)
         copied += 1
     for source, destination in hook_plan.runtime:
         atomic_write(destination, source.read_text(encoding="utf-8"), EXECUTABLE_MODE)

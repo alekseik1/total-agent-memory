@@ -26,7 +26,8 @@
 
 $ErrorActionPreference = "Continue"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$OutputEncoding = [Console]::OutputEncoding
+# Encoding of what is piped to native commands; set directly so it never carries a BOM.
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
 $HookLibDir = $PSScriptRoot
 $HookHelper = Join-Path $HookLibDir "tam_hook.py"

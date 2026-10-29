@@ -120,7 +120,9 @@ def test_inject_provenance_ps1_injects_for_the_tam_server_only(engine, tmp_path)
                "tool_use_id": "toolu_9", "cwd": str(tmp_path), "tool_input": {"content": "c"}}
     script = str(SCRIPTS["inject-provenance"])
     proc = _run(engine, ["-File", script], _env(tmp_path), json.dumps(payload))
-    assert proc.returncode == 0, proc.stderr.decode()
+    log = tmp_path / "mem" / "hooks.log"
+    diagnostics = proc.stderr.decode() + (log.read_text(encoding="utf-8", errors="replace") if log.exists() else "")
+    assert proc.returncode == 0 and proc.stdout.strip(), diagnostics
     out = json.loads(proc.stdout.decode())["hookSpecificOutput"]
     assert out["updatedInput"]["content"] == "c" and out["updatedInput"]["_ctx"]["tool_use_id"] == "toolu_9"
     assert "permissionDecision" not in out
@@ -135,6 +137,8 @@ def test_inject_provenance_ps1_leaves_a_foreign_memory_server_alone(engine, tmp_
     _register_tam_server(tmp_path)
     (tmp_path / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"memory": {"command": "npx", "args": ["foreign-memory"]}}}), encoding="utf-8")
+    (tmp_path / ".claude" / "settings.local.json").write_text(json.dumps({"enabledMcpjsonServers": ["memory"]}),
+                                                              encoding="utf-8")
     payload = {"hook_event_name": "PreToolUse", "tool_name": "mcp__memory__memory_save", "session_id": "s",
                "cwd": str(tmp_path), "tool_input": {"content": "c"}}
     proc = _run(engine, ["-File", str(SCRIPTS["inject-provenance"])], _env(tmp_path), json.dumps(payload))

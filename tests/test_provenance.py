@@ -270,6 +270,21 @@ def test_hook_script_prints_updated_input_without_a_permission_decision(tmp_path
     assert silent.returncode == 0 and silent.stdout == b""
 
 
+def test_helper_reads_a_payload_that_starts_with_a_bom(tmp_path):
+    # Windows PowerShell 5.1 can prefix the payload it pipes to python with a UTF-8 BOM.
+    _register(tmp_path)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("TAM_", "CLAUDE_MEMORY", "HOOK_"))}
+    env.update({"HOME": str(tmp_path), "USERPROFILE": str(tmp_path), "TAM_MEMORY_DIR": str(tmp_path / "mem")})
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "mcp__memory__memory_save", "session_id": "s",
+               "tool_use_id": "toolu_5", "cwd": str(tmp_path), "tool_input": {"content": "привет"}}
+    proc = subprocess.run([sys.executable, str(HELPER), "inject-provenance"],
+                          input=b"\xef\xbb\xbf" + json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                          env=env, capture_output=True, timeout=30, check=False)
+    assert proc.returncode == 0 and proc.stdout.strip(), proc.stderr.decode("utf-8", "replace")
+    updated = json.loads(proc.stdout.decode("utf-8"))["hookSpecificOutput"]["updatedInput"]
+    assert updated["content"] == "привет" and updated["_ctx"]["tool_use_id"] == "toolu_5"
+
+
 def test_installers_register_the_provenance_hook_and_ship_both_shells():
     sys.path.insert(0, str(ROOT / "src"))
     from setup_wizard.docker_install import DOCKER_HOOKS
@@ -319,11 +334,47 @@ def test_a_project_scoped_foreign_memory_server_overrides_the_installed_one(tmp_
     assert tam_hook.provenance_input(_call(tmp_path), home) is not None
 
 
-def test_a_project_mcp_json_foreign_memory_server_overrides_the_installed_one(tmp_path, tam_home):
+def _project_settings(directory: Path, **settings) -> None:
+    (directory / ".claude").mkdir(parents=True, exist_ok=True)
+    (directory / ".claude" / "settings.local.json").write_text(json.dumps(settings), encoding="utf-8")
+
+
+def _foreign_project(tmp_path: Path) -> Path:
     work = tmp_path / "work"
     (work / "deep").mkdir(parents=True)
     (work / ".mcp.json").write_text(json.dumps({"mcpServers": {"memory": {"url": "https://example.test/mcp"}}}), encoding="utf-8")
+    return work
+
+
+def test_a_project_mcp_json_foreign_memory_server_overrides_the_installed_one(tmp_path, tam_home):
+    work = _foreign_project(tmp_path)
+    _project_settings(work, enabledMcpjsonServers=["memory"])
     assert tam_hook.provenance_input(_call(work / "deep"), tam_home) is None
+
+
+def test_an_approval_from_enable_all_or_the_claude_json_project_entry_counts(tmp_path, tam_home):
+    work = _foreign_project(tmp_path)
+    _project_settings(work, enableAllProjectMcpServers=True)
+    assert tam_hook.provenance_input(_call(work / "deep"), tam_home) is None
+    (work / ".claude" / "settings.local.json").unlink()
+    config = json.loads((tam_home / ".claude.json").read_text(encoding="utf-8"))
+    config["projects"] = {str(work): {"enabledMcpjsonServers": ["memory"]}}
+    (tam_home / ".claude.json").write_text(json.dumps(config), encoding="utf-8")
+    assert tam_hook.provenance_input(_call(work / "deep"), tam_home) is None
+
+
+@pytest.mark.parametrize("settings", [
+    {},
+    {"enableAllProjectMcpServers": True, "disabledMcpjsonServers": ["memory"]},
+    {"enabledMcpjsonServers": ["context7"]},
+])
+def test_an_unapproved_or_disabled_project_server_does_not_shadow_the_installed_one(tmp_path, tam_home, settings):
+    # Claude Code never starts it, so the tool still belongs to the installed TAM server.
+    work = _foreign_project(tmp_path)
+    if settings:
+        _project_settings(work, **settings)
+    updated = tam_hook.provenance_input(_call(work / "deep"), tam_home)
+    assert updated is not None and updated["_ctx"]["agent"] == "claude-code"
 
 
 def test_no_marker_or_unregistered_server_means_no_injection(tmp_path):
@@ -399,6 +450,7 @@ def test_a_parent_directory_local_scope_does_not_outrank_the_project_mcp_json(tm
     work.mkdir(parents=True)
     _register(home, project_servers={"memory": TAM_ENTRY}, cwd=parent)
     (work / ".mcp.json").write_text(json.dumps({"mcpServers": {"memory": {"url": "https://example.test/mcp"}}}), encoding="utf-8")
+    _project_settings(work, enabledMcpjsonServers=["memory"])
     assert tam_hook.provenance_input(_call(work), home) is None
     # The exact project path still has local scope.
     _register(home, project_servers={"memory": {"command": "npx", "args": ["other"]}}, cwd=work)

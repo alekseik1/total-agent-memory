@@ -14,7 +14,10 @@ Two sources feed it:
 The hook sends `_ctx` only to the TAM server. The installers record how they registered the `memory`
 server (command and arguments, or URL; never env or headers) in `~/.claude/tam-provenance.json`, and the hook
 injects only when the effective `memory` registration, project-scoped and `.mcp.json` overrides included,
-matches that marker, or when the tool belongs to the total-agent-memory plugin. A server of another vendor
+matches that marker, or when the tool belongs to the total-agent-memory plugin. A `.mcp.json` server counts
+only when Claude Code would start it: approved through `enableAllProjectMcpServers` or
+`enabledMcpjsonServers`, and not listed in `disabledMcpjsonServers` (project and user settings, and the
+project entry of `~/.claude.json`). A server of another vendor
 that is also named `memory` gets nothing. An install made before 14.10.0 has no marker, so the hook stays
 silent until `update.sh`, `tam setup --reconfigure` or `install-docker.sh` runs once.
 
