@@ -102,6 +102,15 @@ def test_allow_list_entry_without_a_reason_is_a_configuration_error(tmp_path, en
     assert "reason" in proc.stderr or "expected" in proc.stderr
 
 
+def test_allow_list_with_crlf_line_endings_is_read_like_lf(tmp_path):
+    # Windows checkouts with core.autocrlf=true turn the blank and comment lines into "\r".
+    repo = _repo(tmp_path, {"tests/t.py": f"HOST = '{PRIVATE_IP}'\n"})
+    allowlist = "# accepted findings\n\ntests/* :: 192\\.168\\.7\\.[0-9]+ :: fixture address for a bind test\n"
+    (repo / "scripts" / "internal-data-allowlist.txt").write_bytes(allowlist.replace("\n", "\r\n").encode())
+    proc = _run(repo, "--fail-on-stale")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
 def test_stale_entries_warn_and_fail_only_on_request(tmp_path):
     repo = _repo(tmp_path, {"a.txt": "nothing here\n"}, allowlist="a.txt :: 10\\.0\\.0\\.1 :: fixture that was removed\n")
     assert _run(repo).returncode == 0

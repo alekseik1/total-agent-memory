@@ -48,6 +48,8 @@ if [ -f "$ALLOWLIST" ]; then
     number=0
     while IFS= read -r line || [ -n "$line" ]; do
         number=$((number + 1))
+        # Windows checkouts with core.autocrlf=true end every line with CR.
+        line=${line%$'\r'}
         case "$line" in ''|'#'*) continue ;; esac
         case "$line" in *"$SEPARATOR"*"$SEPARATOR"*) ;; *)
             config_error "$ALLOWLIST:$number: expected '<glob>$SEPARATOR<ERE>$SEPARATOR<reason>'" ;;

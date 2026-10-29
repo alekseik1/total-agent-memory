@@ -109,6 +109,11 @@ jobs:
           python -m pytest tests -q --strict-markers -p no:cacheprovider
           -m "${PYTEST_BLOCKING_MARKERS}"
           --junitxml=test-results.xml
+      - name: Disk usage after the suite
+        if: always()
+        run: |
+          df -h . "$(python -c 'import tempfile; print(tempfile.gettempdir())')"
+          du -sh "$(python -c 'import tempfile; print(tempfile.gettempdir())')"/pytest-of-* 2>/dev/null || true
       - name: Platform-sensitive tests (blocking on Linux, reported elsewhere)
         continue-on-error: ${{ runner.os != 'Linux' }}
         run: |

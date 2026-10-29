@@ -625,7 +625,7 @@ def test_l7_systemd_templates_quote_exec_and_environment():
                 assert line.startswith('Environment="'), f"{unit.name}: {line}"
 
 
-@pytest.mark.skipif(not BASH, reason="bash required")
+@pytest.mark.skipif(not BASH or sys.platform == "win32", reason="systemd units are installed on Linux only")
 def test_l7_installed_units_survive_spaces_and_ampersands(tmp_path):
     install = tmp_path / "my dir & more"
     (install / "scripts").mkdir(parents=True)
