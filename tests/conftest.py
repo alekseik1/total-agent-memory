@@ -69,6 +69,16 @@ _raise_descriptor_limit()
 
 
 @pytest.fixture(autouse=True)
+def _stop_chroma_systems_of_the_test():
+    """Stop the Chroma systems a test started (see tests/chroma_support.py)."""
+    from tests.chroma_support import running_systems, stop_systems_started_since
+
+    before = running_systems()
+    yield
+    stop_systems_started_since(before)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_active_context_vault(tmp_path_factory, monkeypatch):
     """Redirect activeContext.md writes into a per-test tmp dir.
 
