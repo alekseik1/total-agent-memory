@@ -104,9 +104,12 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: Prewarm embedding models
         run: python tests/smoke/prewarm_models.py
+      # timeout_method=thread: a test that outlives the pytest timeout dumps every thread's stack and
+      # ends the run, so a hang shows where it is stuck instead of running into the job timeout.
       - name: Test suite
         run: >-
           python -m pytest tests -q --strict-markers -p no:cacheprovider
+          -o timeout_method=thread
           -m "${PYTEST_BLOCKING_MARKERS}"
           --junitxml=test-results.xml
       - name: Disk usage after the suite

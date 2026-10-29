@@ -133,7 +133,8 @@ jobs:
   source-archive:
     needs: package
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # The full suite in the unpacked sdist took 19 min on a slow runner; 20 left no margin.
+    timeout-minutes: 30
     env:
       FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.tam-models
     steps:
