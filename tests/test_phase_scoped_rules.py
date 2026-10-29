@@ -197,9 +197,9 @@ def test_phase_transition_adds_rules_preview_in_response():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     mig = Path(__file__).parent.parent / "migrations" / "012_task_phases.sql"
-    conn.executescript(mig.read_text())
+    conn.executescript(mig.read_text(encoding="utf-8"))
     proc = Path(__file__).parent.parent / "migrations" / "009_procedural.sql"
-    conn.executescript(proc.read_text())
+    conn.executescript(proc.read_text(encoding="utf-8"))
 
     tp = TaskPhases(conn)
     tp.create_task("t-preview", "add /users endpoint", level=2)

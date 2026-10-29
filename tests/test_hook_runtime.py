@@ -181,7 +181,7 @@ class TestMemoryTrigger:
                         self.payload(cwd, command, True, "Exit code 1\nconnection refused"), env)
         text = context_of(proc, "PostToolUseFailure")
         assert "SELF_LEARNING_ERROR" in text and "exit=1" in text and "category='api_error'" in text
-        state = json.loads((world["mem"] / "state" / "last-error-proj.json").read_text())
+        state = json.loads((world["mem"] / "state" / "last-error-proj.json").read_text(encoding="utf-8"))
         assert state["cmd"].startswith("pytest -x")
 
         proc = run_hook(bash, "memory-trigger.sh", self.payload(cwd, "pytest -x", False), env)
@@ -191,7 +191,7 @@ class TestMemoryTrigger:
         assert not (world["mem"] / "state" / "last-error-proj.json").exists()
         assert not marker.exists()
         # src/ is absent in this install dir: the skipped background script is logged, not silent.
-        assert "auto_self_improve.py not found" in (world["mem"] / "hooks.log").read_text()
+        assert "auto_self_improve.py not found" in (world["mem"] / "hooks.log").read_text(encoding="utf-8")
 
     def test_significant_command_and_quiet_command(self, bash, world):
         env = hook_env(world)
@@ -232,9 +232,14 @@ class TestStop:
         return run_hook(bash, "on-stop.sh", payload, hook_env(world))
 
     def test_stop_is_silent_and_keeps_one_file_per_session(self, bash, world):
-        for _ in range(4):
+        for turn in range(4):
             proc = self.stop(bash, world)
-            assert proc.returncode == 0 and proc.stdout == b""
+            assert proc.returncode == 0
+            if turn == 0:
+                # The fixture has no src/: the user hears once that ambient memory is off.
+                assert tam_hook.AMBIENT_UNAVAILABLE_NOTICE in json.loads(proc.stdout)["systemMessage"]
+            else:
+                assert proc.stdout == b""
         files = list((world["mem"] / "recovery").glob("pending-*.md"))
         assert [f.name for f in files] == ["pending-stop-1.md"]
         meta = tam_hook.recovery_meta(files[0])
@@ -290,7 +295,7 @@ FLAT_TRANSCRIPT = [
 class TestSessionEnd:
     def write_transcript(self, world, entries) -> Path:
         path = world["tmp"] / "abc-123.jsonl"
-        path.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+        path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
         return path
 
     def test_nested_transcript_lands_in_recovery_file(self, bash, world):
@@ -299,7 +304,7 @@ class TestSessionEnd:
             "hook_event_name": "SessionEnd", "session_id": "end-1", "cwd": str(world["tmp"]),
             "reason": "prompt_input_exit", "transcript_path": str(transcript)}, hook_env(world, ROOT))
         assert proc.returncode == 0 and proc.stdout == b""
-        body = (world["mem"] / "recovery" / "pending-end-1.md").read_text()
+        body = (world["mem"] / "recovery" / "pending-end-1.md").read_text(encoding="utf-8")
         assert "please fix the flaky auth test" in body and "now add a regression test" in body
         assert "Root cause: shared fixture state." in body
         assert "<command-name>" not in body
@@ -313,7 +318,7 @@ class TestSessionEnd:
                                           "transcript_path": str(transcript)}, env)
         files = list((world["mem"] / "recovery").glob("pending-*.md"))
         assert [f.name for f in files] == ["pending-end-2.md"]
-        assert "please fix the flaky auth test" in files[0].read_text()
+        assert "please fix the flaky auth test" in files[0].read_text(encoding="utf-8")
 
     @pytest.mark.parametrize("entries,user,assistant", [
         (NESTED_TRANSCRIPT, "now add a regression test", "Root cause"),
@@ -325,12 +330,14 @@ class TestSessionEnd:
         actions = tam_hook.session_end(
             {"session_id": "s", "cwd": str(world["tmp"]), "transcript_path": str(transcript)},
             ROOT / "src", world["mem"] / "recovery", "proj", "User exited",
-            runner=lambda _src, script, args: calls.append((script, list(args))) or True)
+            runner=lambda _src, script, args, stdin_text=None: calls.append((script, list(args), stdin_text)) or True)
         scripts = [c[0] for c in calls]
         assert scripts == ["auto_session_save.py", "auto_episode_capture.py"]
         save_args = calls[0][1]
-        assert user in save_args[save_args.index("--user-context") + 1]
-        assert assistant in save_args[save_args.index("--assistant-context") + 1]
+        assert "--user-context" not in save_args, "prompts must not travel in argv"
+        context = json.loads(calls[0][2])
+        assert user in context["user"]
+        assert assistant in context["assistant"]
         episode_args = calls[1][1]
         assert episode_args[episode_args.index("--transcript") + 1] == str(transcript)
         assert any("auto_session_save started" in a for a in actions)
@@ -342,7 +349,7 @@ class TestSessionEnd:
 
 def seed_db(mem: Path, project: str, summary: str = "Refactored hooks to JSON output") -> None:
     db = sqlite3.connect(mem / "memory.db")
-    db.executescript((ROOT / "migrations" / "010_session_continuity.sql").read_text())
+    db.executescript((ROOT / "migrations" / "010_session_continuity.sql").read_text(encoding="utf-8"))
     db.execute("CREATE TABLE IF NOT EXISTS rules (id INTEGER PRIMARY KEY, content TEXT, priority INTEGER, "
                "status TEXT, scope TEXT, project TEXT, success_rate REAL DEFAULT 0)")
     db.execute("INSERT INTO session_summaries (id, session_id, project, summary, next_steps, pitfalls, ended_at, "
@@ -408,7 +415,7 @@ class TestSessionStart:
         own = self.write_recovery(world, "new-1", proj)
         stale = self.write_recovery(world, "stale", proj, age_hours=tam_hook.RECOVERY_MAX_AGE_HOURS + 1)
         legacy = recovery / "pending-20260101-000000.md"
-        legacy.write_text("# Session Recovery\nper-turn snapshot")
+        legacy.write_text("# Session Recovery\nper-turn snapshot", encoding="utf-8")
 
         out = self.start(bash, world, "startup").stdout.decode()
         assert "work of newer-same" in out
@@ -436,7 +443,7 @@ class TestSessionStart:
 class TestCommonLib:
     def run_snippet(self, bash, world, snippet: str, payload: dict | str, **extra: str):
         script = world["tmp"] / "probe.sh"
-        script.write_text(f'source "{HOOKS}/lib/common.sh"\n{snippet}\n')
+        script.write_text(f'source "{HOOKS}/lib/common.sh"\n{snippet}\n', encoding="utf-8")
         data = payload if isinstance(payload, str) else json.dumps(payload)
         return subprocess.run([bash, str(script)], input=data.encode(), env=hook_env(world, **extra),
                               capture_output=True, timeout=30, check=False)
@@ -455,14 +462,14 @@ class TestCommonLib:
     def test_fields_are_parsed_with_one_python_spawn(self, bash, world):
         counter = world["tmp"] / "spawns"
         wrapper = world["tmp"] / "counting-python"
-        wrapper.write_text(f'#!/bin/sh\necho x >> "{counter}"\nexec "{sys.executable}" "$@"\n')
+        wrapper.write_text(f'#!/bin/sh\necho x >> "{counter}"\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
         wrapper.chmod(0o755)
         proc = self.run_snippet(bash, world, "for f in cwd session_id source model tool_name transcript_path "
                                 "reason tool_input.command; do hook_get $f >/dev/null; done",
                                 {"cwd": "/w/p", "session_id": "s", "source": "startup", "model": "opus"},
                                 HOOK_PYTHON=str(wrapper))
         assert proc.returncode == 0
-        assert counter.read_text().count("x") == 1
+        assert counter.read_text(encoding="utf-8").count("x") == 1
 
     def test_invalid_payload_does_not_break_the_hook(self, bash, world):
         proc = self.run_snippet(bash, world, 'echo "[$(hook_get cwd)]"', "not json")
@@ -501,13 +508,13 @@ class TestCommonLib:
         for key in ("CLAUDE_MEMORY_DIR", "CLAUDE_MEMORY_INSTALL_DIR"):
             env.pop(key)
         transcript = world["tmp"] / "t.jsonl"
-        transcript.write_text("\n".join(json.dumps(e) for e in NESTED_TRANSCRIPT) + "\n")
+        transcript.write_text("\n".join(json.dumps(e) for e in NESTED_TRANSCRIPT) + "\n", encoding="utf-8")
         proc = run_hook(bash, "session-end.sh", {"session_id": "inst", "cwd": str(world["tmp"]),
                                                  "transcript_path": str(transcript), "reason": "logout"},
                         env, hooks_dir=hooks_dir)
         assert proc.returncode == 0, proc.stderr.decode()
         recovery = world["tmp"] / "installed-mem" / "recovery" / "pending-inst.md"
-        assert "please fix the flaky auth test" in recovery.read_text()
+        assert "please fix the flaky auth test" in recovery.read_text(encoding="utf-8")
 
 
 # ──────────────────────────────────────────────
@@ -515,7 +522,7 @@ class TestCommonLib:
 # ──────────────────────────────────────────────
 
 def test_plugin_session_start_matcher_includes_compact():
-    cfg = json.loads((HOOKS / "hooks.json").read_text())
+    cfg = json.loads((HOOKS / "hooks.json").read_text(encoding="utf-8"))
     matchers = [block.get("matcher", "") for block in cfg["hooks"]["SessionStart"]]
     assert any("compact" in m.split("|") for m in matchers)
 

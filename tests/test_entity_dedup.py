@@ -33,7 +33,7 @@ def edb():
     db.row_factory = sqlite3.Row
     migration = (
         Path(__file__).parent.parent / "migrations" / "018_entity_dedup.sql"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     db.executescript(migration)
     yield db
     db.close()

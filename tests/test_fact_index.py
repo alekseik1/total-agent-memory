@@ -46,6 +46,7 @@ def _schema(db: sqlite3.Connection) -> None:
         CREATE TABLE knowledge (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project TEXT,
+            status TEXT DEFAULT 'active',
             content TEXT,
             type TEXT,
             tags TEXT,
@@ -88,15 +89,17 @@ def _add_knowledge(
     project: str,
     content: str,
     node_id: str | None = None,
+    status: str = "active",
+    strength: float = 1.0,
 ) -> None:
     db.execute(
-        "INSERT INTO knowledge(id,project,content,type) VALUES(?,?,?,?)",
-        (kid, project, content, "fact"),
+        "INSERT INTO knowledge(id,project,content,type,status) VALUES(?,?,?,?,?)",
+        (kid, project, content, "fact", status),
     )
     if node_id:
         db.execute(
             "INSERT INTO knowledge_nodes(knowledge_id,node_id,role,strength) VALUES(?,?,?,?)",
-            (kid, node_id, "subject", 1.0),
+            (kid, node_id, "subject", strength),
         )
 
 
@@ -326,3 +329,26 @@ def test_concurrent_lookups_do_not_crash(tmp_path):
     conn.close()
 
     assert errors == [], f"thread-safety broke: {errors}"
+
+
+def test_lookup_never_returns_superseded_or_foreign_project_records(rich_db):
+    _add_knowledge(rich_db, 20, "demo", "Alice old employer", "n_alice", status="superseded", strength=9.0)
+    _add_knowledge(rich_db, 21, "secret", "Alice private note", "n_alice", strength=8.0)
+    idx = FactIndex(rich_db)
+    assert {hit.knowledge_id for hit in idx.lookup("Alice")} == {21}
+    assert {hit.knowledge_id for hit in idx.lookup("Alice", project="demo")} == {10}
+
+
+def test_semantic_lookup_with_project_drops_rows_without_that_project(rich_db):
+    import numpy as np
+
+    class Model:
+        def embed(self, texts):
+            return [np.asarray([1.0, 0.0], dtype=np.float32) for _ in texts]
+
+    idx = FactIndex(rich_db)
+    idx._semantic_model = Model()
+    idx._semantic_matrix = np.asarray([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+    idx._semantic_rows = [("Alice", "works_at", "Google", 1.0, 12, "demo"), ("Zed", "works_at", "Acme", 1.0, None, "")]
+    assert [hit.entity for hit in idx.lookup_semantic("who works", project="demo")] == ["Alice"]
+    assert {hit.entity for hit in idx.lookup_semantic("who works")} == {"Alice", "Zed"}

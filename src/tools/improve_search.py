@@ -34,9 +34,12 @@ from typing import Any
 
 import numpy as np
 
-MEMORY_DIR = Path(
-    os.environ.get("CLAUDE_MEMORY_DIR", os.path.expanduser("~/.claude-memory"))
-)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from paths import memory_dir  # noqa: E402
+from tool_support import ollama_binary  # noqa: E402
+
+MEMORY_DIR = memory_dir()
 DB_PATH = MEMORY_DIR / "memory.db"
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
@@ -68,10 +71,13 @@ EN_STOPWORDS = frozenset(
 
 def get_ollama_models() -> list[str]:
     """Get list of models available in Ollama."""
+    binary = ollama_binary()
+    if binary is None:
+        return []
     try:
         result = subprocess.run(
-            ["/usr/local/bin/ollama", "list"],
-            capture_output=True, text=True, timeout=10,
+            [binary, "list"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
         if result.returncode != 0:
             return []
@@ -735,8 +741,12 @@ def install_best_model() -> None:
     print(f"  {target[2]}")
     print()
 
+    binary = ollama_binary()
+    if binary is None:
+        print("ollama not found: set MEMORY_OLLAMA_BIN or add ollama to PATH", file=sys.stderr)
+        sys.exit(1)
     result = subprocess.run(
-        ["/usr/local/bin/ollama", "pull", target[0]],
+        [binary, "pull", target[0]],
         timeout=600,
     )
     if result.returncode == 0:

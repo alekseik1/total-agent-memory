@@ -17,9 +17,11 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from background_writes import sanitize_text, save_background_knowledge
 from memory_core.timestamps import utc_now
+from paths import memory_dir
 
-MEMORY_DIR = os.environ.get("CLAUDE_MEMORY_DIR", os.path.expanduser("~/.claude-memory"))
+MEMORY_DIR = str(memory_dir())
 DB_PATH = os.path.join(MEMORY_DIR, "memory.db")
 
 # Stack detection: filename -> (stack_name, ecosystem)
@@ -154,7 +156,7 @@ def parse_dependencies(project_root: Path, stacks: list[tuple[str, str]]) -> dic
             if go_mod.exists():
                 mod_deps: list[str] = []
                 in_require = False
-                for line in go_mod.read_text(errors="replace").splitlines():
+                for line in go_mod.read_text(errors="replace", encoding="utf-8").splitlines():
                     stripped = line.strip()
                     if stripped.startswith("require ("):
                         in_require = True
@@ -172,7 +174,7 @@ def parse_dependencies(project_root: Path, stacks: list[tuple[str, str]]) -> dic
             cj = project_root / "composer.json"
             if cj.exists():
                 try:
-                    data = json.loads(cj.read_text(errors="replace"))
+                    data = json.loads(cj.read_text(errors="replace", encoding="utf-8"))
                     php_deps = list(data.get("require", {}).keys())[:30]
                     deps["php"] = php_deps
                 except (json.JSONDecodeError, OSError):
@@ -182,7 +184,7 @@ def parse_dependencies(project_root: Path, stacks: list[tuple[str, str]]) -> dic
             pj = project_root / "package.json"
             if pj.exists():
                 try:
-                    data = json.loads(pj.read_text(errors="replace"))
+                    data = json.loads(pj.read_text(errors="replace", encoding="utf-8"))
                     js_deps = list(data.get("dependencies", {}).keys())[:30]
                     deps["javascript"] = js_deps
                 except (json.JSONDecodeError, OSError):
@@ -192,7 +194,7 @@ def parse_dependencies(project_root: Path, stacks: list[tuple[str, str]]) -> dic
             req = project_root / "requirements.txt"
             if req.exists():
                 py_deps: list[str] = []
-                for line in req.read_text(errors="replace").splitlines():
+                for line in req.read_text(errors="replace", encoding="utf-8").splitlines():
                     stripped = line.strip()
                     if stripped and not stripped.startswith("#") and not stripped.startswith("-"):
                         pkg = stripped.split("==")[0].split(">=")[0].split("<=")[0].split("~=")[0].strip()
@@ -205,7 +207,7 @@ def parse_dependencies(project_root: Path, stacks: list[tuple[str, str]]) -> dic
             if cargo.exists():
                 rust_deps: list[str] = []
                 in_deps = False
-                for line in cargo.read_text(errors="replace").splitlines():
+                for line in cargo.read_text(errors="replace", encoding="utf-8").splitlines():
                     stripped = line.strip()
                     if stripped == "[dependencies]":
                         in_deps = True
@@ -252,29 +254,20 @@ def save_to_memory(records: list[dict]) -> int:
                     last_confirmed = ?, confidence = 0.9
                 WHERE id = ?
             """, (
-                rec["content"],
-                rec.get("context", ""),
-                json.dumps(rec["tags"]),
+                sanitize_text(rec["content"]),
+                sanitize_text(rec.get("context", "")),
+                json.dumps([sanitize_text(tag) for tag in rec["tags"]]),
                 timestamp,
                 existing[0],
             ))
         else:
-            # Insert new record
-            cursor.execute("""
-                INSERT INTO knowledge
-                    (session_id, type, content, context, project, tags, status,
-                     confidence, source, created_at, last_confirmed)
-                VALUES (?, ?, ?, ?, ?, ?, 'active', 0.9, 'tool', ?, ?)
-            """, (
-                session_id,
-                rec["type"],
-                rec["content"],
-                rec.get("context", ""),
-                rec["project"],
-                json.dumps(rec["tags"]),
-                timestamp,
-                timestamp,
-            ))
+            # Insert new record (redaction, dedup and embedding queue live in the shared helper)
+            save_background_knowledge(
+                conn, content=rec["content"], ktype=rec["type"], project=rec["project"],
+                session_id=session_id, tags=rec["tags"], context=rec.get("context", ""),
+                source="tool", confidence=0.9, created_at=timestamp,
+                extra={"last_confirmed": timestamp},
+            )
         saved += 1
 
     conn.commit()

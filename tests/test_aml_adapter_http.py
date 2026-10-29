@@ -235,9 +235,9 @@ def test_retention_purge_deletes_data_and_journals(app_parts):
     entry = next(e for e in deleted if e["user_ns"] == ns)
     assert entry["fragments"] == 1 and entry["requests"] == 1 and entry["bytes"] > 0
     assert not user_dir.exists()
-    journal = [json.loads(line) for line in service.registry.journal_path.read_text().splitlines()]
+    journal = [json.loads(line) for line in service.registry.journal_path.read_text(encoding="utf-8").splitlines()]
     assert any(line["user_ns"] == ns for line in journal)
-    assert "kiwis" not in service.registry.journal_path.read_text()
+    assert "kiwis" not in service.registry.journal_path.read_text(encoding="utf-8")
     assert search(client, "user-purge", "kiwis").json() == {"data": []}
     # The user can write again after a purge; nothing old comes back.
     assert add(client, "user-purge", "purge-2", [msg("New fact about apples.")]).status_code == 200

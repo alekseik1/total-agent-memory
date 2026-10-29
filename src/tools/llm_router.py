@@ -22,13 +22,15 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import sys
 import urllib.request
 import ssl
 from pathlib import Path
 
-OLLAMA_BIN = "/usr/local/bin/ollama"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tool_support import make_ssl_context, ollama_generate  # noqa: E402
+
 TELEGRAM_ENV_PATH = Path(__file__).parent.parent.parent / "telegram" / ".env"
 
 LOG = lambda msg: sys.stderr.write(f"[llm-router] {msg}\n")
@@ -36,19 +38,24 @@ LOG = lambda msg: sys.stderr.write(f"[llm-router] {msg}\n")
 # Models
 CLAUDE_CHEAP = "claude-haiku-4-5-20251001"   # $0.25/$1.25 per 1M tokens
 CLAUDE_MID = "claude-sonnet-4-6-20250514"    # for complex tasks
-OLLAMA_MODEL = "vitalii-brain"               # local 32B, free, offline
+OLLAMA_MODEL = os.environ.get("MEMORY_TOOLS_OLLAMA_MODEL", "")  # empty -> configured MEMORY_LLM_MODEL
 OLLAMA_CLOUD = "deepseek-v3.1:671b-cloud"    # cloud 671B, free via Ollama Cloud
 
 
 def _load_dotenv(path: Path) -> dict[str, str]:
     env = {}
     if path.exists():
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip().strip('"').strip("'")
     return env
+
+
+def _make_ssl_context() -> ssl.SSLContext:
+    """Verified TLS context for api.anthropic.com (the API key travels in the request)."""
+    return make_ssl_context()
 
 
 def _get_api_key() -> str | None:
@@ -110,13 +117,7 @@ def generate_claude(
         },
     )
 
-    try:
-        import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+    ctx = _make_ssl_context()
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             result = json.loads(resp.read())
@@ -140,24 +141,11 @@ def generate_claude(
 
 def generate_local(
     prompt: str,
-    model: str = OLLAMA_MODEL,
+    model: str | None = None,
     timeout: int = 180,
 ) -> str:
-    """Generate text via Ollama CLI. Free, offline."""
-    try:
-        env = os.environ.copy()
-        env["NO_COLOR"] = "1"
-        result = subprocess.run(
-            [OLLAMA_BIN, "run", model, prompt],
-            capture_output=True, text=True, timeout=timeout, env=env,
-        )
-        return _strip_ansi(result.stdout).strip()
-    except subprocess.TimeoutExpired:
-        LOG(f"Ollama timeout ({timeout}s)")
-        return ""
-    except Exception as e:
-        LOG(f"Ollama error: {e}")
-        return ""
+    """Generate text via the Ollama CLI. Free, offline."""
+    return ollama_generate(prompt, model or OLLAMA_MODEL or None, timeout, log=LOG)
 
 
 # ---------------------------------------------------------------------------
@@ -170,23 +158,13 @@ def generate_cloud(
     timeout: int = 120,
 ) -> str:
     """Generate text via Ollama Cloud (DeepSeek 671B). Free, powerful."""
-    try:
-        env = os.environ.copy()
-        env["NO_COLOR"] = "1"
-        result = subprocess.run(
-            [OLLAMA_BIN, "run", model, prompt],
-            capture_output=True, text=True, timeout=timeout, env=env,
-        )
-        answer = _strip_thinking(_strip_ansi(result.stdout)).strip()
-        if answer:
-            LOG(f"Cloud [{model}]: ~{len(answer)//3} tokens")
-        return answer
-    except subprocess.TimeoutExpired:
-        LOG(f"Ollama Cloud timeout ({timeout}s)")
-        return ""
-    except Exception as e:
-        LOG(f"Ollama Cloud error: {e}")
-        return ""
+    answer = ollama_generate(
+        prompt, model, timeout, log=LOG,
+        postprocess=lambda text: _strip_thinking(text),
+    )
+    if answer:
+        LOG(f"Cloud [{model}]: ~{len(answer)//3} tokens")
+    return answer
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +279,7 @@ def _load_rules_from_files(stack: str = "") -> str:
     # Always load general architecture from CLAUDE.md (Architecture Standards section)
     claude_md = Path.home() / ".claude" / "CLAUDE.md"
     if claude_md.exists():
-        content = claude_md.read_text()
+        content = claude_md.read_text(encoding="utf-8")
         # Extract Architecture Standards section
         match = re.search(
             r"## Architecture Standards.*?(?=\n## |\Z)",
@@ -316,7 +294,7 @@ def _load_rules_from_files(stack: str = "") -> str:
             if key in stack.lower():
                 filepath = rules_dir / filename
                 if filepath.exists():
-                    rules_text += filepath.read_text()[:3000] + "\n\n"
+                    rules_text += filepath.read_text(encoding="utf-8")[:3000] + "\n\n"
                 break
 
     return rules_text

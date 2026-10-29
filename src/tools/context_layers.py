@@ -22,6 +22,7 @@ import json
 import os
 import sqlite3
 import re
+import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,11 @@ from typing import Any
 # Paths
 # ---------------------------------------------------------------------------
 
-MEMORY_DIR = Path.home() / ".claude-memory"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from paths import memory_dir  # noqa: E402
+
+MEMORY_DIR = memory_dir()
 DB_PATH = MEMORY_DIR / "memory.db"
 IDENTITY_PATH = MEMORY_DIR / "vito_identity.txt"
 LAYER1_PATH = MEMORY_DIR / "vito_layer1.txt"

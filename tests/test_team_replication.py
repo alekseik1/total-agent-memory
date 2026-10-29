@@ -133,12 +133,12 @@ def test_file_replica_config_has_no_s3_fields(tmp_path):
 
 
 def test_compose_template_is_the_rendered_template():
-    assert (ROOT / 'docker' / 'litestream.team.yml').read_text() == replication.render_compose_template()
+    assert (ROOT / 'docker' / 'litestream.team.yml').read_text(encoding="utf-8") == replication.render_compose_template()
 
 
 def test_compose_sidecar_passes_every_variable_the_template_uses():
     yaml = pytest.importorskip('yaml')
-    compose = yaml.safe_load((ROOT / 'docker-compose.team.yml').read_text())
+    compose = yaml.safe_load((ROOT / 'docker-compose.team.yml').read_text(encoding="utf-8"))
     sidecar = compose['services']['litestream']
     assert sidecar['profiles'] == ['litestream']
     assert './docker/litestream.team.yml:/etc/litestream.yml:ro' in sidecar['volumes']
@@ -159,7 +159,7 @@ def test_write_config_is_private_and_creates_the_watched_directory(tmp_path):
         assert stat.S_IMODE(out.stat().st_mode) == 0o600
         assert stat.S_IMODE((root / 'workspaces').stat().st_mode) == 0o700
     # The config quotes paths as JSON strings (valid YAML), so Windows backslashes appear escaped.
-    assert f"dir: {json.dumps(str(root.resolve() / 'workspaces'))}" in out.read_text()
+    assert f"dir: {json.dumps(str(root.resolve() / 'workspaces'))}" in out.read_text(encoding="utf-8")
     with pytest.raises(Conflict, match='identity database'):
         replication.write_config(tmp_path / 'empty', ReplicationSettings.from_env(S3_ENV), out)
 
@@ -195,7 +195,7 @@ def test_team_server_never_forces_a_wal_checkpoint():
     """Litestream owns checkpoints; a TRUNCATE/RESTART checkpoint from the app would race its WAL copy."""
     sources = [*sorted((SRC / 'team_memory').rglob('*.py')), SRC / 'server.py']
     offenders = [str(path) for path in sources
-                 if re.search(r'wal_checkpoint\s*\(\s*(TRUNCATE|RESTART|FULL)', path.read_text(), re.IGNORECASE)]
+                 if re.search(r'wal_checkpoint\s*\(\s*(TRUNCATE|RESTART|FULL)', path.read_text(encoding="utf-8"), re.IGNORECASE)]
     assert offenders == []
 
 
@@ -207,7 +207,7 @@ def test_replica_listing_groups_both_litestream_layouts(tmp_path):
     ltx(base, 'identity.db', 7, level='0001')
     ltx(base, f'workspaces/{TEAM_KEY}/memory.db', 3, level='ltx/0')
     ltx(base, 'workspaces/not-a-key/memory.db', 1)
-    (base / 'identity.db' / 'notes.txt').write_text('ignored')
+    (base / 'identity.db' / 'notes.txt').write_text('ignored', encoding="utf-8")
     found = replication.replica_databases(ReplicationSettings(url=base.as_uri()), FileStore(base))
     assert list(found) == ['identity.db', f'workspaces/{TEAM_KEY}/memory.db']
     assert found['identity.db'].files == 2 and found['identity.db'].bytes == 8
@@ -239,7 +239,7 @@ def fake_litestream(tmp_path: Path, sources: dict[str, Path], calls: list) -> Li
     # shutil.which only accepts a PATHEXT extension on Windows, as for the real litestream.exe.
     binary = tmp_path / 'bin' / ('litestream.exe' if sys.platform == 'win32' else 'litestream')
     binary.parent.mkdir()
-    binary.write_text('#!/bin/sh\nexit 0\n')
+    binary.write_text('#!/bin/sh\nexit 0\n', encoding="utf-8")
     binary.chmod(0o755)
 
     def run(command, **kwargs):
@@ -281,7 +281,7 @@ def test_restore_rebuilds_a_server_from_the_replica(tmp_path):
     assert not (destination / 'workspaces' / f'personal_{HEX}').exists()
     if sys.platform != 'win32':  # NTFS has no POSIX mode bits
         assert stat.S_IMODE((destination / 'identity.db').stat().st_mode) == 0o600
-    marker = json.loads((destination / 'restored-from.json').read_text())
+    marker = json.loads((destination / 'restored-from.json').read_text(encoding="utf-8"))
     assert marker['timestamp'] == '2026-09-25T14:30:00Z' and marker['replica'] == replica.as_uri()
     identity_call = calls[0]
     assert identity_call[identity_call.index('-timestamp') + 1] == '2026-09-25T14:30:00Z'

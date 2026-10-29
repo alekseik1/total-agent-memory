@@ -22,7 +22,7 @@ def db(request):
     connection.execute(f'PRAGMA foreign_keys={int(request.param)}')
     connection.executescript("CREATE TABLE knowledge(id INTEGER PRIMARY KEY,content TEXT,project TEXT DEFAULT 'p',"
         "type TEXT DEFAULT 'fact',branch TEXT DEFAULT '',status TEXT DEFAULT 'active',created_at TEXT,session_id TEXT,tags TEXT DEFAULT '[]');")
-    connection.executescript((Path(__file__).parents[1] / 'migrations/033_evidence_passages.sql').read_text())
+    connection.executescript((Path(__file__).parents[1] / 'migrations/033_evidence_passages.sql').read_text(encoding="utf-8"))
     yield connection
     connection.close()
 
@@ -151,3 +151,12 @@ def test_focused_evidence_is_not_discarded_when_first_pass_fills_limit(db):
                                                        missing_relation=MissingRelation('Morgan', 'launch date'))
     assert [hit['id'] for hit in result.evidence] == [first['id'], answer['id']]
     assert 'April 7' in result.context
+
+
+def test_rank_ignores_passages_of_another_model_with_the_same_width(db):
+    record = save(db, 'user: Golden Retriever Max.')
+    PassageIndex(db, embed, 'first').ensure([record])
+    other = PassageIndex(db, embed, 'second')
+    assert other.rank('Golden Retriever', [record['id']]) == []
+    other.ensure([record])
+    assert other.rank('Golden Retriever', [record['id']])

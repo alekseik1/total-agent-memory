@@ -37,10 +37,10 @@ def main() -> None:
     if args.kind == "longmemeval" and args.questions is None:
         parser.error("LongMemEval requires --questions to preserve the original retrieval query")
     queries = (
-        {row["question_id"]: row["question"] for row in json.loads(args.questions.read_text())}
+        {row["question_id"]: row["question"] for row in json.loads(args.questions.read_text(encoding="utf-8"))}
         if args.questions else None
     )
-    rows: list[ContextRow] = json.loads(args.input.read_text())
+    rows: list[ContextRow] = json.loads(args.input.read_text(encoding="utf-8"))
     with tempfile.TemporaryDirectory(prefix="tam-context-eval-") as temporary:
         os.environ["TAM_MEMORY_DIR"] = temporary
         source = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
@@ -89,7 +89,7 @@ def main() -> None:
                 if len(row["context"].encode("utf-8")) > 24000:
                     raise ValueError("Context exceeds byte budget")
             args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(json.dumps(rows, ensure_ascii=False))
+            args.output.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
         finally:
             store.db.close()
 

@@ -36,9 +36,9 @@ def live_server(store_backend, monkeypatch, tmp_path):  # noqa: F811 — pytest 
 def repo(tmp_path):
     root = tmp_path / "repo"
     (root / "src" / "auth").mkdir(parents=True)
-    (root / "src" / "auth" / "middleware.py").write_text("def check_token(request):\n    return True\n")
-    (root / "src" / "auth" / "routes.py").write_text("ROUTES = ['/login', '/logout']\n")
-    (root / "README.md").write_text("# Demo service\n")
+    (root / "src" / "auth" / "middleware.py").write_text("def check_token(request):\n    return True\n", encoding="utf-8")
+    (root / "src" / "auth" / "routes.py").write_text("ROUTES = ['/login', '/logout']\n", encoding="utf-8")
+    (root / "README.md").write_text("# Demo service\n", encoding="utf-8")
     return root
 
 
@@ -81,7 +81,7 @@ def test_record_then_recall_is_fresh_with_relative_paths(live_server, repo):
 def test_changed_and_missing_files_make_the_memo_stale(live_server, repo):
     server, _ = live_server
     record(server, repo, files=["src/auth/middleware.py", "src/auth/routes.py", "README.md"])
-    (repo / "src" / "auth" / "middleware.py").write_text("def check_token(request):\n    return False\n")
+    (repo / "src" / "auth" / "middleware.py").write_text("def check_token(request):\n    return False\n", encoding="utf-8")
     (repo / "README.md").unlink()
     found, _ = call(server, "memory_exploration_recall", question="How is authentication wired?",
                     project="demo", root=str(repo))
@@ -106,25 +106,26 @@ def test_moved_checkout_is_verified_against_the_recall_root(live_server, repo, t
 
 
 @pytest.mark.parametrize("outside", ["../secret.txt", "{tmp}/secret.txt", "link.txt"])
-def test_files_outside_the_root_are_refused(live_server, repo, tmp_path, outside):
+def test_files_outside_the_root_are_refused(live_server, repo, tmp_path, outside, make_symlink):
     server, store = live_server
     secret = tmp_path / "secret.txt"
-    secret.write_text("not part of the repo")
-    (repo / "link.txt").symlink_to(secret)
+    secret.write_text("not part of the repo", encoding="utf-8")
+    if outside == "link.txt":
+        make_symlink(repo / "link.txt", secret)
     result, is_error = record(server, repo, files=[outside.format(tmp=tmp_path)])
     assert is_error
     assert "outside the project root" in result
     assert store.db.execute("SELECT COUNT(*) FROM exploration_memos").fetchone()[0] == 0
 
 
-def test_symlink_swapped_in_after_recording_is_not_followed(live_server, repo, tmp_path):
+def test_symlink_swapped_in_after_recording_is_not_followed(live_server, repo, tmp_path, make_symlink):
     server, _ = live_server
     record(server, repo)
     target = repo / "src" / "auth" / "routes.py"
     outside = tmp_path / "elsewhere.py"
-    outside.write_text(target.read_text())
+    outside.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
     target.unlink()
-    target.symlink_to(outside)
+    make_symlink(target, outside)
     found, _ = call(server, "memory_exploration_recall", question="How is authentication wired?",
                     project="demo", root=str(repo))
     hit = found["results"][0]
@@ -210,7 +211,7 @@ class _Db:
     def connect():
         import sqlite3
         db = sqlite3.connect(":memory:")
-        sql = (Path(__file__).parent.parent / "migrations" / "042_import_ledger_exploration_memo.sql").read_text()
+        sql = (Path(__file__).parent.parent / "migrations" / "042_import_ledger_exploration_memo.sql").read_text(encoding="utf-8")
         db.executescript(sql)
         return db
 

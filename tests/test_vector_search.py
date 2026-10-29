@@ -22,7 +22,7 @@ def db(tmp_path):
         "CREATE TABLE embeddings(knowledge_id INTEGER PRIMARY KEY,binary_vector BLOB,float32_vector BLOB,"
         "embed_dim INTEGER,embed_model TEXT,embedding_space TEXT);"
     )
-    connection.executescript(MIGRATION.read_text())
+    connection.executescript(MIGRATION.read_text(encoding="utf-8"))
     yield connection
     connection.close()
 
@@ -162,7 +162,7 @@ def test_migration_preserves_records_and_is_idempotent(db):
     seed(db, 1, [1, 0]); db.commit()
     before = [tuple(row) for row in db.execute("SELECT * FROM embeddings")]
     revision = db.execute("SELECT revision FROM vector_index_revision").fetchone()[0]
-    db.executescript(MIGRATION.read_text())
+    db.executescript(MIGRATION.read_text(encoding="utf-8"))
     assert [tuple(row) for row in db.execute("SELECT * FROM embeddings")] == before
     assert db.execute("SELECT revision FROM vector_index_revision").fetchone()[0] == revision
     db.execute("UPDATE knowledge SET project='b'")

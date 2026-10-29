@@ -6,6 +6,8 @@ from collections import Counter
 
 LOGGER = logging.getLogger("team_memory.metrics")
 LATENCY_BUCKETS = (0.01, 0.05, 0.1, 0.5, 1, 5, 30, 120)
+HTTP_METHODS = frozenset(("GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"))
+OTHER_METHOD = "OTHER"
 ROUTE_CLASSES = (("/dashboard/api/", "dashboard_api"), ("/dashboard", "dashboard_page"), ("/mcp", "mcp"),
                  ("/api/call", "api_call"), ("/healthz", "healthz"), ("/learning", "learning"))
 
@@ -14,6 +16,11 @@ def route_class(path: str) -> str:
     if path == "/":
         return "index"
     return next((name for prefix, name in ROUTE_CLASSES if path.startswith(prefix)), "other")
+
+
+def method_label(method: str) -> str:
+    """Clients choose their HTTP method; only the standard ones may become a metric label."""
+    return method if method in HTTP_METHODS else OTHER_METHOD
 
 
 class Metrics:
@@ -30,6 +37,7 @@ class Metrics:
         LOGGER.info(json.dumps({"event": name, **labels}))
 
     def observe(self, route: str, method: str, status: int, seconds: float) -> None:
+        method = method_label(method)
         with self.lock:
             self.counters[("http_requests_total", (("method", method), ("route", route), ("status", str(status))))] += 1
             for bound in LATENCY_BUCKETS:

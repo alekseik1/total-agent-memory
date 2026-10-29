@@ -290,6 +290,10 @@ class TestGraphStoreBulk:
         assert len(results) >= 1
         assert any(n["name"] == "authentication" for n in results)
 
+    def test_search_nodes_treats_wildcards_literally(self, graph_store, populated_graph):
+        assert graph_store.search_nodes("_") == []
+        assert graph_store.search_nodes("%") == []
+
     def test_search_nodes_by_type(self, graph_store, populated_graph):
         results = graph_store.search_nodes("go", type="technology")
         assert len(results) == 1

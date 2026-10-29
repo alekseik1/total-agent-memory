@@ -68,11 +68,11 @@ def main():
     parser.add_argument('--record-usage', action='store_true')
     parser.add_argument('--count', type=int, default=100)
     args = parser.parse_args()
-    rows = json.loads((ROOT / f'docs/benchmarks/context-v14/{args.kind}-contexts.json').read_text())
+    rows = json.loads((ROOT / f'docs/benchmarks/context-v14/{args.kind}-contexts.json').read_text(encoding="utf-8"))
     rows = [rows[index] for index in np.linspace(0, len(rows) - 1, args.count, dtype=int)]
     raw = {}
     if args.kind == 'longmemeval':
-        raw = {row['question_id']: row['question'] for row in json.loads((ROOT / 'benchmarks/data/longmemeval_s.json').read_text())}
+        raw = {row['question_id']: row['question'] for row in json.loads((ROOT / 'benchmarks/data/longmemeval_s.json').read_text(encoding="utf-8"))}
     context = multiprocessing.get_context('spawn')
     processes, connections, measurements = {}, {}, []
     try:
@@ -110,7 +110,7 @@ def main():
                   'summary': summary, 'rows': measurements,
                   'id_differences': [row['id'] for row in measurements if row['before']['ids'] != row['after']['ids']],
                   'score_differences': [row['id'] for row in measurements if row['before']['scores'] != row['after']['scores']]}
-        args.output.write_text(json.dumps(report, indent=2))
+        args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
         sys.stdout.write(json.dumps({key: value for key, value in report.items() if key != 'rows'}) + '\n')
     finally:
         for name, connection in connections.items():

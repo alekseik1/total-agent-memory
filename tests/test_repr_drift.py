@@ -37,9 +37,9 @@ def repr_db():
             status TEXT DEFAULT 'active', created_at TEXT
         );
     """)
-    conn.executescript((MIGRATIONS_DIR / "002_multi_representation.sql").read_text())
-    conn.executescript((MIGRATIONS_DIR / "005_representations_queue.sql").read_text())
-    conn.executescript((MIGRATIONS_DIR / "027_repr_freshness.sql").read_text())
+    conn.executescript((MIGRATIONS_DIR / "002_multi_representation.sql").read_text(encoding="utf-8"))
+    conn.executescript((MIGRATIONS_DIR / "005_representations_queue.sql").read_text(encoding="utf-8"))
+    conn.executescript((MIGRATIONS_DIR / "027_repr_freshness.sql").read_text(encoding="utf-8"))
     yield conn
     conn.close()
 

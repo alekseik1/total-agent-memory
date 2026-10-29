@@ -169,13 +169,13 @@ def test_module_registers_all_v8_hooks_as_powershell_on_windows(tmp_path):
     assert main(["--client", "claude-code", "--memory-dir", str(home / ".tam"), "--command", "C:/py/python.exe",
                  "--arg", "C:/tam/src/server.py", "--env", "CLAUDE_MEMORY_DIR=C:/tam-data"],
                 environ={"TAM_MEMORY_DIR": str(home / ".tam")}, host=host) == 0
-    hooks = json.loads((home / ".claude" / "settings.json").read_text())["hooks"]
+    hooks = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"]
     for event in ("SessionStart", "SessionEnd", "Stop", "UserPromptSubmit", "PreToolUse", "PostToolUse"):
         commands = [h["command"] for block in hooks[event] for h in block["hooks"]]
         assert commands and all(c.startswith("powershell -ExecutionPolicy Bypass -NoProfile -File") for c in commands)
         assert all(c.rstrip('"').endswith(".ps1") for c in commands)
     assert (home / ".claude" / "hooks" / "session-start.ps1").is_file()
-    entry = json.loads((home / ".claude.json").read_text())["mcpServers"]["memory"]
+    entry = json.loads((home / ".claude.json").read_text(encoding="utf-8"))["mcpServers"]["memory"]
     assert entry["command"] == "C:/py/python.exe" and entry["env"]["CLAUDE_MEMORY_DIR"] == "C:/tam-data"
 
 
@@ -198,11 +198,12 @@ def test_three_background_tasks_registered(install_text: str):
 
 
 def test_uninstall_removes_all_tasks(install_text: str):
-    """Uninstall branch must Unregister-ScheduledTask for each task.
+    """Uninstall branch must stop and unregister each task.
 
     The function body is allowed to reference tasks by variable (e.g.
     ``$TaskReflection``) as long as those variables are defined at script
-    scope and point at the expected literal task names.
+    scope and point at the expected literal task names. Removal goes through
+    ``Remove-TamScheduledTask``, which stops a running instance first.
     """
     match = re.search(
         r"function\s+Invoke-Uninstall.*?^\}",
@@ -211,7 +212,9 @@ def test_uninstall_removes_all_tasks(install_text: str):
     )
     assert match, "Invoke-Uninstall body not found"
     body = match.group(0)
-    assert "Unregister-ScheduledTask" in body
+    assert "Remove-TamScheduledTask" in body
+    helper = _function_body(install_text, "Remove-TamScheduledTask")
+    assert helper.index("Stop-ScheduledTask") < helper.index("Unregister-ScheduledTask")
 
     task_vars = ("$TaskReflection", "$TaskOrphanBackfill", "$TaskCheckUpdates")
     task_literals = (

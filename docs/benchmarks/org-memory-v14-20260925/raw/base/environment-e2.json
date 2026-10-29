@@ -15,7 +15,7 @@
  "memory_mode": "fast",
  "llm": "disabled (MEMORY_LLM_ENABLED=false)",
  "tam_team_max_workers_default": 3,
- "src_path": "/private/tmp/claude-501/-Users-vitalii-macpro-PROJECT-claude-memory/f7d28575-4acf-466d-bd6c-d420683474a4/scratchpad/pre/src",
+ "src_path": "/private/tmp/claude-501/-Users-<host>-PROJECT-claude-memory/f7d28575-4acf-466d-bd6c-d420683474a4/scratchpad/pre/src",
  "team_memory_sha256": "78bae42cc760bd4b3cbcd6f87cc422742754da1654da917f386844ab261920ff",
  "worktree_src_diff_stat": "src/team_memory/cli.py      | 4 ++++\n src/team_memory/registry.py | 9 +++++++++\n src/team_memory/service.py  | 9 +++++++--\n 3 files changed, 20 insertions(+), 2 deletions(-)",
  "seed": 20260925,

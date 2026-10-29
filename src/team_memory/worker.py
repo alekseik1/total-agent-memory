@@ -5,9 +5,10 @@ import multiprocessing
 import os
 import sqlite3
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager, ExitStack, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,7 +25,11 @@ from team_memory.contracts import (
     Actor,
     Conflict,
     DomainError,
+    Forbidden,
+    NotFound,
+    RateLimited,
     Reply,
+    Unauthorized,
     Unavailable,
     Work,
     Workspace,
@@ -34,7 +39,14 @@ from team_memory.lifecycle import ServerLease
 
 DEFAULT_WORKERS = 3
 DEFAULT_OPERATION_TIMEOUT = 120
+# How long a call waits for the worker of its workspace (or for a free worker slot) before it is refused.
+DEFAULT_QUEUE_TIMEOUT = 30
+CAPACITY_POLL_SECONDS = 0.05
 STOP_TIMEOUT_SECONDS = 5
+BUSY_MESSAGE = "Server busy; retry shortly"
+# Reply.code -> the error the worker raised; unknown codes (including "unavailable") stay Unavailable.
+DOMAIN_ERRORS: dict[str, type[DomainError]] = {
+    error.code: error for error in (Conflict, Forbidden, NotFound, RateLimited, Unauthorized, DomainError)}
 MAINTENANCE_MESSAGE = "Maintenance in progress; retry shortly"
 LOGIN_FAILED_CODE = "login_failed"
 # sysexits EX_TEMPFAIL: the worker stopped because its workspace lease was lost.
@@ -264,19 +276,31 @@ def serve_locked(connection, root: str, database: StoreDatabase | None = None):
 
 
 class WorkerPool:
+    """Pool of single-threaded workspace workers.
+
+    A worker serves one call at a time, so calls are serialised per workspace through ``call_locks``; calls
+    for different workspaces run in parallel. ``lock`` only guards the pool's bookkeeping and is never held
+    while waiting for a worker's reply. Callers queue for at most ``queue_timeout`` seconds and are then
+    refused with ``Unavailable``. A worker with a call running or queued is never evicted.
+    """
+
     def __init__(self, root: Path, maximum: int = DEFAULT_WORKERS, timeout: float = DEFAULT_OPERATION_TIMEOUT,
                  environment: Callable[[], Mapping[str, str]] | None = None,
                  plane: ControlPlane | None = None, provisioner: WorkspaceProvisioner | None = None,
-                 registry: "Registry | None" = None, maintenance: MaintenanceGate | None = None):
+                 registry: "Registry | None" = None, maintenance: MaintenanceGate | None = None,
+                 queue_timeout: float = DEFAULT_QUEUE_TIMEOUT):
         """``registry`` should be the gateway's own: a Registry built here opens a second control plane.
         ``plane`` defaults to ``registry.plane``; ``provisioner`` defaults to the active backend's
         ``plane.workspaces`` read at every spawn, so a live switch is honoured."""
-        if maximum < 1 or timeout <= 0:
-            raise ValueError("Worker count and timeout must be positive")
-        self.root, self.maximum, self.timeout = root, maximum, timeout
+        if maximum < 1 or timeout <= 0 or queue_timeout <= 0:
+            raise ValueError("Worker count and timeouts must be positive")
+        self.root, self.maximum, self.timeout, self.queue_timeout = root, maximum, timeout, queue_timeout
         self.environment = environment or dict
         self.workers = OrderedDict()
         self.lock = threading.Lock()
+        self.call_locks: dict[str, threading.Lock] = {}
+        self.interest: dict[str, int] = {}
+        self.freed = threading.Condition()
         self.context = multiprocessing.get_context("spawn")
         if registry is None:
             from team_memory.registry import Registry
@@ -295,49 +319,68 @@ class WorkerPool:
         with self.lock:
             return sorted(workspaces, key=lambda workspace: workspace.key not in self.workers)
 
+    @contextmanager
+    def turn(self, key: str, wait: float | None = None):
+        """Exclusive use of the worker of ``key``; queues for ``wait`` (default ``queue_timeout``) seconds."""
+        with self.lock:
+            self.interest[key] = self.interest.get(key, 0) + 1
+            call_lock = self.call_locks.setdefault(key, threading.Lock())
+        acquired = False
+        try:
+            acquired = call_lock.acquire(timeout=self.queue_timeout if wait is None else wait)
+            if not acquired:
+                LOGGER.warning(json.dumps({"event": "workspace_queue_timeout", "workspace": key}))
+                raise Unavailable(BUSY_MESSAGE)
+            yield
+        finally:
+            if acquired:
+                call_lock.release()
+            with self.lock:
+                self.interest[key] -= 1
+                if self.interest[key] == 0:
+                    del self.interest[key]
+                    if key not in self.workers:
+                        self.call_locks.pop(key, None)
+            with self.freed:
+                self.freed.notify_all()
+
     def invoke(self, work: Work, credential: str | Callable[[], Actor]):
+        with self.turn(work.workspace.key):
+            return self._invoke_in_turn(work, credential)
+
+    def _invoke_in_turn(self, work: Work, credential: str | Callable[[], Actor]):
         key = work.workspace.key
         target: tuple[int | None, StoreDatabase] | None = None
         repaired = False
         while True:
+            # Authorised under the workspace's turn, right before the work is sent to its worker.
+            actor = credential() if callable(credential) else self.registry.authenticate(credential)
+            self.registry.authorize(actor, work.workspace.scope,
+                                    work.operation in ("memory_save", "memory_update", "memory_delete"))
+            if actor != work.actor:
+                raise Conflict("Identity changed; retry the request")
             with self.lock:
-                actor = credential() if callable(credential) else self.registry.authenticate(credential)
-                self.registry.authorize(actor, work.workspace.scope,
-                                        work.operation in ("memory_save", "memory_update", "memory_delete"))
-                if actor != work.actor:
-                    raise Conflict("Identity changed; retry the request")
-                if key in self.workers or (target is not None and target[0] == self.generation()):
-                    try:
-                        return self.call(key, work, None if target is None else target[1])
-                    except WorkspaceLoginFailed as exc:
-                        # The role exists but its password drifted (restore, manual ALTER ROLE): the
-                        # fingerprint check in ensure() cannot see that, so force one repair and respawn.
-                        # The work never ran, so resending it is safe.
-                        if repaired:
-                            raise Unavailable("Workspace unavailable; check history before retrying a write") from exc
-                        repaired = True
-                elif self.maintenance is not None and self.maintenance.state() is not None:
-                    raise Unavailable(MAINTENANCE_MESSAGE)
-                generation = self.generation()
-            # Provisioning may run DDL; it must not hold the pool lock that every workspace's calls share.
+                running = key in self.workers
+            if running or (target is not None and target[0] == self.generation()):
+                try:
+                    return self.call(key, work, None if target is None else target[1])
+                except WorkspaceLoginFailed as exc:
+                    # The role exists but its password drifted (restore, manual ALTER ROLE): the
+                    # fingerprint check in ensure() cannot see that, so force one repair and respawn.
+                    # The work never ran, so resending it is safe.
+                    if repaired:
+                        raise Unavailable("Workspace unavailable; check history before retrying a write") from exc
+                    repaired = True
+            elif self.maintenance is not None and self.maintenance.state() is not None:
+                raise Unavailable(MAINTENANCE_MESSAGE)
+            generation = self.generation()
+            # Provisioning may run DDL; it holds neither the pool lock nor any other workspace's turn.
             target = (generation, self.store_database(key))
 
     def call(self, key: str, work: Work, database: StoreDatabase | None):
-        """Send ``work`` to the worker of ``key``, spawning it on ``database``; caller holds ``self.lock``."""
-        if key not in self.workers:
-            if self.maintenance is not None and self.maintenance.state() is not None:
-                raise Unavailable(MAINTENANCE_MESSAGE)
-            if len(self.workers) >= self.maximum:
-                _, worker = self.workers.popitem(last=False)
-                self.stop(worker)
-            parent, child = self.context.Pipe()
-            process = self.context.Process(target=serve, args=(child, str(self.root / "workspaces" / key),
-                                                               dict(self.environment()), database), daemon=True)
-            process.start()
-            child.close()
-            self.workers[key] = (process, parent)
-        self.workers.move_to_end(key)
-        process, connection = self.workers[key]
+        """Send ``work`` to the worker of ``key``, spawning it on ``database``; caller holds its ``turn``."""
+        worker = self._worker(key, database)
+        _, connection = worker
         try:
             connection.send(work.model_dump_json())
             if not connection.poll(self.timeout):
@@ -346,7 +389,7 @@ class WorkerPool:
             if reply.code == LOGIN_FAILED_CODE:
                 raise WorkspaceLoginFailed(reply.error or "Workspace role login failed")
         except (EOFError, OSError, Unavailable) as exc:
-            self.stop(self.workers.pop(key))
+            self._discard(key, worker)
             if isinstance(exc, WorkspaceLoginFailed):
                 self.forget(key, repair=True)
                 raise
@@ -355,10 +398,52 @@ class WorkerPool:
             self.forget(key, repair=True)
             raise Unavailable("Workspace unavailable; check history before retrying a write") from exc
         if reply.error:
-            if reply.code == "conflict":
-                raise Conflict(reply.error)
-            raise Unavailable(reply.error)
+            raise DOMAIN_ERRORS.get(reply.code or "", Unavailable)(reply.error)
         return reply.data
+
+    def _worker(self, key: str, database: StoreDatabase | None):
+        """The live worker of ``key``, spawned if needed. A full pool evicts the least recently used worker
+        that has no call running or queued, and otherwise waits for one to finish."""
+        deadline = time.monotonic() + self.queue_timeout
+        while True:
+            with self.lock:
+                worker = self.workers.get(key)
+                if worker is not None:
+                    self.workers.move_to_end(key)
+                    return worker
+                if self.maintenance is not None and self.maintenance.state() is not None:
+                    raise Unavailable(MAINTENANCE_MESSAGE)
+                if len(self.workers) < self.maximum:
+                    return self._spawn(key, database)
+                victim = next((name for name in self.workers if name not in self.interest), None)
+                if victim is not None:
+                    self.stop(self.workers.pop(victim))
+                    self.call_locks.pop(victim, None)
+                    return self._spawn(key, database)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                LOGGER.warning(json.dumps({"event": "worker_capacity_timeout", "workspace": key}))
+                raise Unavailable(BUSY_MESSAGE)
+            with self.freed:
+                self.freed.wait(min(remaining, CAPACITY_POLL_SECONDS))
+
+    def _spawn(self, key: str, database: StoreDatabase | None):
+        """Start the worker of ``key``; caller holds ``self.lock``."""
+        parent, child = self.context.Pipe()
+        process = self.context.Process(target=serve, args=(child, str(self.root / "workspaces" / key),
+                                                           dict(self.environment()), database), daemon=True)
+        process.start()
+        child.close()
+        self.workers[key] = (process, parent)
+        return self.workers[key]
+
+    def _discard(self, key: str, worker) -> None:
+        """Stop ``worker`` unless a recycle already took it out of the pool."""
+        with self.lock:
+            if self.workers.get(key) is not worker:
+                return
+            del self.workers[key]
+        self.stop(worker)
 
     def generation(self) -> int | None:
         return None if self.plane is None else self.plane.current().generation
@@ -426,16 +511,35 @@ class WorkerPool:
         process.close()
 
     def recycle(self) -> int:
+        """Stop every worker. A call in flight finishes first (up to ``timeout`` seconds), then the
+        worker is stopped, so a settings change never cuts a write in half."""
         with self.lock:
-            stopped = len(self.workers)
-            for worker in self.workers.values():
-                self.stop(worker)
-            self.workers.clear()
+            keys = list(self.workers)
+        stopped = 0
+        for key in keys:
+            try:
+                with self.turn(key, wait=self.timeout):
+                    stopped += self._stop_key(key)
+            except Unavailable:
+                # Hung beyond the operation timeout: its caller is told "unavailable"; stop it regardless.
+                stopped += self._stop_key(key)
         LOGGER.info(json.dumps({"event": "worker_pool_recycled", "stopped": stopped}))
         return stopped
 
+    def _stop_key(self, key: str) -> int:
+        with self.lock:
+            worker = self.workers.pop(key, None)
+        if worker is None:
+            return 0
+        self.stop(worker)
+        return 1
+
     def close(self):
         with self.lock:
-            for worker in self.workers.values():
-                self.stop(worker)
-            self.workers.clear()
+            keys = list(self.workers)
+        for key in keys:
+            try:
+                with self.turn(key):
+                    self._stop_key(key)
+            except Unavailable:
+                self._stop_key(key)

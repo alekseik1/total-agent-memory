@@ -17,7 +17,6 @@ import json
 import os
 import re
 import sqlite3
-import subprocess
 import sys
 import uuid
 from collections import Counter, defaultdict
@@ -25,9 +24,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-MEMORY_DIR = Path(os.environ.get("CLAUDE_MEMORY_DIR", os.path.expanduser("~/.claude-memory")))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from background_writes import save_background_knowledge  # noqa: E402
+from tool_support import ollama_generate  # noqa: E402
+
+from paths import memory_dir  # noqa: E402
+
+MEMORY_DIR = memory_dir()
 MONITORED_PROJECTS_PATH = MEMORY_DIR / "monitored_projects.json"
-OLLAMA_BIN = "/usr/local/bin/ollama"
 TELEGRAM_ENV_PATH = Path(__file__).parent.parent.parent / "telegram" / ".env"
 
 LOG = lambda msg: sys.stderr.write(
@@ -78,7 +83,7 @@ def _load_dotenv(path: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     if not path.is_file():
         return result
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -93,7 +98,6 @@ def _load_dotenv(path: Path) -> dict[str, str]:
 
 def _telegram_send(token: str, chat_id: int, text: str, parse_mode: str = "HTML") -> bool:
     """Send a Telegram message via Bot API."""
-    import ssl
     import urllib.request
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -106,11 +110,8 @@ def _telegram_send(token: str, chat_id: int, text: str, parse_mode: str = "HTML"
         url, data=payload, headers={"Content-Type": "application/json"},
     )
     try:
-        try:
-            import certifi
-            ctx = ssl.create_default_context(cafile=certifi.where())
-        except ImportError:
-            ctx = ssl.create_default_context()
+        from tls_context import verified_context
+        ctx = verified_context()
         with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
             result = json.loads(resp.read())
             return result.get("ok", False)
@@ -124,25 +125,9 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07", "", text)
 
 
-def _ollama_generate(prompt: str, model: str = "vitalii-brain", timeout: int = 120) -> str:
-    """Generate text with Ollama CLI."""
-    try:
-        env = os.environ.copy()
-        env["NO_COLOR"] = "1"
-        result = subprocess.run(
-            [OLLAMA_BIN, "run", model, prompt],
-            capture_output=True, text=True, timeout=timeout, env=env,
-        )
-        return _strip_ansi(result.stdout).strip()
-    except subprocess.TimeoutExpired:
-        LOG(f"Ollama timeout after {timeout}s")
-        return ""
-    except FileNotFoundError:
-        LOG(f"Ollama binary not found at {OLLAMA_BIN}")
-        return ""
-    except Exception as e:
-        LOG(f"Ollama error: {e}")
-        return ""
+def _ollama_generate(prompt: str, model: str | None = None, timeout: int = 120) -> str:
+    """Generate text with the Ollama CLI (prompt on stdin). Returns "" on failure."""
+    return ollama_generate(prompt, model, timeout, log=LOG)
 
 
 def _save_knowledge_record(
@@ -158,23 +143,11 @@ def _save_knowledge_record(
     db = sqlite3.connect(db_path)
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        db.execute(
-            """INSERT INTO knowledge
-               (session_id, type, content, project, tags, source,
-                confidence, created_at, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
-            (
-                f"{source}_{now}_{uuid.uuid4().hex[:6]}",
-                record_type,
-                content,
-                project,
-                json.dumps(tags or []),
-                source,
-                confidence,
-                now,
-            ),
+        save_background_knowledge(
+            db, content=content, ktype=record_type, project=project,
+            session_id=f"{source}_{now}_{uuid.uuid4().hex[:6]}",
+            tags=tags or [], source=source, confidence=confidence, created_at=now,
         )
-        db.commit()
     except Exception as e:
         LOG(f"Error saving knowledge ({source}): {e}")
     finally:
@@ -209,7 +182,7 @@ def _load_monitored_projects() -> list[dict[str, str]]:
     """
     if MONITORED_PROJECTS_PATH.is_file():
         try:
-            with open(MONITORED_PROJECTS_PATH) as f:
+            with open(MONITORED_PROJECTS_PATH, encoding="utf-8") as f:
                 projects = json.load(f)
             if isinstance(projects, list):
                 valid = [
@@ -755,7 +728,7 @@ def _detect_anti_patterns(proj_path: Path) -> list[str]:
                 continue
 
             try:
-                line_count = sum(1 for _ in open(fpath, errors="replace"))
+                line_count = sum(1 for _ in open(fpath, errors="replace", encoding="utf-8"))
                 if line_count > 500:
                     rel = fpath.relative_to(proj_path)
                     anti_patterns.append(f"God file: {rel} ({line_count} lines)")

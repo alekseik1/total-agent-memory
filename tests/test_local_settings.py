@@ -25,7 +25,7 @@ def test_secret_is_encrypted_at_rest_and_masked_in_the_view(tmp_path):
     store = local_settings.LocalSettings(tmp_path, {})
     assert store.update({"ANTHROPIC_API_KEY": KEY, "MEMORY_LLM_PROVIDER": "anthropic"}) == \
         ["ANTHROPIC_API_KEY", "MEMORY_LLM_PROVIDER"]
-    raw = (tmp_path / "settings.json").read_text()
+    raw = (tmp_path / "settings.json").read_text(encoding="utf-8")
     assert KEY not in raw
     if os.name == "posix":
         assert stat.S_IMODE((tmp_path / "settings.json").stat().st_mode) == 0o600
@@ -88,16 +88,16 @@ def test_a_foreign_master_key_leaves_the_secret_unreadable(tmp_path):
 
 
 def test_a_corrupt_file_never_blocks_startup(tmp_path):
-    (tmp_path / "settings.json").write_text("{not json")
+    (tmp_path / "settings.json").write_text("{not json", encoding="utf-8")
     assert local_settings.apply({}, tmp_path) == []
-    (tmp_path / "settings.json").write_text(json.dumps({"version": 99}))
+    (tmp_path / "settings.json").write_text(json.dumps({"version": 99}), encoding="utf-8")
     assert local_settings.apply({}, tmp_path) == []
 
 
 def test_raw_log_retention_removes_only_old_files(tmp_path):
     old, fresh = tmp_path / "old.jsonl", tmp_path / "fresh.jsonl"
-    old.write_text("{}\n")
-    fresh.write_text("{}\n")
+    old.write_text("{}\n", encoding="utf-8")
+    fresh.write_text("{}\n", encoding="utf-8")
     now = time.time()
     os.utime(old, (now - 40 * 86_400, now - 40 * 86_400))
     assert erasure.prune_raw_logs(tmp_path, None) == 0
@@ -126,7 +126,7 @@ def test_memory_dir_is_made_owner_only(tmp_path):
     root.mkdir(mode=0o755)
     (root / "memory.db").write_bytes(b"x")
     os.chmod(root / "memory.db", 0o644)
-    (root / "notes.txt").write_text("left alone")
+    (root / "notes.txt").write_text("left alone", encoding="utf-8")
     os.chmod(root / "notes.txt", 0o644)
     assert restrict_permissions(root) == []
     assert stat.S_IMODE(root.stat().st_mode) == 0o700

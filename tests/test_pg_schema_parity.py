@@ -41,7 +41,7 @@ PG_ONLY_COLUMNS = {"embeddings": ("embedding",)}
 PG_ONLY_TRIGGERS = frozenset({"episodes_v11_fts_insert", "episodes_v11_fts_update", "episodes_v11_fts_delete"})
 TYPE_MAP = {"INTEGER": "bigint", "BOOLEAN": "bigint", "TEXT": "text", "REAL": "double precision",
             "BLOB": "bytea", "JSON": "text"}
-EXPECTED_TRIGGERS = 31
+EXPECTED_TRIGGERS = 32
 WORKSPACE_KEY = "parity-workspace"
 MASTER_KEY_BYTES = 32
 
@@ -481,11 +481,11 @@ def test_concurrent_ensure_applies_once(pg_database):
 def test_migration_files_must_be_numbered_without_gaps(tmp_path: Path):
     from tam_db import pg_schema
 
-    (tmp_path / "0001_baseline.sql").write_text("SELECT 1;")
-    (tmp_path / "0003_later.sql").write_text("SELECT 1;")
+    (tmp_path / "0001_baseline.sql").write_text("SELECT 1;", encoding="utf-8")
+    (tmp_path / "0003_later.sql").write_text("SELECT 1;", encoding="utf-8")
     with pytest.raises(pg_schema.WorkspaceSchemaError, match="without gaps"):
         pg_schema.workspace_migrations(tmp_path)
-    (tmp_path / "notes.sql").write_text("SELECT 1;")
+    (tmp_path / "notes.sql").write_text("SELECT 1;", encoding="utf-8")
     with pytest.raises(pg_schema.WorkspaceSchemaError, match="Unexpected file"):
         pg_schema.workspace_migrations(tmp_path)
     with pytest.raises(pg_schema.WorkspaceSchemaError, match="missing"):
@@ -496,7 +496,7 @@ def test_failed_migration_rolls_back_and_raises(pg_database, tmp_path: Path):
     from tam_db import pg_connection, pg_schema
     from tam_db.contracts import PgOperationalError
 
-    (tmp_path / "0001_broken.sql").write_text("CREATE TABLE half_done (id bigint); SELECT no_such_function();")
+    (tmp_path / "0001_broken.sql").write_text("CREATE TABLE half_done (id bigint); SELECT no_such_function();", encoding="utf-8")
     connection = pg_connection.connect(provision_unmigrated(pg_database.url, "broken"))
     try:
         with pytest.raises(PgOperationalError, match="migration failed"):
@@ -633,3 +633,14 @@ def test_fts_side_tables_follow_the_scenario(workspace):
         count, total = workspace.execute_native(
             f"SELECT count(*), COALESCE(sum(doc_length), 0) FROM {table}").fetchone()
         assert stats[source] == (count, total)
+
+
+def test_embedding_fingerprints_table_exists_with_its_key(workspace):
+    columns = {column[0]: column for column in _pg_columns(workspace, "embedding_fingerprints")}
+    assert list(columns) == ["space", "model", "provider", "dim", "pooling", "library", "probe_vector", "recorded_at"]
+    assert columns["probe_vector"][1] == "bytea"
+    workspace.execute("INSERT INTO embedding_fingerprints(space,model,provider,dim,probe_vector,recorded_at) "
+                      "VALUES ('s','m','p',3,?,'now')", (b"x",))
+    with pytest.raises(PgIntegrityError):
+        workspace.execute("INSERT INTO embedding_fingerprints(space,model,provider,dim,probe_vector,recorded_at) "
+                          "VALUES ('s','m','p',3,?,'now')", (b"x",))

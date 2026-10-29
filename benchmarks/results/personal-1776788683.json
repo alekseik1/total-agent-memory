@@ -1150,8 +1150,8 @@
       "src_id": 3415,
       "project": "Mattermost",
       "type": "fact",
-      "question": "What is the file path to the Mattermost project directory on vitalii-macpro?",
-      "answer": "/Users/vitalii-macpro/VBCHEREPANOV/Mattermost",
+      "question": "What is the file path to the Mattermost project directory on <host>?",
+      "answer": "~/VBCHEREPANOV/Mattermost",
       "retrieved_ids": [
         3415
       ],
@@ -2906,7 +2906,7 @@
       "project": "gitlab",
       "type": "fact",
       "question": "What is the file path to the gitlab project directory?",
-      "answer": "/Users/vitalii-macpro/PROJECT/gitlab",
+      "answer": "~/PROJECT/gitlab",
       "retrieved_ids": [
         3407
       ],
@@ -3744,7 +3744,7 @@
       "project": "claude-statusline",
       "type": "fact",
       "question": "What is the full path to the claude-statusline project directory?",
-      "answer": "/Users/vitalii-macpro/PROJECT/claude-statusline",
+      "answer": "~/PROJECT/claude-statusline",
       "retrieved_ids": [
         3406,
         3632,
@@ -3769,7 +3769,7 @@
       "project": "olymp-update_20260410_100314",
       "type": "fact",
       "question": "What is the path to the olymp-update_20260410_100314 project on the local machine?",
-      "answer": "/Users/vitalii-macpro/Projects/olymp-update_20260410_100314",
+      "answer": "~/Projects/olymp-update_20260410_100314",
       "retrieved_ids": [
         3444
       ],

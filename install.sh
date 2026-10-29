@@ -170,10 +170,9 @@ install_systemd_user_services() {
             echo "  WARN: template missing: $tpl"
             continue
         fi
-        sed -e "s|@INSTALL_DIR@|$INSTALL_DIR|g" \
-            -e "s|@MEMORY_DIR@|$MEMORY_DIR|g" \
-            -e "s|@HOME@|$HOME|g" \
-            "$tpl" > "$target_dir/$unit"
+        python3 "$INSTALL_DIR/scripts/render_template.py" --mode systemd \
+            --var "@INSTALL_DIR@=$INSTALL_DIR" --var "@MEMORY_DIR@=$MEMORY_DIR" --var "@HOME@=$HOME" \
+            < "$tpl" > "$target_dir/$unit"
     done <<EOF
 $(_systemd_units)
 EOF
@@ -438,10 +437,9 @@ if [ "$TEST_MODE" != "1" ] && [ "$IDE" = "claude-code" ] && [ "$OS_NAME" = "Darw
         # Substitute placeholders so plists work regardless of git checkout
         # name (used to hardcode `claude-memory-server`) and memory dir
         # (used to hardcode `~/.claude-memory` instead of `~/.tam`).
-        sed -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
-            -e "s|__MEMORY_DIR__|$MEMORY_DIR|g" \
-            -e "s|__HOME__|$HOME|g" \
-            "$TPL" > "$DEST"
+        python3 "$INSTALL_DIR/scripts/render_template.py" --mode xml \
+            --var "__INSTALL_DIR__=$INSTALL_DIR" --var "__MEMORY_DIR__=$MEMORY_DIR" --var "__HOME__=$HOME" \
+            < "$TPL" > "$DEST"
         LABEL=$(basename "$NAME" .plist)
         launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
         launchctl bootstrap "gui/$(id -u)" "$DEST" 2>/dev/null || \
@@ -543,7 +541,7 @@ echo "  Web dashboard:"
 echo "    http://localhost:37737"
 echo ""
 if [ "$TEST_MODE" != "1" ]; then
-    "$DASHBOARD_SERVICE" print-management 2>/dev/null || true
+    "$DASHBOARD_SERVICE" print-management "$MEMORY_DIR" 2>/dev/null || true
 fi
 echo ""
 echo "  Optional: Copy CLAUDE.md.template to your project"

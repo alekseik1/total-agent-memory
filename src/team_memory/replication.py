@@ -536,7 +536,7 @@ def restore(settings: ReplicationSettings, destination: Path, store: ObjectStore
                 directory.rmdir()
         (staging / "restored-from.json").write_text(json.dumps({
             "replica": settings.url, "timestamp": moment or "latest", "version": VERSION,
-            "restored_at": datetime.now(UTC).isoformat(), "databases": restored}, indent=2))
+            "restored_at": datetime.now(UTC).isoformat(), "databases": restored}, indent=2), encoding="utf-8")
         if destination.exists():
             raise FileExistsError(destination)
         staging.rename(destination)

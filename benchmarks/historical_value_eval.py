@@ -116,7 +116,7 @@ def main() -> int:
     payload = {"cross_rerank": args.cross_rerank, "summary": summary, "rows": rows,
                "seconds": round(time.perf_counter() - started, 1)}
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=1, ensure_ascii=False))
+    args.output.write_text(json.dumps(payload, indent=1, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(summary, indent=1))
     return 0
 

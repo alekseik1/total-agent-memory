@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from memory_core.event_time import normalize_event_time
-from memory_core.query_terms import lexical_terms
+from memory_core.query_terms import fts_match_query, lexical_terms
 from memory_core.retrieval import MemoryHit, SearchScope
 from memory_core.telemetry import counters, op_timer
 from tam_db.contracts import Backend
@@ -184,10 +184,9 @@ class FactRepository:
             return self._search(query, scope, limit)
 
     def _search(self, query: str, scope: SearchScope, limit: int) -> list[MemoryHit]:
-        terms = lexical_terms(query)
-        if not terms or limit <= 0:
+        if not lexical_terms(query) or limit <= 0:
             return []
-        expression = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
+        expression = fts_match_query(query)
         predicates, scope_params = scope.sql()
         if getattr(self.db, "backend", None) is Backend.POSTGRES:
             from memory_core.pg_fts import match_source

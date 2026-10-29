@@ -124,8 +124,12 @@ class Chunk:
     parent: str | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    def to_dict(self, include_content: bool = True) -> dict[str, Any]:
+        """Serialise the chunk; `include_content=False` returns metadata only (no source text)."""
+        data = asdict(self)
+        if not include_content:
+            data.pop("content", None)
+        return data
 
 
 def lang_for_path(path: str | os.PathLike) -> str | None:
@@ -220,9 +224,13 @@ class ASTIngester:
     """Parse source files into semantic chunks."""
 
     def __init__(self, *, fallback_to_file: bool = True,
-                 max_file_bytes: int = 2_000_000) -> None:
+                 max_file_bytes: int = 2_000_000,
+                 fallback_unknown_extensions: bool = False) -> None:
         self.fallback_to_file = fallback_to_file
         self.max_file_bytes = max_file_bytes
+        # Files without a known source-language extension (keys, dumps, .env) are skipped
+        # unless the caller explicitly opts in to whole-file chunks for them.
+        self.fallback_unknown_extensions = fallback_unknown_extensions
 
     # ──────────────────────────────────────────────
 
@@ -242,8 +250,16 @@ class ASTIngester:
 
         language = lang_for_path(p)
         if language is None:
+            if not self.fallback_unknown_extensions:
+                LOG(f"skipping file with unknown extension: {p.name}")
+                return []
             return self._fallback_chunk(str(p), None, source)
-        return self.parse_source(str(p), language, source)
+        try:
+            return self.parse_source(str(p), language, source)
+        except RecursionError:
+            # Deeply nested generated code must not abort the whole directory walk.
+            LOG(f"skipping file nested too deeply to parse: {p}")
+            return []
 
     def parse_source(self, file: str, language: str, source: bytes) -> list[Chunk]:
         """Parse raw bytes of known `language`."""
@@ -291,9 +307,14 @@ class ASTIngester:
         }
         include_set = set(include or []) or None
 
+        root_resolved = root_p.resolve()
         all_chunks: list[Chunk] = []
         for file_path in root_p.rglob("*"):
             if not file_path.is_file():
+                continue
+            # A symlink may point anywhere on disk; only files that really live under the root are read.
+            if not file_path.resolve().is_relative_to(root_resolved):
+                LOG(f"skipping path that resolves outside the root: {file_path}")
                 continue
             if any(part in exclude_set for part in file_path.parts):
                 continue

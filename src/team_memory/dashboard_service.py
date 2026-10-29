@@ -78,15 +78,16 @@ class DashboardService:
         self.database, self.migration, self.maintenance = database, migration, maintenance
         self.insights = InsightService(registry, accounts, settings, memory.pool)
 
-    def login_password(self, request: PasswordLogin, ip: str) -> Session:
-        return self._login("password", lambda: self.accounts.login_password(request.user_id, request.password, ip))
+    def login_password(self, request: PasswordLogin, ip: str, device: str | None = None) -> Session:
+        return self._login("password", lambda: self.accounts.login_password(request.user_id, request.password, ip,
+                                                                            device))
 
     def login_token(self, request: TokenLogin, ip: str) -> Session:
         return self._login("token", lambda: self.accounts.login_token(request.token, ip))
 
-    def redeem_invite(self, request: InviteRedeem, ip: str) -> Session:
+    def redeem_invite(self, request: InviteRedeem, ip: str, device: str | None = None) -> Session:
         return self._login("invite", lambda: self.accounts.redeem_invite(request.user_id, request.code,
-                                                                          request.password, ip))
+                                                                          request.password, ip, device))
 
     def _login(self, method: str, action: Callable[[], Session]) -> Session:
         try:
@@ -132,9 +133,10 @@ class DashboardService:
             self.registry.revoke_token_id(request.id, owner_id=actor.user_id)
         return {"revoked": request.id}
 
-    def change_password(self, session: Session, request: PasswordChange, ip: str) -> dict:
+    def change_password(self, session: Session, request: PasswordChange, ip: str, device: str | None = None) -> dict:
         with self.registry.acting_as(session.actor.user_id):
-            self.accounts.change_password(session.actor, request.current, request.new, session.session_id, ip)
+            self.accounts.change_password(session.actor, request.current, request.new, session.session_id, ip,
+                                          device)
         return {"changed": True}
 
     def team_people(self, actor: Actor, request: TeamRef) -> dict:
@@ -172,10 +174,7 @@ class DashboardService:
     def create_user(self, actor: Actor, request: UserCreate) -> Invite:
         self._admin(actor, "user_create")
         with self.registry.acting_as(actor.user_id):
-            self.registry.add_user(request.id, request.name)
-            if request.org_role != "member":
-                self.registry.set_org_role(request.id, request.org_role)
-            return self.accounts.issue_invite(request.id)
+            return self.accounts.create_user(request.id, request.name, request.org_role)
 
     def issue_invite(self, actor: Actor, request: UserRef) -> Invite:
         self._admin(actor, "invite")

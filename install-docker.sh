@@ -2,8 +2,9 @@
 #
 # total-agent-memory — Docker Installer
 #
-# Registers the Dockerized MCP server in Claude Code's settings and
-# wires up hooks in Docker-exec mode.
+# Registers the Dockerized MCP server in ~/.claude.json (where Claude Code reads
+# MCP servers) and adds hooks in Docker-exec mode to ~/.claude/settings.json.
+# Existing hooks are kept, both files are backed up, invalid JSON aborts the run.
 #
 # Prerequisites:
 #   - Docker Engine / Docker Desktop running
@@ -14,7 +15,7 @@
 #   bash install-docker.sh                    # assumes stack is already up
 #   bash install-docker.sh --with-compose     # also runs docker compose up -d --build
 #
-set -e
+set -euo pipefail
 
 echo ""
 echo "======================================================="
@@ -23,7 +24,6 @@ echo "======================================================="
 echo ""
 
 INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
-CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 
 WITH_COMPOSE=0
 for arg in "$@"; do
@@ -71,35 +71,18 @@ until curl -fsS http://127.0.0.1:3737/healthz >/dev/null 2>&1; do
 done
 [ "$ATTEMPTS" -le 60 ] && echo "  OK: MCP responding"
 
-# -- 4. Register MCP server in Claude Code settings --
-echo "-> Step 4: Registering MCP server in $CLAUDE_SETTINGS..."
-mkdir -p "$HOME/.claude"
-
-python3 - "$CLAUDE_SETTINGS" <<'PY'
-import json, os, sys
-
-settings_path = sys.argv[1]
-new_server = {
-    "type": "http",
-    "url": "http://127.0.0.1:3737/mcp",
-}
-
-settings = {}
-if os.path.exists(settings_path):
-    try:
-        with open(settings_path) as f:
-            settings = json.load(f)
-    except Exception:
-        pass
-
-settings.setdefault("mcpServers", {})
-settings["mcpServers"]["memory"] = new_server
-
-with open(settings_path, "w") as f:
-    json.dump(settings, f, indent=2)
-
-print(f"  OK: MCP 'memory' → http://127.0.0.1:3737/mcp")
-PY
+# -- 4. Access token (the container's servers bind beyond loopback and require it) --
+echo "-> Step 4: Reading the MCP access token from the container..."
+CONTAINER="${TAM_CONTAINER:-tam-mcp}"
+MCP_URL="${TAM_MCP_URL:-http://127.0.0.1:3737/mcp}"
+MCP_TOKEN="${TAM_HTTP_TOKEN:-}"
+if [ -z "$MCP_TOKEN" ]; then
+    MCP_TOKEN="$(docker exec "$CONTAINER" cat /data/state/http-token 2>/dev/null || true)"
+fi
+if [ -z "$MCP_TOKEN" ]; then
+    echo "  WARN: no access token found in container '$CONTAINER' (/data/state/http-token)."
+    echo "        The MCP entry is written without one; set TAM_HTTP_TOKEN and re-run if /mcp shows 401."
+fi
 
 # -- 5. Register hooks in Docker-exec mode --
 echo "-> Step 5: Registering hooks (Docker mode)..."
@@ -116,6 +99,8 @@ HOOK_PROMPT="$INSTALL_DIR/hooks/user-prompt-submit.sh"
 HOOK_RULES="$INSTALL_DIR/hooks/rule-reminder.sh"
 HOOK_ACTIONS="$INSTALL_DIR/hooks/post-tool-use.sh"
 HOOK_CODEX="$INSTALL_DIR/hooks/codex-notify.sh"
+# Provenance: adds _ctx (agent, session, workspace) to mcp__memory__* tool input; payload-only, no docker exec.
+HOOK_PROVENANCE="$INSTALL_DIR/hooks/inject-provenance.sh"
 
 # Hooks read TAM_DOCKER=1 at runtime and switch to `docker exec`.
 # We wrap each via a small launcher that exports the env var.
@@ -124,7 +109,7 @@ HOOK_CODEX="$INSTALL_DIR/hooks/codex-notify.sh"
 LAUNCHER_DIR="$INSTALL_DIR/hooks/_docker-launchers"
 mkdir -p "$LAUNCHER_DIR"
 for src in "$HOOK_SESSION" "$HOOK_SESSION_END" "$HOOK_STOP" "$HOOK_BASH" "$HOOK_WRITE" \
-           "$HOOK_PROMPT" "$HOOK_RULES" "$HOOK_ACTIONS" "$HOOK_CODEX"; do
+           "$HOOK_PROMPT" "$HOOK_RULES" "$HOOK_ACTIONS" "$HOOK_CODEX" "$HOOK_PROVENANCE"; do
     name=$(basename "$src")
     dest="$LAUNCHER_DIR/$name"
     cat > "$dest" <<LAUNCHER
@@ -139,43 +124,13 @@ LAUNCHER
     chmod +x "$dest"
 done
 
-python3 - "$CLAUDE_SETTINGS" "$LAUNCHER_DIR" <<'PY'
-import json, os, sys
-
-settings_path, launcher_dir = sys.argv[1], sys.argv[2]
-settings = {}
-if os.path.exists(settings_path):
-    with open(settings_path) as f:
-        settings = json.load(f)
-
-settings.setdefault("hooks", {})
-h = settings["hooks"]
-
-def L(name):
-    return {"type": "command", "command": os.path.join(launcher_dir, name)}
-
-h["SessionStart"]  = [{"matcher": "", "hooks": [L("session-start.sh")]}]
-h["SessionEnd"]    = [{"matcher": "", "hooks": [L("session-end.sh")]}]
-h["Stop"]          = [{"matcher": "", "hooks": [L("on-stop.sh")]}]
-h["UserPromptSubmit"] = [{"matcher": "", "hooks": [L("user-prompt-submit.sh")]}]
-h["PreToolUse"]    = [{"matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit", "hooks": [L("rule-reminder.sh")]}]
-h["PostToolUse"]   = [
-    {"matcher": "Bash",       "hooks": [L("memory-trigger.sh")]},
-    {"matcher": "Write|Edit", "hooks": [L("auto-capture.sh")]},
-    {"matcher": "",           "hooks": [L("post-tool-use.sh")]},
-]
-# Claude Code reports a failed call through PostToolUseFailure, not PostToolUse.
-h["PostToolUseFailure"] = [
-    {"matcher": "Bash", "hooks": [L("memory-trigger.sh")]},
-    {"matcher": "",     "hooks": [L("post-tool-use.sh")]},
-]
-
-with open(settings_path, "w") as f:
-    json.dump(settings, f, indent=2)
-
-print("  OK: Hooks registered (SessionStart, SessionEnd, Stop, UserPromptSubmit, PreToolUse:Bash|Edit|Write, "
-      "PostToolUse:Bash/Write|Edit/*, PostToolUseFailure:Bash/*)")
-PY
+# One merge for hooks and MCP: refuses on invalid JSON, backs files up first, never removes user hooks.
+echo "-> Step 5b: Registering MCP server and hooks (settings are backed up first)..."
+if ! printf '%s' "$MCP_TOKEN" | PYTHONPATH="$INSTALL_DIR/src" python3 -m setup_wizard.docker_install \
+        --home "$HOME" --launcher-dir "$LAUNCHER_DIR" --url "$MCP_URL" --token-stdin; then
+    echo "  ERROR: Claude Code configuration was not changed (see the message above)."
+    exit 1
+fi
 
 # Codex CLI has its own config; the installer only prepares the launcher.
 echo "  Codex CLI (optional): add to ~/.codex/config.toml"
@@ -189,7 +144,7 @@ echo "  INSTALLED (Docker mode)"
 echo ""
 echo "  Services:"
 echo "    MCP          http://127.0.0.1:3737/mcp"
-echo "    Dashboard    http://127.0.0.1:37737"
+echo "    Dashboard    http://127.0.0.1:37737/login?token=<contents of /data/state/http-token>"
 echo "    Ollama       http://127.0.0.1:11434"
 echo ""
 echo "  Management:"

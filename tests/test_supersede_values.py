@@ -131,3 +131,14 @@ def test_memory_get_reports_what_superseded_a_record(srv):
     new_id = save(srv, new, supersede=True)["id"]
     out = json.loads(asyncio.run(srv._do("memory_get", {"ids": [old_id, new_id]})))
     assert [(row["status"], row["superseded_by"]) for row in out["results"]] == [("superseded", new_id), ("active", None)]
+
+
+@pytest.mark.parametrize(("new", "old"), [
+    ("Деплой релиза через пятницу", "Деплой релиза через четверг"),
+    ("Время обеда перенесено на среду", "Время обеда перенесено на четверг"),
+])
+def test_flag_retires_the_old_russian_value_with_e_words(srv, new, old):
+    old_id = save(srv, old)["id"]
+    result = save(srv, new, supersede=True)
+    assert result["superseded"] == [old_id]
+    assert active(srv) == [new]

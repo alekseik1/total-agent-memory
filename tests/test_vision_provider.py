@@ -53,6 +53,6 @@ def test_disabled_vision_does_not_read_file_or_call_provider(monkeypatch):
 
 def test_image_type_comes_from_bytes_not_filename(tmp_path):
     path = tmp_path / 'pretend.png'
-    path.write_text('not an image')
+    path.write_text('not an image', encoding="utf-8")
     with pytest.raises(ValueError):
         ImageInput.read(path)

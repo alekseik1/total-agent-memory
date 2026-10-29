@@ -103,6 +103,11 @@ def _get_int_env(name: str, default: int) -> int:
         return default
 
 
+def _half_life_env(name: str, default: int) -> int:
+    """Half-life in days; zero, negative or malformed values fall back to `default` (and are logged)."""
+    return int(_env_number(name, default, minimum=1, integer=True))
+
+
 def _get_phase_timeout_env(name: str, phase_default: float) -> float:
     raw = os.environ.get(name)
     if raw is not None:
@@ -174,13 +179,13 @@ def get_repr_half_life_days(repr_type: str | None) -> int:
     default = _REPR_HALF_LIFE_DEFAULTS.get(rt)
     if default is None:
         return get_parent_half_life_days()
-    return _get_int_env(f"MEMORY_DECAY_{rt.upper()}_DAYS", default)
+    return _half_life_env(f"MEMORY_DECAY_{rt.upper()}_DAYS", default)
 
 
 def get_parent_half_life_days() -> int:
     """Half-life for records matched through non-representation tiers
     (fts, fuzzy, graph, episode). Default 90d preserves legacy behavior."""
-    return _get_int_env("MEMORY_DECAY_PARENT_DAYS", 90)
+    return _half_life_env("MEMORY_DECAY_PARENT_DAYS", 90)
 
 
 def get_edge_half_life_days() -> int:
@@ -191,7 +196,7 @@ def get_edge_half_life_days() -> int:
     dormant ones. ``last_reinforced_at`` (falling back to ``created_at``)
     drives the curve.
     """
-    return _get_int_env("MEMORY_EDGE_HALF_LIFE_DAYS", 60)
+    return _half_life_env("MEMORY_EDGE_HALF_LIFE_DAYS", 60)
 
 
 # ──────────────────────────────────────────────
@@ -222,6 +227,28 @@ def get_recall_excluded_tags() -> tuple[str, ...]:
         return _RECALL_EXCLUDED_TAGS_DEFAULT
     parts = tuple(p.strip() for p in raw.split(",") if p.strip())
     return parts
+
+
+def has_excluded_tag(rec_tags: object, excluded: tuple[str, ...]) -> bool:
+    """True when one of the record's tags equals (case-insensitively) an excluded tag.
+
+    `rec_tags` is the stored JSON array string, a list, or a bare string; tags are
+    compared whole, so ``disaster-recovery`` is not hit by the excluded ``recovery``.
+    """
+    if not rec_tags or not excluded:
+        return False
+    tags: object = rec_tags
+    if isinstance(rec_tags, str):
+        try:
+            tags = json.loads(rec_tags)
+        except json.JSONDecodeError:
+            tags = [rec_tags]
+    if isinstance(tags, str):
+        tags = [tags]
+    if not isinstance(tags, (list, tuple, set)):
+        return False
+    present = {str(tag).strip().lower() for tag in tags}
+    return any(tag.strip().lower() in present for tag in excluded)
 
 
 # ──────────────────────────────────────────────
@@ -1423,6 +1450,32 @@ def _env_number(name: str, default: float, *, minimum: float, integer: bool = Fa
                                             extra={"setting": name, "value": raw})
         return default
     return value
+
+
+# SQLite contention knobs. Without a journal_size_limit the WAL sits at its
+# high-water mark (measured 334MB next to a 171MB db); a 5000ms busy_timeout was
+# too tight for 8-10 processes sharing one store; the startup checkpoint is
+# opportunistic, so it fails fast.
+DEFAULT_DB_BUSY_TIMEOUT_MS = 15000
+DEFAULT_DB_JOURNAL_SIZE_LIMIT_BYTES = 48 * 1024 * 1024
+DEFAULT_DB_STARTUP_CHECKPOINT_TIMEOUT_MS = 200
+
+
+def get_db_busy_timeout_ms() -> int:
+    """MEMORY_DB_BUSY_TIMEOUT_MS: how long a write waits on the SQLite lock."""
+    return int(_env_number("MEMORY_DB_BUSY_TIMEOUT_MS", DEFAULT_DB_BUSY_TIMEOUT_MS, minimum=0, integer=True))
+
+
+def get_db_journal_size_limit_bytes() -> int:
+    """MEMORY_DB_JOURNAL_SIZE_LIMIT_BYTES: WAL size SQLite truncates back to after a checkpoint."""
+    return int(_env_number("MEMORY_DB_JOURNAL_SIZE_LIMIT_BYTES", DEFAULT_DB_JOURNAL_SIZE_LIMIT_BYTES,
+                           minimum=-1, integer=True))
+
+
+def get_db_startup_checkpoint_timeout_ms() -> int:
+    """MEMORY_DB_STARTUP_CHECKPOINT_TIMEOUT_MS: busy_timeout for the startup TRUNCATE checkpoint."""
+    return int(_env_number("MEMORY_DB_STARTUP_CHECKPOINT_TIMEOUT_MS",
+                           DEFAULT_DB_STARTUP_CHECKPOINT_TIMEOUT_MS, minimum=0, integer=True))
 
 
 def _env_flag(name: str, default: bool) -> bool:

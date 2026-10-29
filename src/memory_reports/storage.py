@@ -29,16 +29,21 @@ def report_path(memory_dir: Path, report: Report) -> Path:
     return memory_dir / REPORTS_DIR / slug(report.project or ALL_PROJECTS) / name
 
 
-def save_markdown(memory_dir: Path, report: Report, markdown: str) -> Path:
-    path = report_path(memory_dir, report)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
+def write_private(path: Path, text: str) -> None:
+    """Atomically write `text` to `path` as an owner-only (0600) file via a unique temporary file."""
     fd, temporary = tempfile.mkstemp(prefix=".report-", suffix=".md", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(markdown)
+            handle.write(text)
         os.chmod(temporary, FILE_MODE)
         os.replace(temporary, path)
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
         raise
+
+
+def save_markdown(memory_dir: Path, report: Report, markdown: str) -> Path:
+    path = report_path(memory_dir, report)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
+    write_private(path, markdown)
     return path

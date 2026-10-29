@@ -325,7 +325,7 @@ def test_migration_copies_verifies_activates_and_archives(setup):
     assert setup.registry.organization()["name"] == ORGANIZATION
     assert setup.events() == ["database_tested", "database_migration_started", "database_migration_finished",
                               "database_activated"]
-    journal = json.loads((setup.root / "migration" / f"{progress.job_id}.json").read_text())
+    journal = json.loads((setup.root / "migration" / f"{progress.job_id}.json").read_text(encoding="utf-8"))
     assert journal["phase"] == "done"
     assert (setup.root / "migration" / f"{progress.job_id}.json").stat().st_mode & 0o077 == 0
 
@@ -447,8 +447,8 @@ def test_interrupted_journal_is_closed_as_failed_on_start(tmp_path):
     job = MigrationProgress(job_id=uuid.uuid4(), plan_id=uuid.uuid4(), phase=MigrationPhase.COPY_WORKSPACES,
                             started_at=NOW, updated_at=NOW, started_by=ACTOR, target="postgresql://tam@db/tam",
                             completed_workspaces=("shared",))
-    (journal_dir / f"{job.job_id}.json").write_text(job.model_dump_json())
-    (journal_dir / "garbage.json").write_text("{not json")
+    (journal_dir / f"{job.job_id}.json").write_text(job.model_dump_json(), encoding="utf-8")
+    (journal_dir / "garbage.json").write_text("{not json", encoding="utf-8")
     service = MigrationService(tmp_path, checker=None, targets=None, gate=Maintenance(), switch=None,
                                audit=None, organization=lambda: ORGANIZATION, clock=lambda: NOW)
     progress = service.progress()

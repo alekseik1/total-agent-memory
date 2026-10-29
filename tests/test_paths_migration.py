@@ -34,39 +34,39 @@ def test_fresh_install_creates_tam(isolated_home):
 
 def test_existing_tam_used_as_is(isolated_home):
     (isolated_home / ".tam").mkdir()
-    (isolated_home / ".tam" / "memory.db").write_text("preexisting")
+    (isolated_home / ".tam" / "memory.db").write_text("preexisting", encoding="utf-8")
     import paths
     result = paths.memory_dir()
     assert result == isolated_home / ".tam"
-    assert (result / "memory.db").read_text() == "preexisting"
+    assert (result / "memory.db").read_text(encoding="utf-8") == "preexisting"
 
 
 def test_legacy_dir_migrates_to_tam_with_symlink(isolated_home):
     old = isolated_home / ".claude-memory"
     old.mkdir()
-    (old / "memory.db").write_text("data")
+    (old / "memory.db").write_text("data", encoding="utf-8")
     (old / "wikis").mkdir()
-    (old / "wikis" / "proj.md").write_text("wiki")
+    (old / "wikis" / "proj.md").write_text("wiki", encoding="utf-8")
 
     import paths
     result = paths.memory_dir()
 
     assert result == isolated_home / ".tam"
-    assert (result / "memory.db").read_text() == "data"
-    assert (result / "wikis" / "proj.md").read_text() == "wiki"
-    assert old.is_symlink()
+    assert (result / "memory.db").read_text(encoding="utf-8") == "data"
+    assert (result / "wikis" / "proj.md").read_text(encoding="utf-8") == "wiki"
+    assert paths._is_directory_alias(old)
     assert old.resolve() == result.resolve()
 
 
-def test_legacy_symlink_treated_as_already_migrated(isolated_home):
+def test_legacy_symlink_treated_as_already_migrated(isolated_home, make_symlink):
     (isolated_home / ".tam").mkdir()
-    (isolated_home / ".tam" / "memory.db").write_text("new")
-    (isolated_home / ".claude-memory").symlink_to(isolated_home / ".tam")
+    (isolated_home / ".tam" / "memory.db").write_text("new", encoding="utf-8")
+    make_symlink(isolated_home / ".claude-memory", isolated_home / ".tam", target_is_directory=True)
 
     import paths
     result = paths.memory_dir()
     assert result == isolated_home / ".tam"
-    assert (result / "memory.db").read_text() == "new"
+    assert (result / "memory.db").read_text(encoding="utf-8") == "new"
 
 
 def test_new_env_takes_priority(isolated_home, monkeypatch, tmp_path):
@@ -122,17 +122,17 @@ def test_migrate_now_fresh_install(isolated_home):
 def test_migrate_now_migrates_legacy(isolated_home):
     old = isolated_home / ".claude-memory"
     old.mkdir()
-    (old / "f.txt").write_text("x")
+    (old / "f.txt").write_text("x", encoding="utf-8")
     import paths
     status = paths.migrate_now()
     assert status["status"] == "migrated"
-    assert (isolated_home / ".tam" / "f.txt").read_text() == "x"
-    assert old.is_symlink()
+    assert (isolated_home / ".tam" / "f.txt").read_text(encoding="utf-8") == "x"
+    assert paths._is_directory_alias(old)
 
 
-def test_migrate_now_idempotent_after_symlink(isolated_home):
+def test_migrate_now_idempotent_after_symlink(isolated_home, make_symlink):
     (isolated_home / ".tam").mkdir()
-    (isolated_home / ".claude-memory").symlink_to(isolated_home / ".tam")
+    make_symlink(isolated_home / ".claude-memory", isolated_home / ".tam", target_is_directory=True)
     import paths
     status = paths.migrate_now()
     assert status["status"] == "already_migrated"
@@ -140,9 +140,9 @@ def test_migrate_now_idempotent_after_symlink(isolated_home):
 
 def test_migrate_now_detects_conflict(isolated_home):
     (isolated_home / ".tam").mkdir()
-    (isolated_home / ".tam" / "a").write_text("new")
+    (isolated_home / ".tam" / "a").write_text("new", encoding="utf-8")
     (isolated_home / ".claude-memory").mkdir()
-    (isolated_home / ".claude-memory" / "b").write_text("old")
+    (isolated_home / ".claude-memory" / "b").write_text("old", encoding="utf-8")
     import paths
     status = paths.migrate_now()
     assert status["status"] == "conflict"
@@ -153,3 +153,48 @@ def test_memory_db_returns_db_path(isolated_home):
     db = paths.memory_db()
     assert db == isolated_home / ".tam" / "memory.db"
     assert (isolated_home / ".tam").is_dir()
+
+
+def _refuse_symlinks(monkeypatch):
+    """Make os.symlink fail the way Windows does for a user without the privilege."""
+    def refuse(*args, **kwargs):
+        error = OSError(13, "A required privilege is not held by the client")
+        error.winerror = 1314
+        raise error
+
+    monkeypatch.setattr(os, "symlink", refuse)
+
+
+def _legacy_dir(home):
+    old = home / ".claude-memory"
+    old.mkdir()
+    (old / "memory.db").write_text("data", encoding="utf-8")
+    return old
+
+
+def test_migration_survives_a_refused_symlink(isolated_home, monkeypatch, capfd):
+    old = _legacy_dir(isolated_home)
+    _refuse_symlinks(monkeypatch)
+    import paths
+    result = paths.memory_dir()
+    assert result == isolated_home / ".tam"
+    assert (result / "memory.db").read_text(encoding="utf-8") == "data"
+    message = capfd.readouterr().err
+    if os.name == "nt":
+        assert "junction kept" in message
+        assert old.is_dir() and paths._is_directory_alias(old)
+    else:
+        assert "symlink NOT created" in message
+        assert not old.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="directory junctions exist on Windows only")
+def test_junction_left_by_the_migration_counts_as_migrated(isolated_home, monkeypatch):
+    old = _legacy_dir(isolated_home)
+    _refuse_symlinks(monkeypatch)
+    import paths
+    paths.memory_dir()
+    assert not old.is_symlink(), "a junction is not a symlink; the plain check would call this a conflict"
+    assert (old / "memory.db").read_text(encoding="utf-8") == "data"
+    paths._reset_for_tests()
+    assert paths.migrate_now()["status"] == "already_migrated"

@@ -68,7 +68,7 @@ def load_cases(data: dict) -> list[QualityCase]:
 
 
 def judge_audit(path: Path) -> dict:
-    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     if len({row["id"] for row in rows}) != len(rows):
         raise ValueError("Duplicate answer IDs")
     equivalent: dict[tuple[str, str, str], set[bool]] = defaultdict(set)
@@ -99,7 +99,7 @@ def judge_audit(path: Path) -> dict:
 def evaluate(dataset: Path, *, top_k: int = 5) -> dict:
     if not 1 <= top_k <= 50:
         raise ValueError("top_k must be between 1 and 50")
-    data = json.loads(dataset.read_text())
+    data = json.loads(dataset.read_text(encoding="utf-8"))
     cases = load_cases(data)
     import server
     from memory_core.evidence_chains import EvidenceChains
@@ -211,7 +211,7 @@ def main() -> None:
         result = evaluate(args.dataset, top_k=args.top_k)
         if args.answers:
             result["judge_audit"] = judge_audit(args.answers)
-        args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+        args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

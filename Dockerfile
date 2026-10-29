@@ -92,6 +92,9 @@ USER memory
 VOLUME ["/data"]
 # 3737  = MCP Streamable HTTP (POST/GET/DELETE /mcp + /healthz)
 # 37737 = web dashboard (/api/stats + /healthz)
+# Both bind 0.0.0.0 INSIDE the container (a published port needs that) and therefore require the
+# access token kept in /data/state/http-token (or TAM_HTTP_TOKEN). Publish on loopback only:
+#   docker run -p 127.0.0.1:3737:3737 -p 127.0.0.1:37737:37737 -v ~/.tam:/data <image>
 EXPOSE 3737 37737
 
 # Healthcheck: both /healthz endpoints must answer. They're DB-independent

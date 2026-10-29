@@ -92,3 +92,28 @@ def test_tag_at_string_boundaries():
     cleaned, n = redact_private_sections("<private>only</private>")
     assert n == 1
     assert cleaned == ""
+
+
+import pytest  # noqa: E402
+
+from background_writes import sanitize_text  # noqa: E402
+from extract_transcript import sanitize as transcript_sanitize  # noqa: E402
+from secret_redaction import PRIVATE_BLOCK_RE  # noqa: E402
+
+
+@pytest.mark.parametrize("text", [
+    "ok <private>a<private>b</private>LEAK</private> end",
+    "ok <PRIVATE>LEAK</PRIVATE> end",
+    "ok < private >LEAK</ private > end",
+    "ok <private >LEAK</private> end",
+    "ok <private>LEAK",
+])
+@pytest.mark.parametrize("strip", [
+    sanitize_text,
+    transcript_sanitize,
+    lambda t: PRIVATE_BLOCK_RE.sub("[REDACTED]", t),
+])
+def test_every_writer_strips_private_blocks_the_same_way(strip, text):
+    cleaned = strip(text)
+    assert "LEAK" not in cleaned
+    assert cleaned.startswith("ok ")

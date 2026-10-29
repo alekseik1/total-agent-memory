@@ -218,16 +218,21 @@ def _bm25_like(
     return scored[:n]
 
 
+MIN_FTS_TOKEN_LEN = 2
+
+
 def _sanitize_fts(query: str) -> str:
     """Convert free text into an FTS5-safe MATCH expression.
 
-    Strategy: keep alphanumeric tokens (length ≥ 2), wrap each in double
-    quotes to neutralise FTS5 special characters, OR them together. Never
+    Strategy: Russian terms become stem prefixes, others exact quoted
+    phrases (memory_core.query_terms), OR-ed together. Never
     raises — empty input ⇒ empty output ⇒ caller falls back to LIKE.
     """
-    tokens = _tokenize(query)
-    quoted = [f'"{t}"' for t in tokens if len(t) >= 2]
-    return " OR ".join(quoted)
+    from memory_core.query_terms import fts_match_query
+
+    if not any(len(token) >= MIN_FTS_TOKEN_LEN for token in _tokenize(query)):
+        return ""
+    return fts_match_query(query)
 
 
 def _tokenize(text: str) -> list[str]:

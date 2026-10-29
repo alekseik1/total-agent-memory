@@ -15,10 +15,10 @@ def tp_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     mig = Path(__file__).parent.parent / "migrations" / "012_task_phases.sql"
-    conn.executescript(mig.read_text())
+    conn.executescript(mig.read_text(encoding="utf-8"))
     # Also load procedural migration so complete_task hook is available.
     proc = Path(__file__).parent.parent / "migrations" / "009_procedural.sql"
-    conn.executescript(proc.read_text())
+    conn.executescript(proc.read_text(encoding="utf-8"))
     yield conn
     conn.close()
 

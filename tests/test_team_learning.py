@@ -171,7 +171,7 @@ def test_tools_registered_with_descriptions():
 def test_agent_skills_reference_existing_tools(name):
     import re
     from pathlib import Path
-    text = (Path(__file__).resolve().parents[1] / 'skills' / name / 'SKILL.md').read_text()
+    text = (Path(__file__).resolve().parents[1] / 'skills' / name / 'SKILL.md').read_text(encoding="utf-8")
     front = text.split('---')[1]
     assert f'name: {name}' in front and 'description:' in front
     referenced = set(re.findall(r'`((?:onboarding|memory)_[a-z_]+)', text))
@@ -702,12 +702,12 @@ def test_learning_assets_are_packaged_and_csp_safe():
 
     from team_memory.learning.api import SECTION, STATIC_DIR, STATIC_FILES
     root = Path(__file__).resolve().parents[1]
-    patterns = tomllib.loads((root / 'pyproject.toml').read_text())['tool']['setuptools']['package-data']['src']
+    patterns = tomllib.loads((root / 'pyproject.toml').read_text(encoding="utf-8"))['tool']['setuptools']['package-data']['src']
     assert {p.name for p in STATIC_DIR.iterdir() if p.is_file()} == set(STATIC_FILES)
     for name in STATIC_FILES:
         relative = (STATIC_DIR / name).relative_to(root / 'src').as_posix()
         assert any(fnmatch(relative, p) for p in patterns), relative
-    script = (STATIC_DIR / 'learning.js').read_text()
+    script = (STATIC_DIR / 'learning.js').read_text(encoding="utf-8")
     assert 'innerHTML' not in script and 'eval(' not in script and 'console.log' not in script
     assert 'style=' not in script and '.style.' not in script
     assert SECTION.script.endswith('learning.js') and SECTION.group == 'personal' and SECTION.icon == 'book'

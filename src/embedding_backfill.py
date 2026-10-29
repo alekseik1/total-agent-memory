@@ -120,6 +120,21 @@ class EmbeddingBackfill:
         self.db.commit()
         return int(cursor.rowcount or 0) == 1
 
+    def enqueue_many(self, knowledge_ids: Iterable[int], error: str = "") -> int:
+        """Queue several records in one transaction; returns how many were new. Idempotent."""
+        now = self._at()
+        reason = (error or "")[:LAST_ERROR_MAX_CHARS] or None
+        added = 0
+        for knowledge_id in knowledge_ids:
+            cursor = self.db.execute(
+                "INSERT OR IGNORE INTO embedding_pending "
+                "(knowledge_id, attempts, last_error, next_attempt_at, status, created_at, updated_at) "
+                "VALUES (?, 0, ?, ?, 'pending', ?, ?)",
+                (int(knowledge_id), reason, now, now, now))
+            added += int(cursor.rowcount or 0)
+        self.db.commit()
+        return added
+
     def claim(self, limit: int = DEFAULT_DRAIN_LIMIT) -> list[PendingEmbedding]:
         """Lease up to ``limit`` due rows; no other claimer sees them until the lease expires."""
         if limit <= 0:

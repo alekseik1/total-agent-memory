@@ -1,7 +1,7 @@
 services:
   team-memory:
     build: .
-    image: ${TAM_TEAM_IMAGE:-total-agent-memory:14.9.0}
+    image: ${TAM_TEAM_IMAGE:-total-agent-memory:14.10.0}
     init: true
     restart: unless-stopped
     extra_hosts:
@@ -14,6 +14,7 @@ services:
       MCP_HTTP_PORT: ${TAM_TEAM_CONTAINER_PORT:-3737}
       TAM_TEAM_MAX_WORKERS: ${TAM_TEAM_MAX_WORKERS:-3}
       TAM_TEAM_OPERATION_TIMEOUT: ${TAM_TEAM_OPERATION_TIMEOUT:-120}
+      TAM_TEAM_QUEUE_TIMEOUT: ${TAM_TEAM_QUEUE_TIMEOUT:-30}
       TAM_TEAM_MASTER_KEY: ${TAM_TEAM_MASTER_KEY:-}
       # External PostgreSQL (docs/TEAM_POSTGRES.md). Empty = SQLite in the data volume; a DSN saved in
       # the dashboard (Settings, Database) takes precedence. docker-compose.team.postgres.yml sets it
@@ -24,6 +25,10 @@ services:
       TAM_TEAM_PG_POOL_MAX_SIZE: ${TAM_TEAM_PG_POOL_MAX_SIZE:-8}
       TAM_TEAM_COOKIE_SECURE: ${TAM_TEAM_COOKIE_SECURE:-auto}
       TAM_TEAM_TRUST_PROXY: ${TAM_TEAM_TRUST_PROXY:-false}
+      TAM_TEAM_TRUSTED_PROXIES: ${TAM_TEAM_TRUSTED_PROXIES:-}
+      TAM_TEAM_TOKEN_TTL_DAYS: ${TAM_TEAM_TOKEN_TTL_DAYS:-180}
+      TAM_TEAM_LOGIN_MAX_FAILURES_PER_ACCOUNT: ${TAM_TEAM_LOGIN_MAX_FAILURES_PER_ACCOUNT:-20}
+      TAM_TEAM_HEALTH_VERSION: ${TAM_TEAM_HEALTH_VERSION:-true}
       MEMORY_EMBED_THREADS: ${MEMORY_EMBED_THREADS:-1}
       MEMORY_TORCH_THREADS: ${MEMORY_TORCH_THREADS:-1}
       FASTEMBED_CACHE_PATH: /model-cache
@@ -108,7 +113,7 @@ services:
 
   replica-s3-init:
     profiles: ["s3-local"]
-    image: ${TAM_TEAM_IMAGE:-total-agent-memory:14.9.0}
+    image: ${TAM_TEAM_IMAGE:-total-agent-memory:14.10.0}
     restart: on-failure
     command: ["python", "/app/src/team_memory/cli.py", "--root", "/team-data", "replication", "init-bucket"]
     environment:

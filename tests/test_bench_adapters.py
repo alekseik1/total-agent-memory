@@ -226,7 +226,7 @@ def test_ama_assemble_context_budget_by_rank_then_trajectory_order():
 
 
 def test_ama_retrieve_fills_the_context_budget_from_a_deep_pool(tmp_path):
-    (tmp_path / "server.py").write_text("")
+    (tmp_path / "server.py").write_text("", encoding="utf-8")
     method = ama.TAMMethod.__new__(ama.TAMMethod)
     method.settings = ama.TamSettings(tam_src=str(tmp_path), max_context_chars=500)
     store = _FakeStore([{"position": 3, "content": "Step 3\nlater"}, {"position": 1, "content": "Step 1\nfirst"}])
@@ -283,7 +283,7 @@ class _AnchorStore(_FakeStore):
 
 
 def test_ama_retrieve_puts_named_steps_before_ranked_hits_and_shows_the_digest(tmp_path):
-    (tmp_path / "server.py").write_text("")
+    (tmp_path / "server.py").write_text("", encoding="utf-8")
     method = ama.TAMMethod.__new__(ama.TAMMethod)
     method.settings = ama.TamSettings(tam_src=str(tmp_path), max_context_chars=60, step_anchors=True,
                                       anchor_radius=0, digest_chars=100)
@@ -316,7 +316,7 @@ class _QuoteStore(_AnchorStore):
 
 
 def test_ama_retrieve_anchors_steps_that_contain_a_quoted_span(tmp_path):
-    (tmp_path / "server.py").write_text("")
+    (tmp_path / "server.py").write_text("", encoding="utf-8")
     method = ama.TAMMethod.__new__(ama.TAMMethod)
     method.settings = ama.TamSettings(tam_src=str(tmp_path), max_context_chars=500, quote_anchors=True,
                                       anchor_radius=1, quote_max_matches=3)
@@ -367,7 +367,7 @@ def test_ama_inventory_steps_and_timeline_budget():
 
 
 def test_ama_retrieve_shows_the_timeline_of_named_entities_and_charges_it_to_the_budget(tmp_path):
-    (tmp_path / "server.py").write_text("")
+    (tmp_path / "server.py").write_text("", encoding="utf-8")
     method = ama.TAMMethod.__new__(ama.TAMMethod)
     method.settings = ama.TamSettings.from_config({"tam_src": str(tmp_path), "max_context_chars": 1000,
                                                    "timeline_chars": 400, "inventory_verbs": ["Take", "move"]})
@@ -397,7 +397,7 @@ def test_ama_action_counts_stop_at_the_last_named_step():
 
 
 def test_ama_retrieve_shows_action_counts_only_for_counting_questions(tmp_path):
-    (tmp_path / "server.py").write_text("")
+    (tmp_path / "server.py").write_text("", encoding="utf-8")
     method = ama.TAMMethod.__new__(ama.TAMMethod)
     method.settings = ama.TamSettings(tam_src=str(tmp_path), max_context_chars=1000, action_stats=True)
     store = _FakeStore([{"position": 1, "content": "Step 1\nranked"}])
@@ -410,7 +410,7 @@ def test_ama_retrieve_shows_action_counts_only_for_counting_questions(tmp_path):
 
 
 def test_ama_settings_reject_bad_timeline_values(tmp_path):
-    (tmp_path / "server.py").write_text("")
+    (tmp_path / "server.py").write_text("", encoding="utf-8")
     with pytest.raises(ValueError, match="timeline_chars"):
         ama.TamSettings.from_config({"tam_src": str(tmp_path), "timeline_chars": -1})
     with pytest.raises(ValueError, match="inventory_verbs"):
@@ -425,7 +425,7 @@ def test_ama_structure_is_off_by_default():
 
 def test_ama_settings_reject_unknown_keys_and_real_memory_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("TAM_BENCH_WORK_ROOT", raising=False)
-    (tmp_path / "server.py").write_text("")
+    (tmp_path / "server.py").write_text("", encoding="utf-8")
     with pytest.raises(ValueError, match="unknown"):
         ama.TamSettings.from_config({"tam_src": str(tmp_path), "topk": 3})
     with pytest.raises(ValueError, match="work_root"):
@@ -435,7 +435,7 @@ def test_ama_settings_reject_unknown_keys_and_real_memory_dir(tmp_path, monkeypa
 
 
 def test_ama_settings_read_paths_from_environment(tmp_path, monkeypatch):
-    (tmp_path / "server.py").write_text("")
+    (tmp_path / "server.py").write_text("", encoding="utf-8")
     monkeypatch.setenv("TAM_SRC_DIR", str(tmp_path))
     monkeypatch.setenv("TAM_BENCH_WORK_ROOT", str(tmp_path / "stores"))
     settings = ama.TamSettings.from_config({"top_k": 5})
@@ -448,7 +448,7 @@ def test_ama_shipped_method_config_is_valid(tmp_path, monkeypatch):
 
     monkeypatch.setenv("TAM_SRC_DIR", str(ROOT / "src"))
     monkeypatch.setenv("TAM_BENCH_WORK_ROOT", str(tmp_path))
-    config = yaml.safe_load((AMA_DIR / "configs" / "tam_method.yaml").read_text())
+    config = yaml.safe_load((AMA_DIR / "configs" / "tam_method.yaml").read_text(encoding="utf-8"))
     assert ama.TamSettings.from_config(config).cross_rerank == "on"
 
 
@@ -456,7 +456,7 @@ def test_ama_model_configs_hold_no_key_or_endpoint():
     yaml = pytest.importorskip("yaml")
 
     for name, model in (("answer_gpt5_mini.yaml", "gpt-5-mini"), ("judge_gpt52.yaml", "gpt-5.2")):
-        config = yaml.safe_load((AMA_DIR / "configs" / name).read_text())
+        config = yaml.safe_load((AMA_DIR / "configs" / name).read_text(encoding="utf-8"))
         assert config["model"] == model and config["provider"] == "openai"
         assert "api_key" not in config and "base_url" not in config
 
@@ -472,24 +472,24 @@ def test_ama_to_leaderboard_maps_uuids_scores_and_duplicate_questions(tmp_path):
     episode = {"episode_id": 7, "qa_pairs": [
         {"question": "q", "answer": "a1", "question_uuid": "u1", "type": "A"},
         {"question": "q", "answer": "a1", "question_uuid": "u2", "type": "B"}]}
-    (tmp_path / "test.jsonl").write_text(json.dumps(episode) + "\n")
+    (tmp_path / "test.jsonl").write_text(json.dumps(episode) + "\n", encoding="utf-8")
     (tmp_path / "answers.jsonl").write_text(json.dumps({"episode_id": 7, "answer_list": ["x", "x"],
-                                                        "reasoning_trace": "r"}) + "\n")
+                                                        "reasoning_trace": "r"}) + "\n", encoding="utf-8")
     (tmp_path / "results.json").write_text(json.dumps({"results": [
         {"episode_id": 7, "question": "q", "golden_answer": "a1", "predicted_answer": "x", "score": 1.0},
-        {"episode_id": 7, "question": "q", "golden_answer": "a1", "predicted_answer": "x", "score": 0.0}]}))
+        {"episode_id": 7, "question": "q", "golden_answer": "a1", "predicted_answer": "x", "score": 0.0}]}), encoding="utf-8")
     done = _run_converter(tmp_path)
     assert done.returncode == 0, done.stderr
-    assert json.loads((tmp_path / "out.jsonl").read_text()) == {
+    assert json.loads((tmp_path / "out.jsonl").read_text(encoding="utf-8")) == {
         "episode_id": "7", "question_uuid_list": ["u1", "u2"], "answer_list": ["x", "x"],
         "llm_as_judge_score_list": [True, False], "reasoning_trace": "r"}
 
 
 def test_ama_to_leaderboard_refuses_missing_verdict(tmp_path):
     episode = {"episode_id": 1, "qa_pairs": [{"question": "q", "answer": "a", "question_uuid": "u", "type": "A"}]}
-    (tmp_path / "test.jsonl").write_text(json.dumps(episode) + "\n")
-    (tmp_path / "answers.jsonl").write_text(json.dumps({"episode_id": 1, "answer_list": ["x"]}) + "\n")
-    (tmp_path / "results.json").write_text(json.dumps({"results": []}))
+    (tmp_path / "test.jsonl").write_text(json.dumps(episode) + "\n", encoding="utf-8")
+    (tmp_path / "answers.jsonl").write_text(json.dumps({"episode_id": 1, "answer_list": ["x"]}) + "\n", encoding="utf-8")
+    (tmp_path / "results.json").write_text(json.dumps({"results": []}), encoding="utf-8")
     done = _run_converter(tmp_path)
     assert done.returncode != 0 and "no judge verdict" in done.stderr
 
@@ -717,7 +717,7 @@ def test_lme_saved_chunk_index_reloads_with_other_query_settings_only(tmp_path):
 
         def snapshot(self, target):
             Path(target).mkdir()
-            (Path(target) / "memory.db").write_text("db")
+            (Path(target) / "memory.db").write_text("db", encoding="utf-8")
 
     memory._store = Store([])
     memory.insert({"id": "t1", "environment": "webarena", "outcome": "success", "goal": "g", "start_url": "u",
@@ -773,7 +773,7 @@ def test_lme_fetch_checksum_parser_and_small_tier_ids(tmp_path):
     assert fetch.parse_checksums("abc  questions.jsonl\nDEF *haystacks/x.json\n") == {
         "questions.jsonl": "abc", "haystacks/x.json": "def"}
     haystack = tmp_path / "small.json"
-    haystack.write_text(json.dumps({"q1": ["a", "b"], "q2": ["b", "c"]}))
+    haystack.write_text(json.dumps({"q1": ["a", "b"], "q2": ["b", "c"]}), encoding="utf-8")
     assert fetch.small_tier_trajectory_ids(haystack) == {"a", "b", "c"}
 
 

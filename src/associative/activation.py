@@ -14,6 +14,14 @@ from collections import defaultdict
 
 LOG = lambda msg: sys.stderr.write(f"[memory-activation] {msg}\n")
 
+# Frontier nodes read per hop, most active first.
+MAX_FRONTIER_NODES = 200
+# Activated nodes joined to knowledge links; two bind parameters each, far
+# below SQLite's variable limit.
+MAX_LINKED_NODES = 2000
+# Ids per edge query (bound twice, once per direction).
+EDGE_QUERY_CHUNK = 400
+
 
 class SpreadingActivation:
     """Brain-like spreading activation through the knowledge graph."""
@@ -64,7 +72,10 @@ class SpreadingActivation:
         for hop in range(1, depth + 1):
             decay = self.HOP_DECAY[hop]
             next_frontier: set[str] = set()
-            active = [n for n in current_frontier if activation_level.get(n, 0.0) >= self.ACTIVATION_THRESHOLD]
+            active = sorted(
+                (n for n in current_frontier if activation_level.get(n, 0.0) >= self.ACTIVATION_THRESHOLD),
+                key=lambda n: (-activation_level[n], n),
+            )[:MAX_FRONTIER_NODES]
             adjacency = self._neighbors(active)
 
             for node_id in active:
@@ -189,6 +200,9 @@ class SpreadingActivation:
         # Sum in SQL: hub nodes (a tag or project) link thousands of records,
         # and shipping every link to Python took seconds on a real store.
         # A missing or zero strength counts as 1.0.
+        if len(activation_map) > MAX_LINKED_NODES:
+            strongest = sorted(activation_map.items(), key=lambda item: (-item[1], item[0]))[:MAX_LINKED_NODES]
+            activation_map = dict(strongest)
         values = ",".join("(?,?)" for _ in activation_map)
         params: list = [x for item in activation_map.items() for x in item]
         rows = self.db.execute(
@@ -219,18 +233,35 @@ class SpreadingActivation:
         Returns:
             Dict mapping node_id to list of (neighbor_id, weight) tuples.
         """
+        from config import get_graph_hub_degree
+        from memory_core.retrieval_tiers import GRAPH_HUB_TYPES
+
         adjacency: dict[str, list[tuple[str, float]]] = defaultdict(list)
         if not node_ids:
             return adjacency
-        placeholders = ",".join("?" * len(node_ids))
-        rows = self.db.execute(
-            f"""SELECT source_id, target_id, weight FROM graph_edges WHERE source_id IN ({placeholders})
-                UNION ALL
-                SELECT target_id, source_id, weight FROM graph_edges WHERE target_id IN ({placeholders})""",
-            [*node_ids, *node_ids],
-        ).fetchall()
-        for node, neighbor, weight in rows:
-            weight = weight if weight else 1.0
-            # Normalize weight to [0, 1] range (edges can have weight up to 10.0)
-            adjacency[node].append((neighbor, min(weight / 10.0, 1.0) if weight > 1.0 else weight))
+        hub_degree = get_graph_hub_degree()
+        edges: dict[str, list[tuple[str, float, str | None]]] = defaultdict(list)
+        for offset in range(0, len(node_ids), EDGE_QUERY_CHUNK):
+            chunk = node_ids[offset:offset + EDGE_QUERY_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.db.execute(
+                f"""SELECT e.source_id, e.target_id, e.weight, n.type FROM graph_edges e
+                    LEFT JOIN graph_nodes n ON n.id = e.target_id WHERE e.source_id IN ({placeholders})
+                    UNION ALL
+                    SELECT e.target_id, e.source_id, e.weight, n.type FROM graph_edges e
+                    LEFT JOIN graph_nodes n ON n.id = e.source_id WHERE e.target_id IN ({placeholders})""",
+                [*chunk, *chunk],
+            ).fetchall()
+            for node, neighbor, weight, neighbor_type in rows:
+                edges[node].append((neighbor, weight, neighbor_type))
+        for node, links in edges.items():
+            # A node linked to more than hub_degree others is a tag or a project: it connects everything.
+            if len(links) > hub_degree:
+                continue
+            for neighbor, weight, neighbor_type in links:
+                if neighbor_type in GRAPH_HUB_TYPES:
+                    continue
+                weight = weight if weight else 1.0
+                # Normalize weight to [0, 1] range (edges can have weight up to 10.0)
+                adjacency[node].append((neighbor, min(weight / 10.0, 1.0) if weight > 1.0 else weight))
         return adjacency

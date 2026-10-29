@@ -44,7 +44,8 @@ else
 fi
 DB="$MEMORY_DIR/memory.db"
 BACKUP_DIR="$MEMORY_DIR/backups"
-LOG="/tmp/claude-memory-update.log"
+LOG_DIR="$MEMORY_DIR/logs"
+LOG="$LOG_DIR/update.log"
 DRY_RUN=false
 SKIP_TESTS=false
 
@@ -56,7 +57,8 @@ for arg in "$@"; do
   esac
 done
 
-mkdir -p "$BACKUP_DIR"
+mkdir -p "$BACKUP_DIR" "$LOG_DIR"
+chmod 700 "$LOG_DIR" 2>/dev/null || true
 
 # Single combined logger (stdout + file)
 exec > >(tee -a "$LOG") 2>&1
@@ -64,6 +66,26 @@ exec > >(tee -a "$LOG") 2>&1
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 say() { echo "[update $(ts)] $*"; }
 fail() { echo "[update $(ts)] FAIL: $*" >&2; exit 1; }
+
+# Put the previous source (and the dependencies it pinned) back after a red test gate.
+# git installs: `git reset --keep` returns to the recorded commit and keeps uncommitted local edits (it
+# refuses rather than overwrite them). Tarball installs: the snapshot taken before the sync is unpacked
+# over the tree; files that only exist in the new version stay behind.
+rollback_source() {
+  if [[ -n "$old_full_sha" ]]; then
+    (cd "$ROOT" && git reset --keep "$old_full_sha") || return 1
+  elif [[ -n "$source_snapshot" && -f "$source_snapshot" ]]; then
+    tar -xzf "$source_snapshot" -C "$ROOT" || return 1
+  else
+    return 1
+  fi
+  if [[ -x "$PIP" && -f "$ROOT/requirements.txt" ]]; then
+    local reqs=(-r "$ROOT/requirements.txt")
+    [[ -f "$ROOT/requirements-dev.txt" ]] && reqs+=(-r "$ROOT/requirements-dev.txt")
+    "$PIP" install -q "${reqs[@]}" || say "  WARN: could not reinstall the previous dependencies"
+    rm -f "$ROOT/.last-requirements.sha256"
+  fi
+}
 
 CURRENT_VERSION=$("$PY" -c "import sys; sys.path.insert(0,'$ROOT/src'); import version; print(version.VERSION)" 2>/dev/null || echo "unknown")
 say "current version: $CURRENT_VERSION"
@@ -86,7 +108,19 @@ say "  disk space ok ($free_mb MB free)"
 # DB snapshot (compressed)
 if [[ -f "$DB" && "$DRY_RUN" == "false" ]]; then
   snap="$BACKUP_DIR/memory.db.$(date +%Y%m%d_%H%M%S).gz"
-  cp "$DB" "$snap.tmp" && gzip "$snap.tmp" && mv "$snap.tmp.gz" "$snap"
+  # Online backup: a plain cp of a live WAL database misses the -wal file and can be inconsistent.
+  python3 - "$DB" "$snap.tmp" <<'PY' || fail "database snapshot failed"
+import sqlite3, sys
+
+source = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=30)
+target = sqlite3.connect(sys.argv[2])
+try:
+    source.backup(target)
+finally:
+    target.close()
+    source.close()
+PY
+  gzip -f "$snap.tmp" && mv "$snap.tmp.gz" "$snap"
   say "  db snapshot: $snap ($(du -h "$snap" | cut -f1))"
   # Keep only last 7 backups
   ls -1t "$BACKUP_DIR"/memory.db.*.gz 2>/dev/null | tail -n +8 | xargs -I{} rm -f {} || true
@@ -99,10 +133,13 @@ fi
 say "stage 2/7: source update"
 old_sha=""
 new_sha=""
+old_full_sha=""
+source_snapshot=""
 
 if [[ -d "$ROOT/.git" ]]; then
   cd "$ROOT"
   old_sha=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
+  old_full_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
   if $DRY_RUN; then
     git fetch --quiet
     behind=$(git rev-list --count HEAD..@{u} 2>/dev/null || echo "?")
@@ -163,6 +200,10 @@ elif [[ -n "${UPDATE_URL:-}" ]]; then
 
     inner=$(ls -d "$tmpdir"/*/ 2>/dev/null | head -1)
     [[ -z "$inner" ]] && { rm -rf "$tmpdir"; fail "no top-level dir in tarball"; }
+    source_snapshot="$BACKUP_DIR/source.$(date +%Y%m%d_%H%M%S).tar.gz"
+    tar -czf "$source_snapshot" --exclude='./.venv' --exclude='./.git' --exclude='__pycache__' -C "$ROOT" . \
+      || fail "could not snapshot the current source for rollback"
+    say "  source snapshot for rollback: $source_snapshot"
     say "  rsync into $ROOT (preserving .venv)"
     /usr/bin/rsync -a --exclude '.venv/' --exclude '.claude-memory/' --exclude '.tam/' \
       --exclude '__pycache__/' --exclude '.git/' \
@@ -228,7 +269,10 @@ else
   if "$PY" -m pytest "$ROOT/tests/" --tb=no -q 2>&1 | tail -5; then
     say "  tests green"
   else
-    fail "tests failed — aborting (DB snapshot kept; manually restore from $BACKUP_DIR if source changed)"
+    if rollback_source; then
+      fail "tests failed — rolled back to the previous source and dependencies (DB snapshot kept in $BACKUP_DIR)"
+    fi
+    fail "tests failed and the automatic rollback was not possible — restore the source by hand (DB snapshot in $BACKUP_DIR)"
   fi
 fi
 
@@ -254,6 +298,13 @@ if $DRY_RUN; then
   say "  would record personal mode for this install if no setup record exists"
 else
   PYTHONPATH="$ROOT/src" "$PY" -c 'import os; from setup_wizard.upgrade import adopt_existing; r = adopt_existing(os.environ); print("setup record: personal mode recorded" if r else "setup record: unchanged")' 2>&1 | sed 's/^/  /'
+fi
+
+# Hook copies in ~/.claude/hooks must match the new src/ (HookCall fields, ambient command names).
+if $DRY_RUN; then
+  say "  would refresh installed Claude Code hook scripts"
+else
+  PYTHONPATH="$ROOT/src" "$PY" -m setup_wizard.refresh_hooks 2>&1 | sed 's/^/  /' || say "  WARN: hook refresh failed"
 fi
 
 # ────────────────────────────────────────────────
@@ -288,7 +339,7 @@ if /usr/bin/pgrep -f "dashboard\.py" > /dev/null; then
   else
     /usr/bin/pkill -f "dashboard\.py" || true
     sleep 1
-    nohup "$PY" "$ROOT/src/dashboard.py" > /tmp/dashboard.log 2>&1 &
+    nohup "$PY" "$ROOT/src/dashboard.py" > "$LOG_DIR/dashboard.log" 2>&1 &
     say "  dashboard: restarted on :37737"
   fi
 fi

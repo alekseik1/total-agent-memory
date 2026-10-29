@@ -92,9 +92,9 @@ def _reset_embed_provider() -> None:
 def _provider_embed(text: str) -> Optional[list]:
     """Embed a single text via the configured EmbeddingProvider.
 
-    Falls back to the legacy Ollama path only if the provider init or
-    call fails — this way the default MEMORY_EMBED_PROVIDER=fastembed
-    keeps working locally while OpenAI/Cohere routes go through HTTP.
+    Returns None when the provider init or call fails: a vector from another
+    model (the old Ollama fallback) would be compared with stored vectors it
+    has nothing in common with.
     """
     global _embed_provider_cache
     try:
@@ -107,18 +107,21 @@ def _provider_embed(text: str) -> Optional[list]:
             return list(vecs[0])
     except Exception as e:  # noqa: BLE001
         LOG(f"provider embed error: {e}")
-    # Last-ditch fallback — keeps HyDE working when no provider reachable.
-    return _ollama_embed(text)
+    return None
 
 
 # =============================================================================
 # HyDE — Hypothetical Document Embeddings
 # =============================================================================
 
-def hyde_expand(query: str, project: str = None) -> Optional[list]:
+def hyde_expand(query: str, project: str = None, embed_fn=None) -> Optional[list]:
     """
     Generate a hypothetical answer to the query, then embed it.
     Returns the embedding of the hypothetical answer (not the answer itself).
+
+    `embed_fn(texts) -> vectors | None` embeds with the model the store searches
+    with. Without it the configured EmbeddingProvider is used, which can name a
+    different model than the stored vectors (callers that search must pass it).
 
     Why: "auth JWT" as query might not match "Используем Bearer токен с RS256 подписью".
          But a hypothetical answer about auth WILL be semantically close to that record.
@@ -145,8 +148,10 @@ Answer:"""
         return None
 
     # Embed the hypothetical answer (not the original query)
-    embedding = _provider_embed(hypothetical)
-    return embedding
+    if embed_fn is not None:
+        vectors = embed_fn([hypothetical])
+        return list(vectors[0]) if vectors and vectors[0] else None
+    return _provider_embed(hypothetical)
 
 
 # =============================================================================

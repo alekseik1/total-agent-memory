@@ -32,7 +32,7 @@ def _toy_dataset(tmp_path: Path) -> Path:
             "qa": qa,
         })
     p = tmp_path / "ds.json"
-    p.write_text(json.dumps(payload))
+    p.write_text(json.dumps(payload), encoding="utf-8")
     return p
 
 
@@ -105,7 +105,7 @@ def test_mine_skips_qa_without_required_fields(tmp_path):
         ],
     }]
     ds = tmp_path / "tiny.json"
-    ds.write_text(json.dumps(payload))
+    ds.write_text(json.dumps(payload), encoding="utf-8")
     result = mine.mine(ds, train_conv_ids=[0], n_per_category=10)
     # cat 1 should have exactly the one valid pair, cat 2 should be empty.
     assert len(result["1"]) == 1

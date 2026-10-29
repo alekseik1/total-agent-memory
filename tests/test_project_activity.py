@@ -37,7 +37,7 @@ def db() -> sqlite3.Connection:
         );
         """
     )
-    conn.executescript((_MIGRATIONS / "025_consolidation_state.sql").read_text())
+    conn.executescript((_MIGRATIONS / "025_consolidation_state.sql").read_text(encoding="utf-8"))
     yield conn
     conn.close()
 

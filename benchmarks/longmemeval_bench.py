@@ -459,7 +459,7 @@ def build_corpus(
 
 def run_benchmark(data_path: str, modes: list[str], limit: int = 0, k: int = 5):
     print(f"[bench] Loading {data_path}...")
-    with open(data_path) as f:
+    with open(data_path, encoding="utf-8") as f:
         data = json.load(f)
 
     if limit > 0:
@@ -660,7 +660,7 @@ def run_benchmark(data_path: str, modes: list[str], limit: int = 0, k: int = 5):
                 }
 
     out_path = _OUTPUT_PATH or str(Path(__file__).parent / "results_longmemeval.json")
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2)
     print(f"\nResults saved to {out_path}")
 

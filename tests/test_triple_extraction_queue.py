@@ -13,7 +13,7 @@ def queue_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
+    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text(encoding="utf-8"))
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS knowledge (
@@ -24,7 +24,7 @@ def queue_db():
         );
         """
     )
-    conn.executescript((root / "migrations" / "003_triple_extraction_queue.sql").read_text())
+    conn.executescript((root / "migrations" / "003_triple_extraction_queue.sql").read_text(encoding="utf-8"))
     yield conn
     conn.close()
 
@@ -180,6 +180,7 @@ def test_mark_failed_gives_up_after_max_attempts(queue_db):
     q.enqueue(kid)
     item = q.claim_next()
     q.mark_failed(item["id"], "err1")
+    queue_db.execute("UPDATE triple_extraction_queue SET next_attempt_at=NULL")  # backoff elapsed
     item = q.claim_next()  # re-claimed
     q.mark_failed(item["id"], "err2")
 

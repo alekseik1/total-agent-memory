@@ -80,7 +80,7 @@ def configure_environment(db_dir: str) -> None:
                 raise SystemExit(f'{name} is not set and not found in {SERVICE_PLIST}')
             os.environ[name] = service_env[name]
     if os.environ.get('MEMORY_CONTRADICTION_SCORER') == 'jev' and not os.environ.get('TYPESAFE_API_KEY'):
-        for line in (JUDGE_DIR / '.env').read_text().splitlines():
+        for line in (JUDGE_DIR / '.env').read_text(encoding="utf-8").splitlines():
             if line.startswith('TYPESAFE_API_KEY='):
                 os.environ['TYPESAFE_API_KEY'] = line.split('=', 1)[1].strip().strip('"\'')
         if not os.environ.get('TYPESAFE_API_KEY'):
@@ -176,15 +176,15 @@ class Sink:
 
     def __init__(self, path: Path):
         self.path = path
-        self.done = {json.loads(line)['id'] for line in path.read_text().splitlines() if line.strip()} if path.exists() else set()
+        self.done = {json.loads(line)['id'] for line in path.read_text(encoding="utf-8").splitlines() if line.strip()} if path.exists() else set()
 
     def write(self, row: dict) -> None:
-        with self.path.open('a') as handle:
+        with self.path.open('a', encoding="utf-8") as handle:
             handle.write(json.dumps(row, ensure_ascii=False) + '\n')
 
 
 def run_synthetic(harness: Harness, judge: Judge, only: set[str] | None, sink: Sink) -> None:
-    scenarios = json.loads(SCENARIOS.read_text())['scenarios']
+    scenarios = json.loads(SCENARIOS.read_text(encoding="utf-8"))['scenarios']
     if only:
         scenarios = [row for row in scenarios if row['id'] in only]
     if sink.done:
@@ -227,7 +227,7 @@ def _session_date(raw: str) -> datetime:
 
 
 def select_longmemeval(types: list[str], per_type: int) -> list[dict]:
-    rows = json.loads(LONGMEMEVAL.read_text())
+    rows = json.loads(LONGMEMEVAL.read_text(encoding="utf-8"))
     selected: list[dict] = []
     for question_type in types:
         matching = [row for row in rows if row['question_type'] == question_type]
@@ -327,11 +327,11 @@ def main() -> None:
                             Sink(args.out / f'longmemeval-answers.shard{index}of{count}.jsonl'), (index, count),
                             [item for item in args.types.split(',') if item], args.per_type)
     results = [json.loads(line) for path in sorted(args.out.glob(f'{args.suite}-answers*.jsonl'))
-               for line in path.read_text().splitlines() if line.strip()]
+               for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     summary = {'suite': args.suite, 'label': args.label, 'model': os.environ.get('MEMORY_LLM_MODEL'),
                'provider': os.environ.get('MEMORY_LLM_PROVIDER'), 'run_at': datetime.now(UTC).isoformat(),
                **summarize(results)}
-    (args.out / f'{args.suite}-summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+    (args.out / f'{args.suite}-summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary['overall'], ensure_ascii=False))
 
 

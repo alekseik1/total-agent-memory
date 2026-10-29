@@ -85,7 +85,7 @@ def extract_messages_from_transcript(
     """Extract user/assistant messages from JSONL transcript."""
     messages: list[dict] = []
     try:
-        with open(transcript_path) as f:
+        with open(transcript_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:

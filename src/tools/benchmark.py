@@ -64,7 +64,9 @@ except ImportError:
 
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "qwen3-embedding:4b")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-MEMORY_DIR = Path(os.environ.get("CLAUDE_MEMORY_DIR", os.path.expanduser("~/.claude-memory")))
+from paths import memory_dir  # noqa: E402
+
+MEMORY_DIR = memory_dir()
 
 LOG = lambda msg: sys.stderr.write(f"[benchmark] {msg}\n")
 
@@ -884,7 +886,7 @@ Scheduler (cron):
     parser.add_argument(
         "--db",
         default=str(MEMORY_DIR / "memory.db"),
-        help="Path to memory.db (default: ~/.claude-memory/memory.db)",
+        help="Path to memory.db (default: <memory dir>/memory.db)",
     )
     parser.add_argument(
         "--queries",

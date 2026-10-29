@@ -205,7 +205,7 @@ def test_migration_014_applies_on_fresh_db(tmp_path):
         """
     )
     # Apply twice — must be idempotent.
-    sql = mig.read_text()
+    sql = mig.read_text(encoding="utf-8")
     conn.executescript(sql)
     conn.executescript(sql)
 
@@ -317,3 +317,9 @@ def test_facade_stats_include_both_tiers(enabled, tmp_path):
     assert s["l2_size"] >= 1
     assert s["l1"]["size"] >= 1
     cache.close()
+
+
+def test_embedding_cache_key_does_not_collide_across_part_boundaries():
+    from memory_core.cache import embedding_cache_key
+
+    assert embedding_cache_key("a", "bc", "text", "x") != embedding_cache_key("ab", "c", "text", "x")

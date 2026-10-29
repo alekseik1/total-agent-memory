@@ -13,7 +13,7 @@ def dash_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
+    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text(encoding="utf-8"))
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS knowledge (
@@ -26,12 +26,12 @@ def dash_db():
     for m in ("002_multi_representation", "003_triple_extraction_queue",
               "004_deep_enrichment", "005_representations_queue",
               "006_filter_savings"):
-        conn.executescript((root / "migrations" / f"{m}.sql").read_text())
+        conn.executescript((root / "migrations" / f"{m}.sql").read_text(encoding="utf-8"))
     # v10.1 — enrichment_queue migration (separate so older tests still run
     # even if it is missing at runtime).
     eq_sql = root / "migrations" / "020_async_enrichment.sql"
     if eq_sql.exists():
-        conn.executescript(eq_sql.read_text())
+        conn.executescript(eq_sql.read_text(encoding="utf-8"))
     yield conn
     conn.close()
 
@@ -228,3 +228,47 @@ def test_graph_delta_fills_missing_edge_endpoints(dash_db):
     # All endpoints present even though old1/old2 predate `since`
     assert {"old1", "old2", "new1"}.issubset(node_ids)
     assert res["stats"]["endpoint_nodes_filled"] >= 2
+
+
+def _mention_graph(db) -> None:
+    db.executemany(
+        "INSERT INTO graph_nodes (id, type, name, mention_count, first_seen_at) VALUES (?, 'concept', ?, ?, ?)",
+        [("hot1", "hot_a", 5, "2026-04-10T00:00:00Z"), ("hot2", "hot_b", 4, "2026-04-10T00:00:00Z"),
+         ("cold", "cold_c", 1, "2026-04-10T00:00:00Z")],
+    )
+    db.executemany(
+        "INSERT INTO graph_edges (id, source_id, target_id, relation_type, weight, created_at) "
+        "VALUES (?, ?, ?, 'uses', ?, '2026-04-11T00:00:00Z')",
+        [("hot_hot", "hot1", "hot2", 3.0), ("hot_hot_light", "hot2", "hot1", 1.0),
+         ("hot_cold", "hot1", "cold", 5.0), ("cold_hot", "cold", "hot2", 5.0)],
+    )
+    db.commit()
+
+
+def test_graph_delta_keeps_only_edges_between_mentioned_nodes(dash_db):
+    from dashboard_v6 import api_graph_delta
+
+    _mention_graph(dash_db)
+    res = api_graph_delta(dash_db, limit=100, min_mentions=3, min_edge_weight=2)
+    assert [e["id"] for e in res["edges"]] == ["hot_hot"]
+    assert res["total_edges"] == 1 and res["total_nodes"] == 2
+    assert {n["id"] for n in res["nodes"]} == {"hot1", "hot2"}
+    unweighted = api_graph_delta(dash_db, limit=100, min_mentions=3)
+    assert {e["id"] for e in unweighted["edges"]} == {"hot_hot", "hot_hot_light"} and unweighted["total_edges"] == 2
+
+
+def test_graph_delta_edge_filter_never_pairs_the_two_node_lists(dash_db):
+    # `source_id IN (...) AND target_id IN (...)` made SQLite probe the (source_id, target_id) index with
+    # every pair of the two node lists: minutes on a 58k-node graph. Every edge query must avoid that plan.
+    from dashboard_v6 import api_graph_delta
+
+    _mention_graph(dash_db)
+    statements: list[str] = []
+    dash_db.set_trace_callback(statements.append)
+    api_graph_delta(dash_db, limit=100, min_mentions=3, min_edge_weight=2)
+    dash_db.set_trace_callback(None)
+    edge_queries = [s for s in statements if "FROM graph_edges" in s]
+    assert len(edge_queries) == 2
+    for statement in edge_queries:
+        plan = " | ".join(row[3] for row in dash_db.execute(f"EXPLAIN QUERY PLAN {statement}"))
+        assert "LIST SUBQUERY" not in plan, plan

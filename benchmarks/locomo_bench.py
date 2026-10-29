@@ -61,7 +61,7 @@ def import_store():
 
 
 def load_dataset(path: Path) -> list[dict]:
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -460,7 +460,7 @@ def main() -> int:
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = Path(args.output) if args.output else RESULTS_DIR / f"locomo-{int(time.time())}.json"
-    with open(out_path, "w") as fh:
+    with open(out_path, "w", encoding="utf-8") as fh:
         json.dump({
             "ingest": ingest_stats,
             "eval": eval_stats,

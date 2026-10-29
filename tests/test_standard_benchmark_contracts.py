@@ -58,10 +58,10 @@ def test_longmemeval_reports_per_question_evidence_and_latency(tmp_path, monkeyp
         ],
     }
     abstention = {**question, "question_id": "unknown_abs", "answer_session_ids": []}
-    source.write_text(json.dumps([question, abstention]))
+    source.write_text(json.dumps([question, abstention]), encoding="utf-8")
     monkeypatch.setattr(runner, "_OUTPUT_PATH", str(report))
     runner.run_benchmark(str(source), ["bm25"], k=1)
-    result = json.loads(report.read_text())["modes"]["bm25"]
+    result = json.loads(report.read_text(encoding="utf-8"))["modes"]["bm25"]
     assert result["total_r_all"] == 1
     assert result["scored_questions"] == 1
     assert len(result["records"]) == 2

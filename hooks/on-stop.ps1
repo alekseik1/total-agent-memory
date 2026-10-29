@@ -1,5 +1,5 @@
 # ===========================================
-# Stop Hook (PowerShell) — twin of hooks/on-stop.sh
+# Stop Hook (PowerShell) - twin of hooks/on-stop.sh
 #
 # Runs at the end of EVERY assistant turn, so it stays cheap and quiet:
 # 1. Refreshes ONE recovery snapshot per session (rate-limited; SessionEnd

@@ -87,8 +87,12 @@ def register(args: argparse.Namespace, environ: Mapping[str, str], host: clients
         if hook_plan is not None:
             copied, skipped = extras.apply_hooks(hook_plan)
             out.write(f"  OK: Hooks synced to {host.home / '.claude' / 'hooks'} (copied={copied}, skipped={skipped})\n")
-            out.write(f"  OK: Hooks registered in {hook_plan.settings}: "
-                      f"{', '.join(sorted(set(hook_plan.added))) or 'already present'}\n")
+            if hook_plan.plugin_active:
+                out.write(f"  OK: the {extras.PLUGIN_NAME} plugin is enabled and already provides the hooks; "
+                          f"none were added to {hook_plan.settings} (they would run twice)\n")
+            else:
+                out.write(f"  OK: Hooks registered in {hook_plan.settings}: "
+                          f"{', '.join(sorted(set(hook_plan.added))) or 'already present'}\n")
         out.writelines(f"  OK: skill installed to {target}\n" for target in extras.apply_skills(copies))
         record = upgrade.record_registration(environ, host, memory_dir, ids)
     missing = [str(change.path) for change in changes if clients.current_entry(change.client, host) is None]
@@ -143,4 +147,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
 
 
 if __name__ == "__main__":
+    from stdio_utf8 import never_fail_on_output
+
+    never_fail_on_output()
     sys.exit(main())

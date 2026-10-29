@@ -40,13 +40,18 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Resolve version
+      - name: Resolve version and tags
         id: version
+        env:
+          # Inputs reach the shell through the environment, never through ${{ }} expansion into the script.
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          REGISTRY_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            v="${{ inputs.tag }}"
+          if [ -n "$INPUT_TAG" ]; then
+            v="$INPUT_TAG"
           else
             v="${GITHUB_REF_NAME#v}"
           fi
@@ -54,36 +59,48 @@ jobs:
             echo "::error::expected semver MAJOR.MINOR.PATCH, got '$v'"
             exit 1
           fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "major=$(echo "$v" | cut -d. -f1)" >> "$GITHUB_OUTPUT"
-          echo "minor=$(echo "$v" | cut -d. -f1-2)" >> "$GITHUB_OUTPUT"
+          major=$(echo "$v" | cut -d. -f1)
+          minor=$(echo "$v" | cut -d. -f1-2)
+          # A moving tag (:latest, :MAJOR, :MAJOR.MINOR) goes only to the highest released version it covers,
+          # so backfilling an old version never moves it backwards.
+          highest() {
+            git ls-remote --tags --refs "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/v${1}*" \
+              | sed 's|.*refs/tags/v||' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | { cat; echo "$v"; } | sort -V | tail -n 1
+          }
+          {
+            echo "version=$v"
+            echo "major=$major"
+            echo "minor=$minor"
+            echo "tags<<EOF"
+            echo "${REGISTRY_IMAGE}:${v}"
+            [ "$(highest "${minor}.")" = "$v" ] && echo "${REGISTRY_IMAGE}:${minor}"
+            [ "$(highest "${major}.")" = "$v" ] && echo "${REGISTRY_IMAGE}:${major}"
+            [ "$EVENT_NAME" = "push" ] && [ "$(highest "")" = "$v" ] && echo "${REGISTRY_IMAGE}:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU (for arm64 cross-build)
-        uses: docker/setup-qemu-action@v3.6.0
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3.10.0
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
 
       - name: Login to ghcr
-        uses: docker/login-action@v3.4.0
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build + push (amd64 + arm64)
-        uses: docker/build-push-action@v6.18.0
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           provenance: false
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.minor }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.major }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.version.outputs.tags }}
           labels: |
             org.opencontainers.image.title=total-agent-memory
             org.opencontainers.image.description=Persistent memory MCP server for AI coding agents
@@ -103,7 +120,7 @@ jobs:
       # once it was not, this job failed with a bare `unauthorized` that reads
       # like a build problem rather than a visibility one.
       - name: Login to ghcr
-        uses: docker/login-action@v3.4.0
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -118,7 +135,7 @@ jobs:
           set -e
           docker volume create tam-ci-data
           docker run -d --name tam-ci \
-            -p 37737:37737 \
+            -p 127.0.0.1:37737:37737 \
             -v tam-ci-data:/data \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}
           # Wait up to 60s for /healthz to come up.
@@ -134,9 +151,16 @@ jobs:
             fi
             sleep 2
           done
-          # Wait up to 60s for /api/stats (depends on DB migration).
+          # The dashboard binds beyond loopback inside the container, so every route except /healthz needs the token.
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:37737/api/stats)
+          if [ "$code" != "401" ]; then
+            echo "::error::/api/stats answered $code without a token, expected 401"
+            exit 1
+          fi
+          # Wait up to 60s for /api/stats (depends on DB migration) and for the token file.
           for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:37737/api/stats)
+            token=$(docker exec tam-ci cat /data/state/http-token 2>/dev/null || true)
+            code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${token}" http://127.0.0.1:37737/api/stats)
             if [ "$code" = "200" ]; then
               echo "✓ /api/stats → 200 after ${i}*2s"
               break

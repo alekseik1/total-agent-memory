@@ -42,7 +42,7 @@ DEFAULT_SAMPLE = 50
 
 
 def _load_questions(path: Path, sample: int, stratified: bool, seed: int) -> list[dict]:
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         raw = json.load(fh)
     # Drop abstention questions — they expect no-answer behaviour.
     clean = [e for e in raw if not e.get("question_id", "").endswith("_abs")]
@@ -337,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
         "k": k_list,
         "backends": summaries,
     }
-    with open(out_path, "w") as fh:
+    with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
     print(f"\n[ab] results saved to {out_path}")
     return 0

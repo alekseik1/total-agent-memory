@@ -5,7 +5,7 @@ usage() {
     cat <<'EOF'
 Usage:
   dashboard-service.sh install <py_path> <install_dir> <memory_dir>
-  dashboard-service.sh print-management
+  dashboard-service.sh print-management [memory_dir]
 
 Environment overrides for testing:
   CTM_UNAME=Darwin|Linux
@@ -29,6 +29,24 @@ is_wsl() {
 
 systemd_user_available() {
     command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1
+}
+
+# plist values are XML text: & < > must be escaped.
+xml_escape() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+# systemd splits ExecStart/Environment on whitespace: quote (and escape) a word that needs it.
+systemd_arg() {
+    case "$1" in
+        *[[:space:]\"\\%]*)
+            local escaped=${1//\\/\\\\}
+            escaped=${escaped//\"/\\\"}
+            escaped=${escaped//%/%%}
+            printf '"%s"' "$escaped"
+            ;;
+        *) printf '%s' "$1" ;;
+    esac
 }
 
 install_service() {
@@ -63,18 +81,18 @@ install_service() {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>$plist_name</string>
+    <string>$(xml_escape "$plist_name")</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$py_path</string>
-        <string>$dashboard_path</string>
+        <string>$(xml_escape "$py_path")</string>
+        <string>$(xml_escape "$dashboard_path")</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>CLAUDE_MEMORY_DIR</key>
-        <string>$memory_dir</string>
+        <string>$(xml_escape "$memory_dir")</string>
         <key>DASHBOARD_PORT</key>
-        <string>$dashboard_port</string>
+        <string>$(xml_escape "$dashboard_port")</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -84,9 +102,9 @@ install_service() {
         <false/>
     </dict>
     <key>StandardOutPath</key>
-    <string>$log_dir/dashboard.log</string>
+    <string>$(xml_escape "$log_dir")/dashboard.log</string>
     <key>StandardErrorPath</key>
-    <string>$log_dir/dashboard.err</string>
+    <string>$(xml_escape "$log_dir")/dashboard.err</string>
     <key>ProcessType</key>
     <string>Background</string>
 </dict>
@@ -106,10 +124,10 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=$py_path $dashboard_path
+ExecStart=$(systemd_arg "$py_path") $(systemd_arg "$dashboard_path")
 Restart=on-failure
 RestartSec=5
-Environment=CLAUDE_MEMORY_DIR=$memory_dir
+Environment=$(systemd_arg "CLAUDE_MEMORY_DIR=$memory_dir")
 Environment=DASHBOARD_PORT=$dashboard_port
 WorkingDirectory=$install_dir
 StandardOutput=append:$log_dir/dashboard.log
@@ -165,22 +183,36 @@ EOF
     fi
 }
 
+# Same order as src/paths.py memory_dir().
+resolve_memory_dir() {
+    if [ -n "${TAM_MEMORY_DIR:-}" ]; then
+        printf '%s\n' "$TAM_MEMORY_DIR"
+    elif [ -n "${CLAUDE_MEMORY_DIR:-}" ]; then
+        printf '%s\n' "$CLAUDE_MEMORY_DIR"
+    elif [ -d "$HOME/.tam" ] || [ ! -d "$HOME/.claude-memory" ]; then
+        printf '%s\n' "$HOME/.tam"
+    else
+        printf '%s\n' "$HOME/.claude-memory"
+    fi
+}
+
 print_management() {
+    mgmt_dir="${1:-$(resolve_memory_dir)}"
     if [ "$(platform_name)" = "Darwin" ]; then
         echo "  Dashboard management:"
         echo "    Stop:    launchctl bootout gui/\$(id -u)/com.claude-total-memory.dashboard"
         echo "    Start:   launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.claude-total-memory.dashboard.plist"
-        echo "    Logs:    tail -f ~/.claude-memory/logs/dashboard.log"
+        echo "    Logs:    tail -f $mgmt_dir/logs/dashboard.log"
     elif systemd_user_available; then
         echo "  Dashboard management:"
         echo "    Status:  systemctl --user status claude-total-memory-dashboard"
         echo "    Stop:    systemctl --user stop claude-total-memory-dashboard"
         echo "    Start:   systemctl --user start claude-total-memory-dashboard"
-        echo "    Logs:    tail -f ~/.claude-memory/logs/dashboard.log"
+        echo "    Logs:    tail -f $mgmt_dir/logs/dashboard.log"
     else
         echo "  Dashboard management:"
-        echo "    Start:   ~/.claude-memory/dashboard-autostart.sh"
-        echo "    Logs:    tail -f ~/.claude-memory/logs/dashboard.log"
+        echo "    Start:   $mgmt_dir/dashboard-autostart.sh"
+        echo "    Logs:    tail -f $mgmt_dir/logs/dashboard.log"
     fi
 }
 
@@ -191,7 +223,8 @@ case "$cmd" in
         install_service "$@"
         ;;
     print-management)
-        print_management
+        shift
+        print_management "$@"
         ;;
     *)
         usage

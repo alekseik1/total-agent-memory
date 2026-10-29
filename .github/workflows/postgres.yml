@@ -41,11 +41,11 @@ jobs:
       MEMORY_EMBED_THREADS: '1'
       PYTHONIOENCODING: utf-8
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.FASTEMBED_CACHE_PATH }}
           key: tam-minilm-v14-${{ runner.os }}-${{ runner.arch }}
@@ -57,14 +57,14 @@ jobs:
           sudo apt-get install -y postgresql-client-18
           echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
       - name: Install package with the postgres extra
-        run: python -m pip install -e ".[postgres]" pytest
+        run: python -m pip install -e ".[postgres]" pytest pytest-timeout
       - name: Warm the embedding model
         run: python tests/smoke/prewarm_models.py
       - name: PostgreSQL-marked tests
         run: python -m pytest tests -q -m postgres --backend=postgres --junitxml=postgres-results.xml
       - name: Team suite on SQLite and PostgreSQL
         run: python -m pytest tests/test_team_*.py -q --backend=both --junitxml=team-both-results.xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: postgres-test-results

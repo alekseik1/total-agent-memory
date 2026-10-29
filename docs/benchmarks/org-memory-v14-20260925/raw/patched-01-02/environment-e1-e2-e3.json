@@ -15,7 +15,7 @@
  "memory_mode": "fast",
  "llm": "disabled (MEMORY_LLM_ENABLED=false)",
  "tam_team_max_workers_default": 3,
- "src_path": "/Users/vitalii-macpro/PROJECT/claude-memory/.claude/worktrees/agent-aff79c1fb7fee3b2b/src",
+ "src_path": "~/PROJECT/claude-memory/.claude/worktrees/agent-aff79c1fb7fee3b2b/src",
  "team_memory_sha256": "84588e6cd5f85d17772763306e3cb92488ccc8e7b0e08275ac431c40741af368",
  "worktree_src_diff_stat": "src/team_memory/cli.py      | 4 ++++\n src/team_memory/registry.py | 9 +++++++++\n src/team_memory/service.py  | 9 +++++++--\n 3 files changed, 20 insertions(+), 2 deletions(-)",
  "seed": 20260925,

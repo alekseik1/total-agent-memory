@@ -94,19 +94,10 @@ _FASTEMBED_DIM = {
 
 
 def _ssl_context():
-    """Return an SSL context that works on Python.org macOS installs.
+    """Verified TLS context: certifi, else the platform store, never unverified."""
+    from tls_context import verified_context
 
-    Those installs ship without system CAs, so urllib's default verify
-    always fails on TLS endpoints. Prefer certifi when available; fall
-    back to the platform default (e.g. Linux distros where CAs exist).
-    """
-    import ssl
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        return ssl.create_default_context()
-
+    return verified_context()
 
 RETRYABLE_HTTP_STATUS = frozenset((408, 425, 429, 500, 502, 503, 504))
 DEFAULT_MAX_BACKOFF_SEC = 30.0
@@ -201,7 +192,9 @@ class FastEmbedProvider:
     name = "fastembed"
 
     def __init__(self, model: str | None = None) -> None:
-        self._model_name = model or config.get_embed_model("fastembed")
+        from memory_core.embedding_spaces import resolve_text_model
+
+        self._model_name = model or resolve_text_model()
         self._model: object | None = None  # TextEmbedding instance or False
         self._dim_cache: int = _FASTEMBED_DIM.get(self._model_name, 0)
 

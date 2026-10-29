@@ -36,7 +36,7 @@ db.executescript(
 db.executescript(
     (
         Path(__file__).resolve().parents[1] / "migrations/029_atomic_facts.sql"
-    ).read_text()
+    ).read_text(encoding="utf-8")
 )
 for i in range(1, 2001):
     db.execute(
@@ -134,4 +134,4 @@ assert fts_order("rank") == fts_order("bm25(atomic_facts_fts)")
 report["fts_order_latency"] = {
     order: probe(lambda order=order: fts_order(order)) for order in ("rank", "bm25(atomic_facts_fts)")
 }
-args.output.write_text(json.dumps(report, indent=2) + "\n")
+args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

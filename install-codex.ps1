@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Claude Total Memory — Codex CLI Installer (Windows)
+    Claude Total Memory - Codex CLI Installer (Windows)
 
 .DESCRIPTION
     Creates Python venv, installs dependencies, downloads embedding model,
@@ -16,15 +16,27 @@ $ErrorActionPreference = "Stop"
 
 Write-Host ""
 Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host "  Claude Total Memory v5.0 — Codex CLI Installer"       -ForegroundColor Cyan
+Write-Host "  Claude Total Memory v5.0 - Codex CLI Installer"       -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 Write-Host ""
 
 # -- Config --
 $InstallDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$MemoryDir = if ($env:CLAUDE_MEMORY_DIR) { $env:CLAUDE_MEMORY_DIR } else { Join-Path $env:USERPROFILE ".claude-memory" }
+$HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
+# Same order as src/paths.py memory_dir().
+$MemoryDir = if ($env:TAM_MEMORY_DIR) {
+    $env:TAM_MEMORY_DIR
+} elseif ($env:CLAUDE_MEMORY_DIR) {
+    $env:CLAUDE_MEMORY_DIR
+} elseif (Test-Path (Join-Path $HomeDir ".tam")) {
+    Join-Path $HomeDir ".tam"
+} elseif (Test-Path (Join-Path $HomeDir ".claude-memory")) {
+    Join-Path $HomeDir ".claude-memory"
+} else {
+    Join-Path $HomeDir ".tam"
+}
 $VenvDir = Join-Path $InstallDir ".venv"
-$SkillTarget = Join-Path $env:USERPROFILE ".agents" "skills" "memory"
+$SkillTarget = Join-Path (Join-Path (Join-Path $env:USERPROFILE ".agents") "skills") "memory"
 
 # -- 1. Create memory directories --
 Write-Host "-> Step 1: Creating memory directories..." -ForegroundColor Yellow
@@ -60,8 +72,8 @@ if (-not $pythonCmd) {
     exit 1
 }
 
-$VenvPython = Join-Path $VenvDir "Scripts" "python.exe"
-$VenvPip = Join-Path $VenvDir "Scripts" "pip.exe"
+$VenvPython = Join-Path (Join-Path $VenvDir "Scripts") "python.exe"
+$VenvPip = Join-Path (Join-Path $VenvDir "Scripts") "pip.exe"
 
 if (Test-Path $VenvPython) {
     Write-Host "  Existing venv found, updating dependencies..."
@@ -96,12 +108,12 @@ print(f'  OK: Model ready ({name})')
 # -- 4. Register with Codex CLI (+ memory and onboarding skills) --
 # src/setup_wizard/register.py is the single implementation shared with install.sh and install.ps1.
 Write-Host "-> Step 4: Registering the MCP server with Codex CLI..." -ForegroundColor Yellow
-$SrvPath = Join-Path $InstallDir "src" "server.py"
+$SrvPath = Join-Path (Join-Path $InstallDir "src") "server.py"
 $previousPythonPath = $env:PYTHONPATH
 $env:PYTHONPATH = Join-Path $InstallDir "src"
 try {
     & $VenvPython -m setup_wizard.register --client codex --memory-dir $MemoryDir --command $VenvPython --arg $SrvPath `
-        --env "CLAUDE_MEMORY_DIR=$MemoryDir" --env "MEMORY_TRIPLE_TIMEOUT_SEC=120" --env "MEMORY_ENRICH_TIMEOUT_SEC=90" `
+        --env "TAM_MEMORY_DIR=$MemoryDir" --env "CLAUDE_MEMORY_DIR=$MemoryDir" --env "MEMORY_TRIPLE_TIMEOUT_SEC=120" --env "MEMORY_ENRICH_TIMEOUT_SEC=90" `
         --env "MEMORY_REPR_TIMEOUT_SEC=120" --env "MEMORY_TRIPLE_MAX_PREDICT=512"
     if ($LASTEXITCODE -ne 0) { throw "Codex registration failed (see the message above)" }
 } finally {
@@ -110,7 +122,7 @@ try {
 
 # -- 6. Dashboard service (Windows Scheduled Task) --
 Write-Host "-> Step 6: Setting up dashboard service..." -ForegroundColor Yellow
-$DashboardPath = Join-Path $InstallDir "src" "dashboard.py"
+$DashboardPath = Join-Path (Join-Path $InstallDir "src") "dashboard.py"
 $LogDir = Join-Path $MemoryDir "logs"
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
 
@@ -123,8 +135,9 @@ try {
     $WrapperPath = Join-Path $InstallDir "start-dashboard.cmd"
     @"
 @echo off
-set CLAUDE_MEMORY_DIR=$MemoryDir
-set DASHBOARD_PORT=37737
+set "TAM_MEMORY_DIR=$MemoryDir"
+set "CLAUDE_MEMORY_DIR=$MemoryDir"
+set "DASHBOARD_PORT=37737"
 "$VenvPython" "$DashboardPath"
 "@ | Set-Content -Path $WrapperPath -Encoding ASCII
 
@@ -187,29 +200,29 @@ Write-Host ""
 Write-Host "  INSTALLED SUCCESSFULLY!" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Codex CLI now has persistent memory."
-Write-Host "  Just start 'codex' as usual — memory tools are available."
+Write-Host "  Just start 'codex' as usual - memory tools are available."
 Write-Host ""
 Write-Host "  Available MCP tools (20):"
-Write-Host "    memory_recall          — Search all past knowledge (3-level detail)"
-Write-Host "    memory_save            — Save decisions, solutions, lessons"
-Write-Host "    memory_update          — Update existing knowledge"
-Write-Host "    memory_timeline        — Browse session history"
-Write-Host "    memory_stats           — View statistics & health"
-Write-Host "    memory_consolidate     — Merge similar records"
-Write-Host "    memory_export          — Backup to JSON"
-Write-Host "    memory_forget          — Archive stale records"
-Write-Host "    memory_history         — View version history"
-Write-Host "    memory_delete          — Soft-delete a record"
-Write-Host "    memory_relate          — Link related records"
-Write-Host "    memory_search_by_tag   — Browse by tag"
-Write-Host "    memory_extract_session — Process session transcripts"
-Write-Host "    memory_observe         — Lightweight file change tracking"
-Write-Host "    self_error_log         — Log errors for pattern analysis"
-Write-Host "    self_insight           — Manage insights from error patterns"
-Write-Host "    self_rules             — Manage behavioral rules (SOUL)"
-Write-Host "    self_patterns          — Analyze error patterns & trends"
-Write-Host "    self_reflect           — Save session reflections"
-Write-Host "    self_rules_context     — Load rules at session start"
+Write-Host "    memory_recall          - Search all past knowledge (3-level detail)"
+Write-Host "    memory_save            - Save decisions, solutions, lessons"
+Write-Host "    memory_update          - Update existing knowledge"
+Write-Host "    memory_timeline        - Browse session history"
+Write-Host "    memory_stats           - View statistics & health"
+Write-Host "    memory_consolidate     - Merge similar records"
+Write-Host "    memory_export          - Backup to JSON"
+Write-Host "    memory_forget          - Archive stale records"
+Write-Host "    memory_history         - View version history"
+Write-Host "    memory_delete          - Soft-delete a record"
+Write-Host "    memory_relate          - Link related records"
+Write-Host "    memory_search_by_tag   - Browse by tag"
+Write-Host "    memory_extract_session - Process session transcripts"
+Write-Host "    memory_observe         - Lightweight file change tracking"
+Write-Host "    self_error_log         - Log errors for pattern analysis"
+Write-Host "    self_insight           - Manage insights from error patterns"
+Write-Host "    self_rules             - Manage behavioral rules (SOUL)"
+Write-Host "    self_patterns          - Analyze error patterns & trends"
+Write-Host "    self_reflect           - Save session reflections"
+Write-Host "    self_rules_context     - Load rules at session start"
 Write-Host ""
 Write-Host "  Web dashboard: http://localhost:37737"
 Write-Host ""

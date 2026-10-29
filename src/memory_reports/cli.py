@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from memory_reports.contracts import MAX_ITEMS, ReportError
 from memory_reports.render import render_markdown
-from memory_reports.storage import save_markdown
+from memory_reports.storage import save_markdown, write_private
 from memory_reports.tool import ToolArguments, build
 
 LOGGER = logging.getLogger(__name__)
@@ -46,9 +46,7 @@ def _memory_dir(explicit: Path | None) -> Path:
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(text, encoding="utf-8")
-    temporary.replace(path)
+    write_private(path, text)
 
 
 def main(argv: list[str] | None = None) -> int:

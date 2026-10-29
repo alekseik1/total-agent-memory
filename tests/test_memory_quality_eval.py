@@ -15,7 +15,7 @@ spec.loader.exec_module(evaluation)
 
 
 def test_contract_dataset_has_distinct_topics_and_no_cross_project_gold():
-    data = json.loads((ROOT / "benchmarks/data/memory-contracts-v1.json").read_text())
+    data = json.loads((ROOT / "benchmarks/data/memory-contracts-v1.json").read_text(encoding="utf-8"))
     cases = evaluation.load_cases(data)
     assert len(cases) == 12
     assert {case.category for case in cases} >= {
@@ -54,7 +54,7 @@ def test_judge_audit_separates_api_errors_and_conflicting_identical_answers(tmp_
         },
     ]
     path = tmp_path / "answers.jsonl"
-    path.write_text("\n".join(json.dumps(row) for row in rows))
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
     assert evaluation.judge_audit(path) == {
         "rows": 3,
         "api_errors": 1,

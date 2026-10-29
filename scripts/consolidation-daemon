@@ -8,7 +8,7 @@ Usage:
                          [--budget N]
 
 Environment:
-    MEMORY_DB_PATH      Override DB location (default: ~/.claude-memory/memory.db)
+    MEMORY_DB_PATH      Override DB location (default: <memory dir>/memory.db, see src/paths.py)
     LOG_LEVEL           Python logging level (default: INFO)
 
 Logs JSON to stderr. Handles SIGTERM/SIGINT for clean shutdown.
@@ -31,13 +31,11 @@ _SRC = _HERE.parent / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from paths import memory_db  # noqa: E402
 from workers.consolidation_daemon import run_daemon  # noqa: E402
 
 
-_DEFAULT_DB = os.environ.get(
-    "MEMORY_DB_PATH",
-    str(Path.home() / ".claude-memory" / "memory.db"),
-)
+_DEFAULT_DB = os.environ.get("MEMORY_DB_PATH") or str(memory_db())
 
 
 class _JsonFormatter(logging.Formatter):

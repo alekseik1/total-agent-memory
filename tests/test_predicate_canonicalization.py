@@ -25,7 +25,7 @@ def _fresh_vocabulary(monkeypatch):
 def tkg():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.executescript((Path(__file__).parent.parent / "migrations" / "008_temporal_kg.sql").read_text())
+    conn.executescript((Path(__file__).parent.parent / "migrations" / "008_temporal_kg.sql").read_text(encoding="utf-8"))
     yield TemporalKG(conn)
     conn.close()
 

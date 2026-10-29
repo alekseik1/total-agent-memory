@@ -154,7 +154,11 @@ async function api(path, options) {
   }
   const response = await fetch(path, init);
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || ("HTTP " + response.status));
+  if (!response.ok) {
+    const failure = new Error(body.error || ("HTTP " + response.status));
+    failure.confirmRequired = body.confirm_required || null;
+    throw failure;
+  }
   return body;
 }
 
@@ -251,7 +255,14 @@ document.getElementById("save").addEventListener("click", async (event) => {
   const button = event.currentTarget;
   button.disabled = true;
   try {
-    const reply = await api("/api/settings", {body: {values: Object.fromEntries(pending)}});
+    const values = Object.fromEntries(pending);
+    let reply;
+    try {
+      reply = await api("/api/settings", {body: {values}});
+    } catch (error) {
+      if (!error.confirmRequired || !window.confirm(error.message + "\n\n" + error.confirmRequired.join(", "))) throw error;
+      reply = await api("/api/settings", {body: {values, confirm_endpoint: true}});
+    }
     await reload();
     const note = el("div", {class: "msg good", text: reply.note});
     document.getElementById("sections").prepend(note);

@@ -34,6 +34,10 @@ from typing import Any, Callable
 
 LOG = lambda msg: sys.stderr.write(f"[contradiction] {msg}\n")
 
+# Reason returned by should_run() when the LLM is down; callers that persist
+# "done" must treat it as a deferral, not as a completed check.
+LLM_UNAVAILABLE_REASON = "LLM unavailable (auto-mode)"
+
 _DEFAULT_TYPES = ("decision", "solution")
 _DEFAULT_TOP_K = 5
 _DEFAULT_MIN_COSINE = 0.55
@@ -60,6 +64,11 @@ class ContradictionVerdict:
     provider: str | None = None
     model: str | None = None
     latency_ms: int | None = None
+
+    @property
+    def retryable(self) -> bool:
+        """True when the comparison failed (LLM error, unparsable reply) and must be re-run later."""
+        return self.decision == "error"
 
 
 # ──────────────────────────────────────────────
@@ -288,7 +297,7 @@ def should_run(ktype: str | None) -> tuple[bool, str]:
         try:
             import config
             if not config.has_llm("enrich"):
-                return False, "LLM unavailable (auto-mode)"
+                return False, LLM_UNAVAILABLE_REASON
         except Exception as exc:  # pragma: no cover — defensive
             return False, f"has_llm check failed: {exc}"
     return True, ""

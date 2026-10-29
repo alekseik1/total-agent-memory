@@ -61,4 +61,4 @@ TOTAL (R@5 recall_all)         |      84.5%
 Avg latency per query:
   full: 38.1ms
 
-Results saved to /Users/vitalii-macpro/claude-memory-server/benchmarks/results_longmemeval.json
+Results saved to ~/claude-memory-server/benchmarks/results_longmemeval.json

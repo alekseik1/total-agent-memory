@@ -91,7 +91,7 @@ async def test_export_writes_records_and_history_for_a_disabled_user_only(compan
     assert result.returncode == 0, result.stderr
     if sys.platform != 'win32':  # NTFS has no POSIX mode bits
         assert stat.S_IMODE(out.stat().st_mode) == 0o600
-    lines = [json.loads(line) for line in out.read_text().splitlines()]
+    lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
     header, records = lines[0], [line['record'] for line in lines if line['type'] == 'record']
     history = [line['event'] for line in lines if line['type'] == 'history']
     assert header['type'] == 'export' and header['records'] == len(records) == 3 and header['history'] == len(history)
@@ -103,7 +103,7 @@ async def test_export_writes_records_and_history_for_a_disabled_user_only(compan
     notes = [line['note']['content'] for line in lines if line['type'] == 'onboarding_note']
     assert notes == ['Onboarding note: lesson 2 passed.'] and header['onboarding_notes'] == 1
     again = cli(registry.root, 'user-export', 'leaver', '--out', str(out))
-    assert again.returncode == 1 and out.read_text().splitlines()[0] == json.dumps(header, ensure_ascii=False)
+    assert again.returncode == 1 and out.read_text(encoding="utf-8").splitlines()[0] == json.dumps(header, ensure_ascii=False)
     assert registry_events(registry, 'personal_exported') == [('personal_exported', 'leaver')]
 
 

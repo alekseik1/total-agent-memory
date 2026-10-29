@@ -205,7 +205,7 @@ strip_ansi = true
 keep_lines = ["FAIL", "ERROR", "passed"]
 max_lines = 20
 on_empty = "(all passed)"
-"""
+""", encoding="utf-8"
     )
     cfg = load_filter_config(toml)
     assert cfg["name"] == "pytest_short"

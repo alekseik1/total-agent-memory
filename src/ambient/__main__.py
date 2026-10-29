@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from ambient.hooks import COMMANDS, HookCall, run
+from stdio_utf8 import use_utf8_stdio
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -26,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=sorted(COMMANDS))
     parser.add_argument("--memory-dir", type=Path, default=None, help="default: TAM_MEMORY_DIR / ~/.tam")
     args = parser.parse_args(argv)
+    use_utf8_stdio()
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, stream=sys.stderr)
     if args.memory_dir is None:
         from paths import memory_dir

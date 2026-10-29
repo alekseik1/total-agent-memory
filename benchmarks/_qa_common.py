@@ -89,7 +89,7 @@ class Cache:
         self.lock = threading.Lock()
         self.rows: dict[str, dict] = {}
         if path.exists():
-            for line in path.read_text().splitlines():
+            for line in path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
                     row = json.loads(line)
                     self.rows[row["key"]] = row
@@ -101,7 +101,7 @@ class Cache:
         row = {"key": key, **value}
         with self.lock:
             self.rows[key] = row
-            with self.path.open("a") as fh:
+            with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 

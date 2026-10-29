@@ -43,10 +43,10 @@ def odb():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     migrations = Path(__file__).parent.parent / "migrations"
-    db.executescript((migrations / "017_outbox.sql").read_text())
+    db.executescript((migrations / "017_outbox.sql").read_text(encoding="utf-8"))
     # The columns of `knowledge` that find_existing_by_hash reads.
     db.executescript(KNOWLEDGE_DDL)
-    db.executescript((migrations / "039_write_path_reliability.sql").read_text())
+    db.executescript((migrations / "039_write_path_reliability.sql").read_text(encoding="utf-8"))
     yield db
     db.close()
 
@@ -357,9 +357,9 @@ def _file_db(path):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     migrations = Path(__file__).parent.parent / "migrations"
-    conn.executescript((migrations / "017_outbox.sql").read_text())
+    conn.executescript((migrations / "017_outbox.sql").read_text(encoding="utf-8"))
     conn.executescript(KNOWLEDGE_DDL)
-    conn.executescript((migrations / "039_write_path_reliability.sql").read_text())
+    conn.executescript((migrations / "039_write_path_reliability.sql").read_text(encoding="utf-8"))
     return conn
 
 

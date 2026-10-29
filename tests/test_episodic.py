@@ -70,7 +70,7 @@ def gdb():
     # apply migration 019 (just indexes, no schema changes)
     migration = (
         Path(__file__).parent.parent / "migrations" / "019_episodic_links.sql"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     db.executescript(migration)
     yield db
     db.close()

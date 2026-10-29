@@ -22,8 +22,14 @@ where applicable, or a "skip if already present" guard).
 Failure isolation
 -----------------
 A single failing stage does NOT block subsequent rows: each is wrapped
-in try/except and logged to `last_error`. Rows that fail >3 times are
-marked `failed` and stay out of the active queue until manually retried.
+in try/except and logged to `last_error`. A failed row goes back to
+`pending` parked behind an exponential backoff (`next_attempt_at`), so a
+short provider outage does not burn through its attempts. Failures caused
+by an unreachable provider ("deferrals") are not charged as attempts at
+all. Rows that exhaust `MEMORY_ENRICH_MAX_ATTEMPTS` become `failed`; they
+are re-queued automatically after `MEMORY_ENRICH_REQUEUE_AFTER_SEC` (up to
+`MAX_REQUEUES` times) or on demand with `retry_failed()` /
+`python -m enrichment_worker --retry-failed`.
 """
 from __future__ import annotations
 
@@ -34,6 +40,7 @@ import sqlite3
 import sys
 import threading
 import time
+import urllib.error
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,7 +49,9 @@ from typing import Any, Callable
 from memory_core.exit_join import join_at_exit
 from memory_core.leases import LeaseHeartbeat, LeaseLost, assert_owned, enqueue_rebuilds
 from memory_core.telemetry import counters, op_timer
+from llm_provider import ProviderUnavailable
 from paths import memory_dir
+from queue_retry import MAX_DEFERRALS, ensure_column, next_attempt_iso, now_iso
 
 LOG = lambda msg: sys.stderr.write(f"[enrich-worker] {msg}\n")
 
@@ -120,8 +129,43 @@ def _stale_after_sec() -> int:
         return 60
 
 
+def _requeue_after_sec() -> int:
+    """Seconds a `failed` row waits before it is re-queued automatically (0 disables)."""
+    raw = os.environ.get("MEMORY_ENRICH_REQUEUE_AFTER_SEC")
+    if not raw:
+        return DEFAULT_REQUEUE_AFTER_SEC
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_REQUEUE_AFTER_SEC
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+DEFAULT_REQUEUE_AFTER_SEC = 6 * 3600
+MAX_REQUEUES = 3
+ERROR_TEXT_LIMIT = 500
+BUSY_TIMEOUT_SEC = 30.0
+
+# Errors that mean "the provider is unreachable right now", not "this row is bad".
+TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
+    ProviderUnavailable, urllib.error.URLError, ConnectionError, TimeoutError,
+)
+
+
+def _ensure_schema(db) -> None:
+    """Create the retry columns / stage table on a database that predates migration 045."""
+    ensure_column(db, "enrichment_queue", "next_attempt_at", "TEXT")
+    ensure_column(db, "enrichment_queue", "deferrals", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(db, "enrichment_queue", "requeues", "INTEGER NOT NULL DEFAULT 0")
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS enrichment_stage_done ("
+        "queue_id INTEGER NOT NULL, stage TEXT NOT NULL, done_at TEXT NOT NULL, "
+        "PRIMARY KEY (queue_id, stage))"
+    )
+    db.commit()
 
 
 # ──────────────────────────────────────────────
@@ -143,6 +187,8 @@ class EnrichmentTask:
     attempts: int
     lease_token: str = ""
     atomic_only: bool = False
+    deferred: bool = False  # set by process_task when only provider outages caused the failure
+    outcome: str = ""  # 'pending' | 'failed', set by _mark_failed_or_retry
 
 
 def enqueue(
@@ -197,17 +243,80 @@ def reclaim_stale(db) -> int:
         .isoformat()
         .replace("+00:00", "Z")
     )
+    _ensure_schema(db)
+    # A row that kills the process never reaches _mark_failed_or_retry, so its
+    # claim already counted as an attempt: past the limit it must stop here
+    # instead of crash-looping the server on every restart.
     cur = db.execute(
         """UPDATE enrichment_queue
-              SET status='pending', lease_token=NULL, heartbeat_at=NULL,
+              SET status=CASE WHEN attempts >= ? THEN 'failed' ELSE 'pending' END,
+                  finished_at=CASE WHEN attempts >= ? THEN ? ELSE finished_at END,
+                  lease_token=NULL, heartbeat_at=NULL,
                   last_error='reclaimed: previous worker did not finish in time'
             WHERE status='processing'
               AND started_at IS NOT NULL
               AND COALESCE(heartbeat_at, started_at) < ?""",
-        (cutoff_iso,),
+        (_max_attempts(), _max_attempts(), _now(), cutoff_iso),
     )
     db.commit()
     return cur.rowcount or 0
+
+
+def fail_exhausted_pending(db) -> int:
+    """Move `pending` rows already at the attempt limit to `failed`.
+
+    Lowering MEMORY_ENRICH_MAX_ATTEMPTS leaves such rows unclaimable; as `failed`
+    they follow the normal cool-down / requeue path instead of waiting forever.
+    """
+    _ensure_schema(db)
+    cur = db.execute(
+        """UPDATE enrichment_queue
+              SET status='failed', finished_at=?, next_attempt_at=NULL,
+                  last_error=COALESCE(last_error, 'attempt limit lowered below recorded attempts')
+            WHERE status='pending' AND attempts >= ?""",
+        (_now(), _max_attempts()),
+    )
+    db.commit()
+    return cur.rowcount or 0
+
+
+def requeue_failed_due(db) -> int:
+    """Re-queue `failed` rows whose cool-down elapsed (bounded by MAX_REQUEUES)."""
+    delay = _requeue_after_sec()
+    if delay <= 0:
+        return 0
+    _ensure_schema(db)
+    cutoff = datetime.fromtimestamp(
+        datetime.now(timezone.utc).timestamp() - delay, tz=timezone.utc
+    ).isoformat().replace("+00:00", "Z")
+    cur = db.execute(
+        """UPDATE enrichment_queue
+              SET status='pending', attempts=0, deferrals=0, requeues=requeues + 1,
+                  next_attempt_at=NULL, finished_at=NULL
+            WHERE status='failed' AND requeues < ? AND finished_at IS NOT NULL
+              AND finished_at <= ?""",
+        (MAX_REQUEUES, cutoff),
+    )
+    db.commit()
+    return cur.rowcount or 0
+
+
+def retry_failed(db, *, project: str | None = None, limit: int | None = None) -> int:
+    """Put `failed` rows back in the queue right now. Returns the number re-queued."""
+    _ensure_schema(db)
+    sql = ("SELECT id FROM enrichment_queue WHERE status='failed'"
+           + (" AND project=?" if project else "") + " ORDER BY id"
+           + (" LIMIT ?" if limit else ""))
+    params = [p for p in (project, limit) if p]
+    ids = [row[0] for row in db.execute(sql, params).fetchall()]
+    for task_id in ids:
+        db.execute(
+            "UPDATE enrichment_queue SET status='pending', attempts=0, deferrals=0, "
+            "next_attempt_at=NULL, finished_at=NULL WHERE id=? AND status='failed'",
+            (task_id,),
+        )
+    db.commit()
+    return len(ids)
 
 
 def _claim_pending(db, limit: int) -> list[EnrichmentTask]:
@@ -217,7 +326,9 @@ def _claim_pending(db, limit: int) -> list[EnrichmentTask]:
     when running multi-threaded (defensive — by default there is only
     one daemon thread per Store).
     """
+    _ensure_schema(db)
     now = _now()
+    due = now_iso()
     token = uuid.uuid4().hex
     cur = db.execute(
         """UPDATE enrichment_queue
@@ -227,13 +338,15 @@ def _claim_pending(db, limit: int) -> list[EnrichmentTask]:
             WHERE id IN (
                 SELECT id FROM enrichment_queue
                  WHERE status='pending'
+                   AND attempts < ?
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
               ORDER BY enqueued_at ASC
                  LIMIT ?
             )
         RETURNING id, knowledge_id, session_id, project, ktype,
                   content_snapshot, tags_snapshot, importance, skip_quality,
                   attempts, lease_token, atomic_only""",
-        (now, now, token, limit),
+        (now, now, token, _max_attempts(), due, limit),
     )
     rows = cur.fetchall()
     db.commit()
@@ -267,19 +380,42 @@ def _mark_done(db, task: EnrichmentTask) -> bool:
         "lease_token=NULL WHERE id=? AND lease_token=? AND status='processing'",
         (_now(), task.id, task.lease_token),
     )
+    if cursor.rowcount == 1:
+        db.execute("DELETE FROM enrichment_stage_done WHERE queue_id=?", (task.id,))
     db.commit()
     return cursor.rowcount == 1
 
 
+def _deferral_count(db, task_id: int) -> int:
+    row = db.execute("SELECT deferrals FROM enrichment_queue WHERE id=?", (task_id,)).fetchone()
+    return (row[0] if row else 0) or 0
+
+
 def _mark_failed_or_retry(db, task: EnrichmentTask, error: str) -> bool:
-    next_status = "failed" if task.attempts >= _max_attempts() else "pending"
+    """Record a failed run: park the row behind a backoff, or fail it for good.
+
+    A provider outage (`task.deferred`) is not the row's fault: it does not use
+    up an attempt, only a bounded number of deferrals.
+    """
+    attempts = task.attempts
+    deferrals = _deferral_count(db, task.id)
+    if task.deferred and deferrals + 1 < MAX_DEFERRALS:
+        attempts = max(0, attempts - 1)
+        deferrals += 1
+        backoff_step = deferrals
+    else:
+        backoff_step = attempts
+    next_status = "failed" if attempts >= _max_attempts() else "pending"
+    due = next_attempt_iso(backoff_step) if next_status == "pending" else None
     cursor = db.execute(
-        "UPDATE enrichment_queue SET status=?, last_error=?, finished_at=?, lease_token=NULL "
+        "UPDATE enrichment_queue SET status=?, last_error=?, finished_at=?, lease_token=NULL, "
+        "attempts=?, deferrals=?, next_attempt_at=? "
         "WHERE id=? AND lease_token=? AND status='processing'",
-        (next_status, error[:500], _now() if next_status == "failed" else None,
-         task.id, task.lease_token),
+        (next_status, error[:ERROR_TEXT_LIMIT], _now() if next_status == "failed" else None,
+         attempts, deferrals, due, task.id, task.lease_token),
     )
     db.commit()
+    task.outcome = next_status
     return cursor.rowcount == 1
 
 
@@ -301,6 +437,9 @@ def _run_quality_gate(db, task: EnrichmentTask, store=None) -> None:
         LOG(f"quality_gate import failed: {e}")
         return
     score = score_quality(task.content_snapshot, ktype=task.ktype, project=task.project)
+    if score.retryable:
+        # An LLM failure is not a verdict on the content: re-run the gate later.
+        raise ProviderUnavailable(f"quality gate could not score: {score.reason}")
     log_decision(
         db, score, project=task.project, ktype=task.ktype,
         content=task.content_snapshot, knowledge_id=task.knowledge_id,
@@ -369,10 +508,13 @@ def _run_contradiction_detector(db, task: EnrichmentTask, store=None) -> None:
         from contradiction_detector import (
             should_run as _cd_should_run,
         )
+        from contradiction_detector import LLM_UNAVAILABLE_REASON
     except Exception as e:
         LOG(f"contradiction_detector import failed: {e}")
         return
     ok, reason = _cd_should_run(task.ktype)
+    if not ok and reason == LLM_UNAVAILABLE_REASON:
+        raise ProviderUnavailable(reason)
     if not ok or store is None:
         return
     embs = store.embed([task.content_snapshot])
@@ -399,6 +541,11 @@ def _run_contradiction_detector(db, task: EnrichmentTask, store=None) -> None:
             LOG(
                 f"async contradiction superseded {counts['superseded']} "
                 f"record(s) on save id={task.knowledge_id}"
+            )
+        failed = [v for v in verdicts if v.retryable]
+        if failed:
+            raise ProviderUnavailable(
+                f"contradiction check failed for {len(failed)} candidate(s): {failed[0].reason}"
             )
 
 
@@ -480,18 +627,31 @@ def process_task(db, task: EnrichmentTask, *, store=None) -> tuple[bool, str | N
     queue row can be retried; one bad stage does not nuke the others.
     """
     errors: list[str] = []
+    transient_only = True
     stages = [("atomic_facts", _run_atomic_facts)] if task.atomic_only else _STAGES
+    _ensure_schema(db)
+    done = {row[0] for row in db.execute(
+        "SELECT stage FROM enrichment_stage_done WHERE queue_id=?", (task.id,)).fetchall()}
     for label, runner in stages:
+        if label in done:
+            continue
         try:
             if task.lease_token:
                 assert_owned(db, task.id, task.lease_token)
             with op_timer(f"enrichment_{label}_ms"):
                 runner(db, task, store=store)
+            db.execute(
+                "INSERT OR IGNORE INTO enrichment_stage_done (queue_id, stage, done_at) VALUES (?, ?, ?)",
+                (task.id, label, _now()),
+            )
+            db.commit()
         except LeaseLost:
             raise
         except Exception as e:
             LOG(f"stage {label!r} failed for kid={task.knowledge_id}: {e}")
             errors.append(f"{label}: {e}")
+            transient_only = transient_only and isinstance(e, TRANSIENT_ERRORS)
+    task.deferred = bool(errors) and transient_only
     if errors:
         return False, "; ".join(errors)
     return True, None
@@ -507,6 +667,8 @@ def run_pending(db, *, max_rows: int | None = None, store=None) -> dict[str, int
     if os.environ.get("MEMORY_ATOMIC_FACTS_ENABLED", "false").lower() in ("true", "1", "yes"):
         enqueue_rebuilds(db, max_rows if max_rows is not None else _batch_size(), _now)
     reclaimed = reclaim_stale(db)
+    fail_exhausted_pending(db)
+    requeue_failed_due(db)
     limit = max_rows if max_rows is not None else _batch_size()
     tasks = _claim_pending(db, limit)
     counts = {
@@ -525,7 +687,7 @@ def run_pending(db, *, max_rows: int | None = None, store=None) -> dict[str, int
                 else:
                     updated = _mark_failed_or_retry(db, task, err or "unknown")
                     if updated:
-                        counts["failed" if task.attempts >= _max_attempts() else "retried"] += 1
+                        counts["failed" if task.outcome == "failed" else "retried"] += 1
                 if not updated:
                     counters.bump("enrichment_lease_lost")
             except LeaseLost as error:
@@ -602,3 +764,31 @@ def start_worker(store) -> _WorkerThread | None:
     t.start()
     join_at_exit(t, stop=t.stop)  # its tasks embed through onnxruntime; see memory_core/exit_join.py
     return t
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: ``python -m enrichment_worker --retry-failed [--project NAME]``."""
+    import argparse
+
+    from paths import memory_db
+
+    parser = argparse.ArgumentParser(prog="enrichment_worker", description=__doc__.splitlines()[0])
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="put every failed enrichment row back in the queue")
+    parser.add_argument("--project", default=None, help="limit --retry-failed to one project")
+    parser.add_argument("--limit", type=int, default=None, help="maximum rows to re-queue")
+    args = parser.parse_args(argv)
+    if not args.retry_failed:
+        parser.print_usage(sys.stderr)
+        return 2
+    db = sqlite3.connect(str(memory_db()), timeout=BUSY_TIMEOUT_SEC)
+    try:
+        count = retry_failed(db, project=args.project, limit=args.limit)
+    finally:
+        db.close()
+    sys.stdout.write(f"re-queued {count} failed enrichment row(s)\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
