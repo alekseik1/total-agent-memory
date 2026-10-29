@@ -6,6 +6,10 @@ and versions use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The orphan-edge backfill exited with an error.** `backfill_orphan_edges --trigger-now` (the macOS `orphan-backfill` LaunchAgent runs it every few hours) queued the records and then failed with `TypeError` while creating the `.reflect-pending` trigger, a regression in 14.10.0. Nothing was lost: reflection drained the queue on its next scheduled run instead of right away.
+
 ## [14.10.0] - 2026-10-26
 
 A review release: a full code review of the server, retrieval, team server, background workers and integrations, plus the four open contributor pull requests. The 79 MCP tools and their input schemas are unchanged; some responses gain fields. Migrations 043 to 046 and Postgres workspace 0007 to 0010 and control 0005 and 0006 are additive.
