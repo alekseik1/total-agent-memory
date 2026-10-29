@@ -107,7 +107,8 @@ def main() -> int:
 
     from paths import memory_dir
 
-    db_path = memory_dir() / "memory.db"
+    root = memory_dir()
+    db_path = root / "memory.db"
     if not db_path.exists():
         _log(f"db not found at {db_path}")
         return 1
@@ -145,7 +146,7 @@ def main() -> int:
     _log(f"enqueued {added} new items into triple_extraction_queue")
 
     if trigger_now:
-        trigger_path = memory_dir / ".reflect-pending"
+        trigger_path = root / ".reflect-pending"
         trigger_path.touch()
         _log(f"touched {trigger_path} — LaunchAgent should drain within ~6s")
     else:
