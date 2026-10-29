@@ -106,10 +106,12 @@ jobs:
         run: python tests/smoke/prewarm_models.py
       # timeout_method=thread: a test that outlives the pytest timeout dumps every thread's stack and
       # ends the run, so a hang shows where it is stuck instead of running into the job timeout.
+      # faulthandler_timeout: the same dump from a C watchdog, which also fires while a thread holds
+      # the GIL (the slowest test takes under a minute on macOS runners).
       - name: Test suite
         run: >-
           python -m pytest tests -q --strict-markers -p no:cacheprovider
-          -o timeout_method=thread
+          -o timeout_method=thread -o faulthandler_timeout=300
           -m "${PYTEST_BLOCKING_MARKERS}"
           --junitxml=test-results.xml
       - name: Disk usage after the suite
