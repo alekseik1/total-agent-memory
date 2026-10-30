@@ -47,7 +47,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|mcp__.*(memory_save.*|save_decision|save_intent)",
         "hooks": [
           {
             "type": "command",
@@ -69,7 +69,7 @@
         ]
       },
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|mcp__.*(memory_save.*|save_decision|save_intent)",
         "hooks": [
           {
             "type": "command",

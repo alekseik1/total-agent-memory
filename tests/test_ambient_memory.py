@@ -1009,7 +1009,8 @@ def test_docker_installer_registers_the_ambient_hooks(tmp_path):
 
     assert commands("UserPromptSubmit", "") == [str(launchers / "user-prompt-submit.sh")]
     assert commands("PreToolUse", "Bash|Edit|Write|MultiEdit|NotebookEdit") == [str(launchers / "rule-reminder.sh")]
-    matcher = "Edit|Write|MultiEdit|NotebookEdit|Bash"
+    from setup_wizard.extras import POST_TOOL_USE_MATCHER as matcher
+
     assert str(launchers / "post-tool-use.sh") in commands("PostToolUse", matcher)
     assert str(launchers / "post-tool-use.sh") in commands("PostToolUseFailure", matcher)
     assert not commands("PostToolUse", "")

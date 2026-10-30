@@ -237,6 +237,21 @@ def test_m1_post_tool_use_matcher_is_limited_to_logged_tools():
         assert {"Edit", "Write", "Bash"} <= set(matcher.split("|"))
 
 
+def test_post_tool_use_matcher_reaches_memory_saves_for_the_nudge():
+    sys.path.insert(0, str(SRC))
+    from setup_wizard.extras import HOOK_GROUPS
+
+    plugin = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    matchers = [m for _e, m, names in HOOK_GROUPS if "post-tool-use" in names]
+    matchers += [b["matcher"] for event in ("PostToolUse", "PostToolUseFailure") for b in plugin[event]
+                 if any(h["command"].endswith('post-tool-use.sh"') for h in b["hooks"])]
+    assert len(matchers) == 4
+    for matcher in matchers:
+        for tool in ("Edit", "mcp__memory__memory_save", "mcp__memory__save_decision"):
+            assert re.fullmatch(matcher, tool), (matcher, tool)
+        assert not re.search(matcher, "Read")
+
+
 # ── M2: interpreter discovery ────────────────────────────────────
 
 def _resolved_python(tmp_path: Path, layout: str, where: str) -> str:

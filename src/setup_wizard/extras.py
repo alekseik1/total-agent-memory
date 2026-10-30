@@ -21,9 +21,10 @@ SKILLS = ("memory-protocol", "onboard", "onboard-report", "report")
 ONBOARDING = ("onboard", "onboard-report")
 AGENT_SKILLS = (*ONBOARDING, "report")
 POWERSHELL = 'powershell -ExecutionPolicy Bypass -NoProfile -File "{path}"'
-# Tools whose calls the action log and the nudge counters use; Read/Grep/Glob/LS/Todo* are dropped by
-# src/ambient/actions.py anyway, so spawning Python for them only costs about 130 ms per call.
-POST_TOOL_USE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
+# Tools whose calls the action log uses, plus the memory saves the nudge counts (tam_hook.classify_tool);
+# Read/Grep/Glob/LS/Todo* are dropped by src/ambient/actions.py anyway, so spawning Python for them only
+# costs about 130 ms per call.
+POST_TOOL_USE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|mcp__.*(memory_save.*|save_decision|save_intent)"
 # PreToolUse for the memory server's own tools: adds `_ctx` (agent, session, workspace) to the tool input.
 PROVENANCE_MATCHER = "mcp__memory__.*"
 # Written next to settings.json by every hook install: the registration of the "memory" server the installer
