@@ -420,7 +420,7 @@ class TestSessionEnd:
         actions = tam_hook.session_end(
             {"session_id": "s", "cwd": str(repo), "transcript_path": str(transcript)},
             ROOT / "src", world["mem"] / "recovery", "proj", "User exited",
-            runner=lambda _src, script, args: calls.append((script, list(args))) or True)
+            runner=lambda _src, script, args, stdin_text=None: calls.append((script, list(args))) or True)
 
         end_args = dict(calls)["auto_session_end.py"]
         opts = _cli_opts(end_args)
@@ -450,7 +450,7 @@ class TestSessionEnd:
         tam_hook.session_end(
             {"session_id": "live-session", "cwd": str(cwd)},
             ROOT / "src", world["mem"] / "recovery", "proj", "User exited",
-            runner=lambda _src, script, args: calls.append((script, list(args))) or True)
+            runner=lambda _src, script, args, stdin_text=None: calls.append((script, list(args))) or True)
 
         assert _cli_opts(dict(calls)["auto_session_end.py"])["--session-id"] == "live-session"
 
