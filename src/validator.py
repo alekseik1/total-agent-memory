@@ -129,7 +129,9 @@ def _extract_urls(text: str) -> set[str]:
 
 def _path_kept(path: str, text: str) -> bool:
     """True if ``path`` (trailing slash aside) appears in ``text`` as a whole name."""
-    return re.search(re.escape(path.rstrip("/")) + _PATH_KEPT_END, text) is not None
+    # A relative path has no `/` or `~` anchoring its left edge: "a/b.py" must not match inside "data/b.py".
+    left = "" if path.startswith(("/", "~")) else _PATH_BOUNDARY
+    return re.search(left + re.escape(path.rstrip("/")) + _PATH_KEPT_END, text, re.MULTILINE) is not None
 
 
 def _extract_paths(text: str) -> set[str]:

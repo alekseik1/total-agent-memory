@@ -175,6 +175,8 @@ def test_wrapped_path_detected_when_lost(orig, trans, errors):
         pytest.param("See /tmp/cache/ here.", "See /tmp/cache here.", id="trailing-slash-dropped"),
         pytest.param("see /etc/hosts now", "see _/etc/hosts_ now", id="italic-added"),
         pytest.param("see /etc/hosts now", "see /etc/hosts/ now", id="trailing-slash-added"),
+        pytest.param("see a/b.py now", "see a/b.py now.", id="relative-verbatim"),
+        pytest.param("see a/b.py now", "see `a/b.py` now", id="relative-backtick-added"),
     ],
 )
 def test_path_survives_markdown_wrapping(orig, trans):
@@ -195,6 +197,12 @@ def test_path_surviving_only_as_prefix_of_longer_name_is_lost(orig, trans):
     v = ContentValidator()
     r = v.validate(orig, trans)
     assert r.errors == ["path lost: /etc/hosts"]
+
+
+@pytest.mark.parametrize("trans", ["see data/b.py now", "see xa/b.py now"])
+def test_relative_path_surviving_only_as_suffix_of_longer_name_is_lost(trans):
+    r = ContentValidator().validate("see a/b.py now", trans)
+    assert r.errors == ["path lost: a/b.py"]
 
 
 @pytest.mark.parametrize(
