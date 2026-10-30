@@ -27,7 +27,7 @@ def memory_dir(tmp_path):
     return tmp_path
 
 
-def _run(memory_dir, _env=None, user_context="", assistant_context="", **kw):
+def _run(memory_dir, _env=None, user_context="", assistant_context="", _stdin=None, **kw):
     """The hook passes the extracted context on stdin; argv carries only ids."""
     args = [sys.executable, str(SCRIPT)]
     for k, v in kw.items():
@@ -38,7 +38,8 @@ def _run(memory_dir, _env=None, user_context="", assistant_context="", **kw):
            # Ollama and make the result depend on the machine.
            "MEMORY_LLM_ENABLED": "false"}
     env.update(_env or {})
-    stdin = json.dumps({"user": user_context, "assistant": assistant_context})
+    stdin = _stdin if _stdin is not None else json.dumps(
+        {"user": user_context, "assistant": assistant_context})
     return subprocess.run(args, input=stdin, capture_output=True, text=True, env=env)
 
 
@@ -121,6 +122,16 @@ def test_a_user_only_session_writes_nothing(memory_dir):
     assert r.returncode == 0, r.stderr
     assert _rows(memory_dir, "SELECT * FROM session_summaries") == []
     sessions = _rows(memory_dir, "SELECT * FROM sessions WHERE id='user_only_sess'")
+    assert len(sessions) == 1
+    assert sessions[0]["ended_at"] is not None
+
+
+@pytest.mark.parametrize("stdin", ["", "not json", "[]"])
+def test_unreadable_stdin_still_closes_the_session(memory_dir, stdin):
+    r = _run(memory_dir, _stdin=stdin, session_id="bad_stdin", project="p")
+
+    assert r.returncode == 0, r.stderr
+    sessions = _rows(memory_dir, "SELECT * FROM sessions WHERE id='bad_stdin'")
     assert len(sessions) == 1
     assert sessions[0]["ended_at"] is not None
 

@@ -68,7 +68,13 @@ def main() -> int:
     p.add_argument("--reason", default="")
     a = p.parse_args()
     use_utf8_stdio()
-    context = json.loads(sys.stdin.read() or "{}")
+    # Unreadable stdin reads as nothing extracted: the sessions row must still close.
+    try:
+        context = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        context = {}
+    if not isinstance(context, dict):
+        context = {}
     assistant_context = str(context.get("assistant") or "")
 
     if not os.path.exists(DB_PATH):
