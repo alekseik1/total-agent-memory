@@ -129,8 +129,10 @@ def _extract_urls(text: str) -> set[str]:
 
 def _path_kept(path: str, text: str) -> bool:
     """True if ``path`` (trailing slash aside) appears in ``text`` as a whole name."""
-    # A relative path has no `/` or `~` anchoring its left edge: "a/b.py" must not match inside "data/b.py".
-    left = "" if path.startswith(("/", "~")) else _PATH_BOUNDARY
+    # Absolute and tilde paths have no left check, so "/etc/hosts" still counts inside "x/etc/hosts".
+    # A relative path needs a boundary, optionally followed by an italic `_`: "a/b.py" must not match
+    # inside "data/b.py", but "_a/b.py_" keeps it.
+    left = "" if path.startswith(("/", "~")) else _PATH_BOUNDARY + "_?"
     return re.search(left + re.escape(path.rstrip("/")) + _PATH_KEPT_END, text, re.MULTILINE) is not None
 
 

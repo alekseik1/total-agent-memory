@@ -177,6 +177,8 @@ def test_wrapped_path_detected_when_lost(orig, trans, errors):
         pytest.param("see /etc/hosts now", "see /etc/hosts/ now", id="trailing-slash-added"),
         pytest.param("see a/b.py now", "see a/b.py now.", id="relative-verbatim"),
         pytest.param("see a/b.py now", "see `a/b.py` now", id="relative-backtick-added"),
+        pytest.param("see a/b.py now", "see _a/b.py_ now", id="relative-italic-added"),
+        pytest.param("see a/b.py now", "see **a/b.py** now", id="relative-bold-added"),
     ],
 )
 def test_path_survives_markdown_wrapping(orig, trans):
