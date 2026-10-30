@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
 import pytest
 
@@ -149,13 +148,7 @@ def test_main_with_trigger_now_touches_the_reflect_trigger(tmp_path, monkeypatch
 
     db = sqlite3.connect(tmp_path / "memory.db")
     db.row_factory = sqlite3.Row
-    root = Path(__file__).parent.parent
-    db.executescript((root / "migrations" / "001_v5_schema.sql").read_text(encoding="utf-8"))
-    db.executescript(
-        "CREATE TABLE IF NOT EXISTS knowledge (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT, "
-        "status TEXT DEFAULT 'active', superseded_by INTEGER, created_at TEXT);"
-    )
-    db.executescript((root / "migrations" / "003_triple_extraction_queue.sql").read_text(encoding="utf-8"))
+    apply_full_schema(db)
     _link(db, _add_knowledge(db, "orphan mention"), _add_node(db, "lonely"))
     db.commit()
     db.close()
