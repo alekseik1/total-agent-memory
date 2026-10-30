@@ -210,20 +210,6 @@ PURGE_AFTER_DAYS = int(os.environ.get("PURGE_AFTER_DAYS", "365"))
 OBSERVATION_RETENTION_DAYS = int(os.environ.get("OBSERVATION_RETENTION_DAYS", "30"))
 # Lock wait for connections opened next to the store's own (background drains).
 SIDE_CONNECTION_BUSY_TIMEOUT_SEC = 5.0
-# Bounds SQLite WAL file growth: without a limit, checkpoints reuse space in
-# place but never shrink the file back down, so it sits at its high-water
-# mark indefinitely under sustained write load (measured: a 334MB WAL next
-# to a 171MB db). 48MB keeps the file well under the db size while staying
-# large enough that ordinary checkpoints don't thrash.
-DB_JOURNAL_SIZE_LIMIT_BYTES = 48 * 1024 * 1024
-# 8-10 concurrent MCP sessions plus the dashboard service contend for the
-# single writer lock; 5000ms was too tight and surfaced as "database is
-# locked" from memory_save. 15000ms absorbs realistic contention without
-# reading as a hang to the caller - do not raise further.
-DB_BUSY_TIMEOUT_MS = 15000
-# Short timeout for the opportunistic startup checkpoint attempt only: fail
-# fast if another reader holds a snapshot rather than stalling startup.
-DB_STARTUP_CHECKPOINT_TIMEOUT_MS = 200
 def _read_rules_limit(env=None):
     """Parse MEMORY_RULES_LIMIT. Unset/empty/invalid -> None (no cap)."""
     raw = (env if env is not None else os.environ).get("MEMORY_RULES_LIMIT")
@@ -1212,7 +1198,7 @@ class Store:
         # Per-space embedding via memory_core.EmbeddingProvider when the
         # space is anything but "text" — that lets jina-code (or whatever
         # the user configured) actually fire. The text path keeps using
-        # `Store.embed_with_identity` so the embedding cache, binary
+        # `Store.embed` so the embedding cache, binary
         # quantization and ST fallback stay wired.
         vector = None
         identity = self._primary_identity()

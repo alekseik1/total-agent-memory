@@ -700,7 +700,7 @@ def run_pending(db, *, max_rows: int | None = None, store=None) -> dict[str, int
 # Daemon thread
 # ──────────────────────────────────────────────
 
-# Same value as server.DB_BUSY_TIMEOUT_MS; duplicated rather than imported
+# Same value as config.DEFAULT_DB_BUSY_TIMEOUT_MS; duplicated rather than imported
 # because `server` is a 300KB module that imports this one back.
 _BUSY_TIMEOUT_MS = 15000
 
