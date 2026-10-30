@@ -98,6 +98,15 @@ def test_the_stored_assistant_context_is_redacted(memory_dir):
     assert "ghp_" not in summary
 
 
+def test_the_stored_assistant_context_is_capped_at_800_chars(memory_dir):
+    r = _run(memory_dir, session_id="cap_sess", project="p", assistant_context="x" * 900)
+    assert r.returncode == 0, r.stderr
+
+    summary = _rows(memory_dir, "SELECT summary FROM session_summaries")[0]["summary"]
+    assert "x" * 800 in summary
+    assert "x" * 801 not in summary
+
+
 def test_a_session_with_nothing_extracted_writes_nothing(memory_dir):
     """A summary saying only "session ended" tells the next session nothing,
     but the `sessions` row must still close - S4: an early return before
