@@ -428,7 +428,7 @@ class TestSessionEnd:
         assert not any("now add a regression test" in a or "Root cause" in a for a in end_args), \
             "prompts must not travel in argv"
         context = json.loads(end_stdin)
-        assert "now add a regression test" in context["user"]
+        assert list(context) == ["assistant"], "auto_session_end never stores prompts, so never receives them"
         assert "Root cause" in context["assistant"]
         assert any("auto_session_end started for s" in a for a in actions)
 

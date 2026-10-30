@@ -1081,7 +1081,8 @@ def session_end(payload: JsonDict, src_dir: Path, recovery_dir: Path, project: s
     if user or assistant:
         path = write_recovery(recovery_dir, session, project, cwd, reason_text, user, assistant, events)
         actions.append(f"recovery saved to {path}")
-    context = json.dumps({"user": user, "assistant": assistant[:AUTOSAVE_ASSISTANT_CHARS]})
+    tail = assistant[:AUTOSAVE_ASSISTANT_CHARS]
+    context = json.dumps({"user": user, "assistant": tail})
     if user and runner(src_dir, "auto_session_save.py",
                        ["--project", project, "--cwd", cwd, "--reason", reason_text, "--context-stdin"],
                        stdin_text=context):
@@ -1097,7 +1098,7 @@ def session_end(payload: JsonDict, src_dir: Path, recovery_dir: Path, project: s
         if runner(src_dir, "auto_session_end.py",
                   ["--session-id", end_session, "--project", project, "--cwd", cwd,
                    "--branch", _git(cwd, "branch", "--show-current"), "--reason", reason_text],
-                  stdin_text=context):
+                  stdin_text=json.dumps({"assistant": tail})):
             actions.append(f"auto_session_end started for {end_session}")
     return actions
 
