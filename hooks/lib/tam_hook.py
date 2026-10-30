@@ -1081,9 +1081,10 @@ def session_end(payload: JsonDict, src_dir: Path, recovery_dir: Path, project: s
     if user or assistant:
         path = write_recovery(recovery_dir, session, project, cwd, reason_text, user, assistant, events)
         actions.append(f"recovery saved to {path}")
+    context = json.dumps({"user": user, "assistant": assistant[:AUTOSAVE_ASSISTANT_CHARS]})
     if user and runner(src_dir, "auto_session_save.py",
                        ["--project", project, "--cwd", cwd, "--reason", reason_text, "--context-stdin"],
-                       stdin_text=json.dumps({"user": user, "assistant": assistant[:AUTOSAVE_ASSISTANT_CHARS]})):
+                       stdin_text=context):
         actions.append("auto_session_save started")
     if transcript is not None and runner(src_dir, "auto_episode_capture.py",
                                          ["--session-id", transcript.stem, "--project", project,
@@ -1091,14 +1092,12 @@ def session_end(payload: JsonDict, src_dir: Path, recovery_dir: Path, project: s
         actions.append(f"auto_episode_capture started for {transcript.stem}")
     # Writes the session_summaries row (producer="hook") the next session_init resumes from.
     # The payload's id first: a transcript found by the cwd fallback may be another session's.
-    # `=` form, so context text starting with "-" is not parsed as an option.
     if transcript is not None:
         end_session = str(payload.get("session_id") or transcript.stem)
         if runner(src_dir, "auto_session_end.py",
                   ["--session-id", end_session, "--project", project, "--cwd", cwd,
-                   "--branch", _git(cwd, "branch", "--show-current"),
-                   "--reason", reason_text, f"--user-context={user}",
-                   f"--assistant-context={assistant[:AUTOSAVE_ASSISTANT_CHARS]}"]):
+                   "--branch", _git(cwd, "branch", "--show-current"), "--reason", reason_text],
+                  stdin_text=context):
             actions.append(f"auto_session_end started for {end_session}")
     return actions
 

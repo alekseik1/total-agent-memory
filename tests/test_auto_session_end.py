@@ -5,6 +5,7 @@ file did not exist - `hook_run_script` fails silently and the hook logs success
 either way, so nothing was ever written.
 """
 
+import json
 import sqlite3
 import subprocess
 import sys
@@ -26,7 +27,8 @@ def memory_dir(tmp_path):
     return tmp_path
 
 
-def _run(memory_dir, _env=None, **kw):
+def _run(memory_dir, _env=None, user_context="", assistant_context="", **kw):
+    """The hook passes the extracted context on stdin; argv carries only ids."""
     args = [sys.executable, str(SCRIPT)]
     for k, v in kw.items():
         args += [f"--{k.replace('_', '-')}", v]
@@ -36,7 +38,8 @@ def _run(memory_dir, _env=None, **kw):
            # Ollama and make the result depend on the machine.
            "MEMORY_LLM_ENABLED": "false"}
     env.update(_env or {})
-    return subprocess.run(args, capture_output=True, text=True, env=env)
+    stdin = json.dumps({"user": user_context, "assistant": assistant_context})
+    return subprocess.run(args, input=stdin, capture_output=True, text=True, env=env)
 
 
 def _rows(memory_dir, sql):
@@ -56,13 +59,16 @@ def test_it_writes_a_summary_and_a_session_row(memory_dir):
         branch="dev",
         reason="User exited",
         user_context="fix the wearables CSV",
+        assistant_context="The CSV parser now skips the header row.",
     )
     assert r.returncode == 0, r.stderr
 
     summaries = _rows(memory_dir, "SELECT * FROM session_summaries")
     assert len(summaries) == 1
     assert summaries[0]["project"] == "core-monorepo"
-    assert "fix the wearables CSV" in summaries[0]["summary"]
+    assert "The CSV parser now skips the header row." in summaries[0]["summary"]
+    # User prompts stay in the recovery file and the transcript, never in a stored summary.
+    assert "fix the wearables CSV" not in summaries[0]["summary"]
 
     # The base schema seeds its own `fact-merge` row, so look for this one.
     sessions = _rows(
@@ -73,6 +79,22 @@ def test_it_writes_a_summary_and_a_session_row(memory_dir):
     assert sessions[0]["ended_at"] is not None
     assert sessions[0]["project"] == "core-monorepo"
     assert sessions[0]["branch"] == "dev"
+
+
+def test_the_stored_assistant_context_is_redacted(memory_dir):
+    r = _run(
+        memory_dir,
+        session_id="redact_sess",
+        project="p",
+        reason="User exited",
+        assistant_context="Deployed. <private>home address</private> key ghp_" + "a" * 36,
+    )
+    assert r.returncode == 0, r.stderr
+
+    summary = _rows(memory_dir, "SELECT summary FROM session_summaries")[0]["summary"]
+    assert "Deployed." in summary
+    assert "home address" not in summary
+    assert "ghp_" not in summary
 
 
 def test_a_session_with_nothing_extracted_writes_nothing(memory_dir):
@@ -116,7 +138,7 @@ def test_the_deterministic_summary_survives_a_failed_compression(memory_dir, mon
         session_id="compress_sess",
         project="p",
         reason="User exited",
-        user_context="the work that must survive",
+        assistant_context="the work that must survive",
         _env={"MEMORY_LLM_ENABLED": "force", "MEMORY_LLM_API_BASE": "http://127.0.0.1:9"},
     )
     assert r.returncode == 0, r.stderr

@@ -416,24 +416,20 @@ class TestSessionEnd:
         repo.mkdir()
         subprocess.run(["git", "init", "-q", "-b", "feature/x"], cwd=repo, check=True)
         transcript = self.write_transcript(world, NESTED_TRANSCRIPT)
-        calls: list[tuple[str, list[str]]] = []
+        calls: dict[str, tuple[list[str], str | None]] = {}
         actions = tam_hook.session_end(
             {"session_id": "s", "cwd": str(repo), "transcript_path": str(transcript)},
             ROOT / "src", world["mem"] / "recovery", "proj", "User exited",
-            runner=lambda _src, script, args, stdin_text=None: calls.append((script, list(args))) or True)
+            runner=lambda _src, script, args, stdin_text=None: calls.update({script: (list(args), stdin_text)}) or True)
 
-        end_args = dict(calls)["auto_session_end.py"]
-        opts = _cli_opts(end_args)
-        assert opts["--session-id"] == "s"
-        assert opts["--project"] == "proj"
-        assert opts["--cwd"] == str(repo)
-        assert opts["--branch"] == "feature/x"
-        assert opts["--reason"] == "User exited"
-        # `=` form: context text starting with "-" cannot be read as an option.
-        assert any(a.startswith("--user-context=") for a in end_args)
-        assert any(a.startswith("--assistant-context=") for a in end_args)
-        assert "now add a regression test" in opts["--user-context"]
-        assert "Root cause" in opts["--assistant-context"]
+        end_args, end_stdin = calls["auto_session_end.py"]
+        assert _cli_opts(end_args) == {"--session-id": "s", "--project": "proj", "--cwd": str(repo),
+                                       "--branch": "feature/x", "--reason": "User exited"}
+        assert not any("now add a regression test" in a or "Root cause" in a for a in end_args), \
+            "prompts must not travel in argv"
+        context = json.loads(end_stdin)
+        assert "now add a regression test" in context["user"]
+        assert "Root cause" in context["assistant"]
         assert any("auto_session_end started for s" in a for a in actions)
 
     def test_auto_session_end_takes_the_payload_session_not_a_fallback_transcript(self, world, monkeypatch):

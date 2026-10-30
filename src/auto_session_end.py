@@ -18,19 +18,24 @@ such variable is published, so the ids differ, and there is no equivalent
 hook at all - `SessionContinuity.session_end` creates the session row for
 it either way.
 
-The summary written here is deterministic, built from what the hook extracted.
+The summary written here is deterministic, built from what the hook extracted
+and passed on stdin (argv is visible to every local user in `ps`). User prompts
+are never stored: they stay in the redacted recovery file and the transcript.
 It is a floor, not a substitute for a real `session_end` call: an agent that
 summarises its own session says far more than the last few messages do.
 """
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from background_writes import sanitize_text
 from paths import memory_dir
 from session_continuity import SessionContinuity
+from stdio_utf8 import use_utf8_stdio
 
 DB_PATH = os.path.join(str(memory_dir()), "memory.db")
 
@@ -45,12 +50,10 @@ def _llm_available() -> bool:
         return False
 
 
-def build_summary(reason: str, user_context: str, assistant_context: str) -> str:
-    user = (user_context or "").strip()[:800]
-    assistant = (assistant_context or "").strip()[:800]
+def build_summary(reason: str, assistant_context: str) -> str:
+    reason = sanitize_text(reason)
+    assistant = sanitize_text((assistant_context or "").strip())[:800]
     parts = [f"Session ended: {reason}." if reason else "Session ended."]
-    if user:
-        parts.append(f"User was working on: {user}")
     if assistant:
         parts.append(f"Assistant context: {assistant}")
     return "\n".join(parts)
@@ -63,9 +66,11 @@ def main() -> int:
     p.add_argument("--cwd", default="")
     p.add_argument("--branch", default="")
     p.add_argument("--reason", default="")
-    p.add_argument("--user-context", default="")
-    p.add_argument("--assistant-context", default="")
     a = p.parse_args()
+    use_utf8_stdio()
+    context = json.loads(sys.stdin.read() or "{}")
+    user_context = str(context.get("user") or "")
+    assistant_context = str(context.get("assistant") or "")
 
     if not os.path.exists(DB_PATH):
         print(f"Memory DB not found at {DB_PATH}", file=sys.stderr)
@@ -80,14 +85,14 @@ def main() -> int:
         # nothing. The `sessions` row must still close, though: this cannot
         # early-return before that, or every session where the hook extracted
         # nothing at all keeps ended_at NULL forever.
-        if not (a.user_context or "").strip() and not (a.assistant_context or "").strip():
+        if not user_context.strip() and not assistant_context.strip():
             SessionContinuity(db).close_session_row(
                 a.session_id, project=a.project, branch=a.branch or None
             )
             db.commit()
             return 0
 
-        fallback = build_summary(a.reason, a.user_context, a.assistant_context)
+        fallback = build_summary(a.reason, assistant_context)
         # With an LLM reachable, let it write the summary from the session's
         # own artifacts - the handful of messages the hook could extract is a
         # thin thing to resume from. `session_end` only asks the LLM when
