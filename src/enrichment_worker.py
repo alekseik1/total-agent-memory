@@ -700,10 +700,6 @@ def run_pending(db, *, max_rows: int | None = None, store=None) -> dict[str, int
 # Daemon thread
 # ──────────────────────────────────────────────
 
-# Same value as config.DEFAULT_DB_BUSY_TIMEOUT_MS; duplicated rather than imported
-# because `server` is a 300KB module that imports this one back.
-_BUSY_TIMEOUT_MS = 15000
-
 
 class _WorkerThread(threading.Thread):
     def __init__(self, store):
@@ -750,7 +746,9 @@ class _WorkerThread(threading.Thread):
         # no other connection may hold, so it fails with "database is locked"
         # exactly when a second writer exists - the case this code is for.
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        import config
+
+        conn.execute(f"PRAGMA busy_timeout={config.get_db_busy_timeout_ms()}")
         return conn, True
 
     def run(self) -> None:

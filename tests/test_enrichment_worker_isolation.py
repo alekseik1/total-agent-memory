@@ -60,6 +60,15 @@ def test_worker_opens_its_own_connection(store):
         conn.close()
 
 
+def test_worker_connection_takes_the_configured_busy_timeout(store, monkeypatch):
+    monkeypatch.setenv("MEMORY_DB_BUSY_TIMEOUT_MS", "7000")
+    conn, _ = enrichment_worker._WorkerThread(store)._open_db()
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 7000
+    finally:
+        conn.close()
+
+
 def test_worker_falls_back_to_the_shared_connection_for_a_store_without_a_path():
     """Test doubles and pre-v13 Stores must still start, not crash."""
 
