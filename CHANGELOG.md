@@ -6,6 +6,12 @@ and versions use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security - session-end prompts stay out of argv and the database
+- The SessionEnd hook hands `auto_session_end.py` its context on stdin, as
+  upstream 14.10.0 does for its own child; argv carries only ids. The
+  session summary no longer stores the user's prompt; the assistant context
+  it keeps is stripped of `<private>` blocks and secrets first.
+
 ### Changed - hint hooks stay out of subagents
 - Rule reminders and `MEMORY_NUDGE` are skipped for calls whose payload
   carries `agent_id` (subagents only), on bash and PowerShell; the pre-edit
