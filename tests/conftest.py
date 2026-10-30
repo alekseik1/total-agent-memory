@@ -69,6 +69,16 @@ _raise_descriptor_limit()
 
 
 @pytest.fixture(autouse=True)
+def _stop_chroma_systems_of_the_test():
+    """Stop the Chroma systems a test started (see tests/chroma_support.py)."""
+    from tests.chroma_support import running_systems, stop_systems_started_since
+
+    before = running_systems()
+    yield
+    stop_systems_started_since(before)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_active_context_vault(tmp_path_factory, monkeypatch):
     """Redirect activeContext.md writes into a per-test tmp dir.
 
@@ -119,6 +129,32 @@ def _disable_async_enrichment_in_tests(monkeypatch):
     test."""
     monkeypatch.setenv("MEMORY_ASYNC_ENRICHMENT", "false")
     yield
+
+
+WINERROR_PRIVILEGE_NOT_HELD = 1314
+
+
+@pytest.fixture
+def make_symlink():
+    """Create a symlink, or skip the test when the OS refuses to.
+
+    A regular Windows user without Developer Mode cannot create symlinks
+    (``WinError 1314``), so a test that needs one has nothing to check there.
+    Any other failure is a real error and propagates.
+    """
+
+    def create(link: Path, target: Path, *, target_is_directory: bool = False) -> Path:
+        try:
+            os.symlink(target, link, target_is_directory=target_is_directory)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == WINERROR_PRIVILEGE_NOT_HELD:
+                pytest.skip("creating symlinks needs Developer Mode or an elevated Windows token")
+            raise
+        except NotImplementedError:
+            pytest.skip("this platform cannot create symlinks")
+        return link
+
+    return create
 
 
 @pytest.fixture

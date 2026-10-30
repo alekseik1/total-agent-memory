@@ -143,6 +143,8 @@ def test_install_overwrite_hooks_env_forces_replace(sandbox_home: Path):
 
     content = (hooks_dir / "session-start.sh").read_text(encoding="utf-8")
     assert "exit 99" not in content, "INSTALL_OVERWRITE_HOOKS=1 must replace the file"
+    backup = hooks_dir / "session-start.sh.bak"
+    assert backup.read_text(encoding="utf-8") == "#!/bin/sh\nexit 99\n", "the replaced hook must be kept as .bak"
 
 
 def test_non_claude_code_ide_does_not_install_hooks(sandbox_home: Path):

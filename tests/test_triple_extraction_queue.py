@@ -169,6 +169,7 @@ def test_mark_failed_gives_up_after_max_attempts(queue_db):
     q.enqueue(kid)
     item = q.claim_next()
     q.mark_failed(item["id"], "err1")
+    queue_db.execute("UPDATE triple_extraction_queue SET next_attempt_at=NULL")  # backoff elapsed
     item = q.claim_next()  # re-claimed
     q.mark_failed(item["id"], "err2")
 
