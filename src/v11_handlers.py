@@ -24,6 +24,8 @@ _SRC = str(Path(__file__).resolve().parent)
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
+DEFAULT_ENTITY_RESOLVE_THRESHOLD = 0.85
+
 
 # ─── memory_recall_iterative (IRCoT) ────────────────────────────────────
 
@@ -145,11 +147,14 @@ def handle_entity_resolve(args: dict, *, conn: sqlite3.Connection, embed_fn: Cal
     mention = (args.get("mention") or "").strip()
     project = args.get("project") or "general"
     type_ = args.get("type") or "person"
-    threshold = float(args.get("threshold") or 0.85)
+    raw_threshold = args.get("threshold")
+    threshold = DEFAULT_ENTITY_RESOLVE_THRESHOLD if raw_threshold is None else float(raw_threshold)
     create = bool(args.get("create_if_missing", True))
 
     if not mention:
         return {"error": "mention is required"}
+    if not 0.0 <= threshold <= 1.0:
+        return {"error": "threshold must be between 0 and 1"}
 
     def _embed(text: str):
         try:

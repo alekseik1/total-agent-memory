@@ -65,7 +65,7 @@ def latest_from_git_remote() -> str | None:
         )
         out = subprocess.run(
             ["git", "tag", "--sort=-version:refname"],
-            cwd=ROOT, capture_output=True, text=True, check=True, timeout=5,
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, timeout=5,
         ).stdout.strip().splitlines()
         return out[0].lstrip("v") if out else None
     except (subprocess.SubprocessError, FileNotFoundError):

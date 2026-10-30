@@ -35,6 +35,7 @@ TOKEN_LENGTH = 24
 TOKEN_GROUP = 4
 TTL_ENV = "TAM_TEAM_SETUP_TOKEN_TTL_MINUTES"
 SETUP_PATH = "/dashboard/"
+SETUP_TOTAL_KEY = "setup|all"
 SUPPORT_URL = "https://totalmemory.dev/pricing"
 SUPPORT_LINE = "Need help with rollout or support? See " + SUPPORT_URL
 
@@ -107,6 +108,9 @@ class SetupService:
             if Registry.superadmin_exists(db):
                 raise Conflict("Setup is already complete; sign in to the dashboard instead")
             db.execute("DELETE FROM setup_tokens WHERE used_at IS NULL")
+            # A new code (restart or `tam-team setup-token`) also lifts the shared lockout, so wrong guesses
+            # from strangers cannot keep the operator out of the wizard.
+            db.execute("DELETE FROM login_failures WHERE key=?", (Registry.digest(SETUP_TOTAL_KEY),))
             db.execute("INSERT INTO setup_tokens(digest,created_at,expires_at) VALUES (?,?,?)",
                        (Registry.digest(raw), now, expires))
             Registry._event(db, "setup_token_issued", "setup", "expires " + _iso(expires))
@@ -190,7 +194,7 @@ class SetupService:
 
     def _keys(self, ip: str) -> list[tuple[str, int]]:
         return [(Registry.digest("setup|ip|" + ip), self.policy.max_failures_per_ip),
-                (Registry.digest("setup|all"), self.policy.max_failures_total)]
+                (Registry.digest(SETUP_TOTAL_KEY), self.policy.max_failures_total)]
 
     @serializable
     def _check_lock(self, ip: str) -> None:

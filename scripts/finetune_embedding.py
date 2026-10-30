@@ -83,7 +83,7 @@ class Sample:
 
 
 def _iter_samples(path: Path) -> list[Sample]:
-    raw = json.loads(path.read_text())
+    raw = json.loads(path.read_text(encoding="utf-8"))
     out: list[Sample] = []
     for idx, sample in enumerate(raw):
         s = Sample(
@@ -345,7 +345,7 @@ def write_meta(
         "loss": "MultipleNegativesRankingLoss",
     }
     (output_dir / "locomo_meta.json").write_text(
-        json.dumps(meta, indent=2, ensure_ascii=False)
+        json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
 

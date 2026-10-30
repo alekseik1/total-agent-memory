@@ -376,7 +376,7 @@ def save(cal: PlattCalibrator, path: Path) -> None:
         "kind": "platt",
         **asdict(cal),
     }
-    p.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    p.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def load(path: Path) -> PlattCalibrator:
@@ -386,7 +386,7 @@ def load(path: Path) -> PlattCalibrator:
     Raises ``ValueError`` on schema mismatch or non-finite params.
     """
     p = Path(path)
-    raw = json.loads(p.read_text())
+    raw = json.loads(p.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError(f"calibrator JSON at {p} is not an object")
     if raw.get("kind") != "platt":

@@ -77,7 +77,7 @@ class Harness:
         return json.loads(out.stdout)
 
     def token(self) -> str:
-        return self.paths.token.read_text().strip()
+        return self.paths.token.read_text(encoding="utf-8").strip()
 
     def base(self) -> str:
         return f"http://127.0.0.1:{self.status()['port']}"
@@ -187,7 +187,7 @@ def test_file_lock_is_exclusive(tmp_path):
 def test_malformed_registry_is_reported(tmp_path):
     paths = registry.DaemonPaths.for_memory_dir(tmp_path)
     paths.ensure_root()
-    paths.registry.write_text('{"pid": "x"}')
+    paths.registry.write_text('{"pid": "x"}', encoding="utf-8")
     with pytest.raises(registry.RegistryError):
         registry.read_record(paths)
 
@@ -324,7 +324,7 @@ def test_start_status_singleton_stop(harness):
     assert stopped.returncode == 0 and "stopped" in stopped.stdout
     assert harness.cli("daemon", "status").returncode == 3
     assert not harness.paths.registry.exists()
-    assert "background work flushed" in harness.paths.log.read_text()
+    assert "background work flushed" in harness.paths.log.read_text(encoding="utf-8")
 
 
 def test_restart_replaces_the_process(harness):
@@ -369,7 +369,7 @@ def test_idle_exit(tmp_path):
     try:
         assert h.cli("daemon", "start").returncode == 0
         assert h.wait_stopped(WAIT_TIMEOUT_S), "daemon did not exit when idle"
-        assert '"reason": "idle"' in h.paths.log.read_text()
+        assert '"reason": "idle"' in h.paths.log.read_text(encoding="utf-8")
         assert not h.paths.registry.exists()
     finally:
         h.cleanup()
@@ -480,7 +480,7 @@ def test_proxy_falls_back_in_process_when_daemon_cannot_start(tmp_path):
 
         asyncio.run(scenario())
         assert h.cli("daemon", "status").returncode == 3
-        assert "cannot bind daemon socket" in h.paths.log.read_text()
+        assert "cannot bind daemon socket" in h.paths.log.read_text(encoding="utf-8")
     finally:
         blocker.close()
         h.cleanup()
@@ -520,7 +520,7 @@ def fake_version_entry(tmp_path: Path, version: str) -> Path:
         if entry.name not in ("version.py", "tam_daemon", "__pycache__"):
             (src / entry.name).symlink_to(entry)
     shutil.copytree(ENTRY, src / "tam_daemon", ignore=shutil.ignore_patterns("__pycache__"))
-    (src / "version.py").write_text(f'VERSION = "{version}"\nRELEASE_DATE = "2000-01-01"\n')
+    (src / "version.py").write_text(f'VERSION = "{version}"\nRELEASE_DATE = "2000-01-01"\n', encoding="utf-8")
     return src / "tam_daemon"
 
 

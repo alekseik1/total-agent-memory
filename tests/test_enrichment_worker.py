@@ -238,6 +238,7 @@ def test_run_pending_isolates_one_failing_stage(db, seed_record, monkeypatch):
 
 def test_run_pending_marks_failed_after_max_attempts(db, seed_record, monkeypatch):
     monkeypatch.setenv("MEMORY_ENRICH_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("MEMORY_ENRICH_RETRY_BASE_SEC", "0")
     ew.enqueue(db, knowledge_id=seed_record, session_id="s1",
                project="p", ktype="fact",
                content_snapshot="payload", tags_snapshot=[])
@@ -272,6 +273,7 @@ def test_quality_gate_stage_marks_dropped_record(db, seed_record):
         "actionability": 0.2, "verifiability": 0.2,
         "reason": "noise", "threshold": 0.5,
         "provider": "fake", "model": "fake-1", "latency_ms": 10,
+        "retryable": False,
     })()
     log_calls = []
     fake_qg = type("M", (), {

@@ -48,7 +48,7 @@ def _apply_migration_024(conn: sqlite3.Connection) -> None:
         );
         """
     )
-    conn.executescript((_MIGRATIONS_DIR / "024_entity_aliases.sql").read_text())
+    conn.executescript((_MIGRATIONS_DIR / "024_entity_aliases.sql").read_text(encoding="utf-8"))
 
 
 @pytest.fixture
@@ -514,8 +514,8 @@ def test_resolve_tolerates_failing_embed_fn(conn):
 
 def test_migration_024_is_idempotent(conn):
     """Re-running the migration script must not raise."""
-    conn.executescript((_MIGRATIONS_DIR / "024_entity_aliases.sql").read_text())
-    conn.executescript((_MIGRATIONS_DIR / "024_entity_aliases.sql").read_text())
+    conn.executescript((_MIGRATIONS_DIR / "024_entity_aliases.sql").read_text(encoding="utf-8"))
+    conn.executescript((_MIGRATIONS_DIR / "024_entity_aliases.sql").read_text(encoding="utf-8"))
     # Migrations row recorded once
     rows = conn.execute(
         "SELECT version FROM migrations WHERE version = '024'"

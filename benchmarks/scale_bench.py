@@ -177,7 +177,7 @@ def cmd_embed(args) -> None:
     d = Path(args.dir)
     d.mkdir(parents=True, exist_ok=True)
     meta = d / "vectors.json"
-    done = json.loads(meta.read_text())["done"] if meta.exists() else 0
+    done = json.loads(meta.read_text(encoding="utf-8"))["done"] if meta.exists() else 0
     vecs = open_vectors(d, args.total, "r+" if vectors_path(d).exists() else "w+")
     model = load_model(TextEmbedding, EMBED_MODEL)
     started = time.perf_counter()
@@ -189,7 +189,7 @@ def cmd_embed(args) -> None:
         vecs[done:end] = out
         vecs.flush()
         done = end
-        meta.write_text(json.dumps({"done": done, "total": args.total, "model": EMBED_MODEL}))
+        meta.write_text(json.dumps({"done": done, "total": args.total, "model": EMBED_MODEL}), encoding="utf-8")
         rate = (done - first) / (time.perf_counter() - started)
         print(f"embedded {done}/{args.total}  {rate:.0f}/s  eta {(args.total - done) / rate / 60:.1f} min", flush=True)
 
@@ -241,8 +241,8 @@ def loaded_count(srv) -> int:
 
 def cmd_load(args) -> None:
     d = Path(args.dir)
-    total = json.loads((d / "vectors.json").read_text())["total"]
-    done_embedded = json.loads((d / "vectors.json").read_text())["done"]
+    total = json.loads((d / "vectors.json").read_text(encoding="utf-8"))["total"]
+    done_embedded = json.loads((d / "vectors.json").read_text(encoding="utf-8"))["done"]
     if args.upto > done_embedded:
         raise SystemExit(f"only {done_embedded} vectors embedded, need {args.upto}")
     vecs = open_vectors(d, total, "r")
@@ -349,7 +349,7 @@ def cmd_measure(args) -> None:
     report["db_mb"] = round(db_bytes(d) / 2**20, 1)
     report["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20, 1)
     out = d / f"measure-{n}{'-' + args.label if args.label else ''}.json"
-    out.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False), flush=True)
     print(f"wrote {out}")
 
@@ -432,7 +432,7 @@ def cmd_http(args) -> None:
                MCP_HTTP_WORKERS=str(args.workers))
     url = f"http://127.0.0.1:{HTTP_PORT}/mcp"
     results = []
-    with open(d / "http-server.log", "w") as log:
+    with open(d / "http-server.log", "w", encoding="utf-8") as log:
         proc = subprocess.Popen([sys.executable, str(SRC / "server.py")], env=env,
                                 stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -446,7 +446,7 @@ def cmd_http(args) -> None:
             proc.wait(timeout=30)
     out = d / f"http-{n}-w{args.workers}.json"
     out.write_text(json.dumps({"records": n, "workers": args.workers, "duration_s": HTTP_DURATION_S,
-                               "save_share": HTTP_SAVE_SHARE, "levels": results}, indent=2, ensure_ascii=False))
+                               "save_share": HTTP_SAVE_SHARE, "levels": results}, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"wrote {out}")
 
 
@@ -487,7 +487,7 @@ def cmd_writers(args) -> None:
                               "FROM knowledge WHERE session_id LIKE 'writer-%'").fetchone()[0]
         t0 = time.perf_counter()
         children = [subprocess.Popen([sys.executable, __file__, "writer", "--dir", str(d), "--writer-id", str(first_id + w)],
-                                     stdout=subprocess.PIPE, text=True) for w in range(procs)]
+                                     stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace") for w in range(procs)]
         outs = [c.communicate()[0] for c in children]
         wall = time.perf_counter() - t0
         parsed = [json.loads(o.strip().splitlines()[-1]) for o in outs]
@@ -502,7 +502,7 @@ def cmd_writers(args) -> None:
     n = db.execute("SELECT COUNT(*) FROM knowledge WHERE status='active'").fetchone()[0]
     db.close()
     (d / f"writers-{n}.json").write_text(json.dumps({"records": n, "per_process": WRITER_RECORDS,
-                                                    "levels": results}, indent=2, ensure_ascii=False))
+                                                    "levels": results}, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def main() -> None:

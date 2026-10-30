@@ -27,15 +27,15 @@ def repo():
         (3,'SECRET Bob owns a hamster.','b','session');
     """)
     db.executescript(
-        (Path(__file__).parents[1] / "migrations/029_atomic_facts.sql").read_text()
+        (Path(__file__).parents[1] / "migrations/029_atomic_facts.sql").read_text(encoding="utf-8")
     )
     db.executescript(
-        (Path(__file__).parents[1] / "migrations/020_async_enrichment.sql").read_text()
+        (Path(__file__).parents[1] / "migrations/020_async_enrichment.sql").read_text(encoding="utf-8")
     )
     db.executescript(
         (
             Path(__file__).parents[1] / "migrations/030_evidence_lifecycle.sql"
-        ).read_text()
+        ).read_text(encoding="utf-8")
     )
     yield FactRepository(db)
     db.close()
@@ -367,3 +367,29 @@ def test_relative_date_uses_cited_message_date_not_later_target(repo):
         "SELECT observed_at,temporal_anchor_at,event_start FROM atomic_facts"
     ).fetchone()
     assert tuple(row) == ("2026-03-10", "2026-02-03", "2026-02-02")
+
+
+def test_search_matches_russian_word_forms(repo):
+    repo.db.execute("UPDATE knowledge SET content='Маше нравятся кролики.' WHERE id=1")
+    repo.db.execute(
+        "INSERT INTO atomic_facts(id,knowledge_id,subject,predicate,object,content) "
+        "VALUES(10,1,'Маше','нравятся','кролики','Маше нравятся кролики.')"
+    )
+    repo.db.execute("INSERT INTO atomic_fact_sources VALUES(10,1,'Маше нравятся кролики.')")
+    hits = repo.search("Маша", SearchScope(project="a"))
+    assert [hit["id"] for hit in hits] == [1]
+
+
+def test_evidence_chain_excludes_whole_tags_only(repo):
+    from memory_core.evidence_chains import EvidenceChains
+
+    FactExtractor(repo, Provider(), "test").extract(2)
+    hits = [{"id": 2, "content": "She feeds him carrots every evening."}]
+    scope = SearchScope(project="a")
+    repo.db.execute("ALTER TABLE knowledge ADD COLUMN tags TEXT DEFAULT '[]'")
+    repo.db.execute("UPDATE knowledge SET tags='[\"disaster-recovery\"]' WHERE id=1")
+    kept = EvidenceChains(repo.db, ("recovery",)).expand(hits, scope)
+    assert [hit["id"] for hit in kept] == [2, 1]
+    repo.db.execute("UPDATE knowledge SET tags='[\"x\", \"Recovery\"]' WHERE id=1")
+    dropped = EvidenceChains(repo.db, ("recovery",)).expand(hits, scope)
+    assert [hit["id"] for hit in dropped] == [2]

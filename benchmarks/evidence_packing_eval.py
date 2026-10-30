@@ -21,7 +21,7 @@ def main() -> None:
     parser.add_argument("--db", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    rows = json.loads(args.contexts.read_text())
+    rows = json.loads(args.contexts.read_text(encoding="utf-8"))
     db = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
     try:
@@ -46,7 +46,7 @@ def main() -> None:
             if len(row["context"].encode("utf-8")) > CONTEXT_MAX_BYTES:
                 raise ValueError("Context exceeds external runner cap")
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(rows, ensure_ascii=False))
+        args.output.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
     finally:
         db.close()
 

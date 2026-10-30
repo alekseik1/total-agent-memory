@@ -126,11 +126,11 @@ def exports(tmp_path):
 
 
 @pytest.fixture
-def vault(tmp_path):
+def vault(tmp_path, make_symlink):
     root = tmp_path / "vault"
     (root / "projects").mkdir(parents=True)
     (root / ".obsidian").mkdir()
-    (root / ".obsidian" / "workspace.md").write_text("# internal state that must not be imported\n")
+    (root / ".obsidian" / "workspace.md").write_text("# internal state that must not be imported\n", encoding="utf-8")
     (root / "projects" / "deploy.md").write_text(
         "---\ntitle: Deploy runbook\ntags: [ops, Deploy Notes]\ncreated: 2023-11-05\n---\n"
         "Deploys go out with `make release` from the main branch after CI is green.\n", encoding="utf-8")
@@ -140,10 +140,10 @@ def vault(tmp_path):
         "---\ntags:\n  - architecture\n  - backend\n---\n# Architecture\n\nIntro text before sections.\n\n"
         "```bash\n# not a heading inside code\necho hi\n```\n\n" + sections, encoding="utf-8")
     (root / "empty.md").write_text("---\ntags: x\n---\n", encoding="utf-8")
-    (root / "notes.txt").write_text("not markdown")
+    (root / "notes.txt").write_text("not markdown", encoding="utf-8")
     outside = tmp_path / "outside.md"
-    outside.write_text("Outside the vault and reached through a symlink.")
-    (root / "linked.md").symlink_to(outside)
+    outside.write_text("Outside the vault and reached through a symlink.", encoding="utf-8")
+    make_symlink(root / "linked.md", outside)
     stamp = datetime(2022, 1, 2, 3, 4, 5, tzinfo=UTC).timestamp()
     os.utime(root / "architecture.md", (stamp, stamp))
     return root
@@ -204,7 +204,7 @@ def test_mem0_results_shape_and_bare_list(exports, tmp_path):
     assert records[0].tags == ("mem0", "technology", "preferences")
     assert "user_id=alice" in records[0].context and "agent_id=planner" in records[1].context
     bare = tmp_path / "bare.json"
-    bare.write_text(json.dumps(MEM0_EXPORT["results"]))
+    bare.write_text(json.dumps(MEM0_EXPORT["results"]), encoding="utf-8")
     assert len(list(mem0_records(bare, _stats("mem0")))) == 2
 
 
@@ -217,7 +217,7 @@ def test_mem0_results_shape_and_bare_list(exports, tmp_path):
 ])
 def test_mem0_is_validated_strictly(tmp_path, payload, message):
     path = tmp_path / "bad.json"
-    path.write_text(json.dumps(payload))
+    path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ImportFormatError, match=message):
         list(mem0_records(path, _stats("mem0")))
 
@@ -258,10 +258,10 @@ def test_streaming_reader_handles_tiny_chunks_and_rejects_garbage(tmp_path, monk
     path.write_text(json.dumps(items), encoding="utf-8")
     assert list(json_stream.iter_json_array(path)) == items
     wrapped = tmp_path / "wrapped.json"
-    wrapped.write_text(json.dumps({"meta": {"x": [1, 2]}, "results": items[:3]}))
+    wrapped.write_text(json.dumps({"meta": {"x": [1, 2]}, "results": items[:3]}), encoding="utf-8")
     assert list(json_stream.iter_json_array(wrapped, ("results",))) == items[:3]
     for bad in ('[{"a": 1} {"b": 2}]', '[1, 2', '[1] trailing', '{"results": 5}', '[{"a": tru}]'):
-        path.write_text(bad)
+        path.write_text(bad, encoding="utf-8")
         with pytest.raises(ImportFormatError):
             list(json_stream.iter_json_array(path, ("results",)))
 
@@ -338,7 +338,7 @@ def test_duplicates_of_existing_records_are_not_backdated(exports, memory_dir):
     assert created["Prefers PostgreSQL over MySQL for new services"] == "2024-03-10T19:00:00.000000Z"
     copy = exports / "mem0-copy.json"
     shifted = {"results": [dict(MEM0_EXPORT["results"][0], created_at="2020-01-01T00:00:00Z")]}
-    copy.write_text(json.dumps(shifted))
+    copy.write_text(json.dumps(shifted), encoding="utf-8")
     stats = import_cli.run("mem0", copy, project="prefs", dry_run=False, include_assistant=False,
                            memory_dir=memory_dir)
     assert (stats.imported, stats.deduplicated) == (0, 1)
@@ -362,7 +362,7 @@ def test_long_turns_are_split_into_parts(tmp_path, memory_dir):
                                        text="\n\n".join(f"Paragraph {i}: " + "detail " * 300 for i in range(6)),
                                        created=T0)}}]
     path = tmp_path / "long.json"
-    path.write_text(json.dumps(export))
+    path.write_text(json.dumps(export), encoding="utf-8")
     stats = import_cli.run("chatgpt", path, project="long", dry_run=False, include_assistant=False,
                            memory_dir=memory_dir)
     rows = _rows(memory_dir, "long")
@@ -384,3 +384,12 @@ def test_tam_entry_point_routes_import(monkeypatch):
     import total_agent_memory.server as entry
 
     assert entry._portable_cli("import") is import_cli.main
+
+
+def test_deeply_nested_json_exits_with_a_usage_error_not_a_traceback(tmp_path, memory_dir, capsys):
+    depth = 200_000
+    nested = tmp_path / "nested.json"
+    nested.write_text("[" * depth + "]" * depth, encoding="utf-8")
+    code = import_cli.main(["mem0", str(nested), "--dry-run", "--project", "p", "--memory-dir", str(memory_dir)])
+    assert code == import_cli.EXIT_USAGE
+    assert "nested too deeply" in capsys.readouterr().err

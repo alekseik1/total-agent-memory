@@ -53,6 +53,8 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 from memory_core.episodes.extractor import extract_episodes_from_session  # noqa: E402
+from background_writes import save_background_knowledge  # noqa: E402
+from text_equivalence import same_values  # noqa: E402
 from workers.project_activity import is_active as _is_active_fn  # noqa: E402
 
 log = logging.getLogger("workers.consolidation")
@@ -297,23 +299,14 @@ def _materialize_transitive_facts(
                 if exists is not None:
                     continue
 
-                now_iso = _iso(_utcnow())
-                conn.execute(
-                    """
-                    INSERT INTO knowledge (
-                        session_id, type, content, context, project, tags,
-                        status, confidence, source, created_at
-                    ) VALUES (?, 'fact', ?, ?, ?, ?, 'active', 0.6, 'transitive', ?)
-                    """,
-                    (
-                        f"consolidation:{project}",
-                        content,
-                        f"hash:{content_hash}",
-                        project,
-                        json.dumps(["inferred", "transitive"]),
-                        now_iso,
-                    ),
+                saved = save_background_knowledge(
+                    conn, content=content, ktype="fact", project=project,
+                    session_id=f"consolidation:{project}", tags=["inferred", "transitive"],
+                    context=f"hash:{content_hash}", source="transitive", confidence=0.6,
+                    created_at=_iso(_utcnow()),
                 )
+                if saved is None or not saved.created:
+                    continue
                 inferred += 1
 
     if inferred:
@@ -422,16 +415,25 @@ def _cosine_dedup(
         ).fetchall()
     ]
 
+    # Databases that predate migration 021 have neither column; every vector is text then.
+    embedding_columns = {str(r[1]) for r in conn.execute("PRAGMA table_info(embeddings)")}
+    model_expr = "e.embed_model" if "embed_model" in embedding_columns else "''"
+    space_filter = (
+        "AND COALESCE(e.embedding_space, 'text') = 'text'"
+        if "embedding_space" in embedding_columns else ""
+    )
+
     merged_total = 0
     for ktype in types:
         if pause_check():
             break
         rows = conn.execute(
-            """
-            SELECT k.id, e.float32_vector
+            f"""
+            SELECT k.id, e.float32_vector, {model_expr}, k.content
             FROM knowledge k
             JOIN embeddings e ON e.knowledge_id = k.id
             WHERE k.project = ? AND k.type = ?
+              {space_filter}
               AND COALESCE(k.status, 'active') = 'active'
             ORDER BY k.created_at DESC, k.id DESC
             LIMIT ?
@@ -442,10 +444,12 @@ def _cosine_dedup(
         if len(rows) < 2:
             continue
 
-        kept: list[tuple[int, "np.ndarray"]] = []
+        # Cosine values are only meaningful inside one embedding model and
+        # dimension, so every (model, dimension) pair keeps its own kept set.
+        kept_by_space: dict[tuple[str, int], list[tuple[int, "np.ndarray", str]]] = {}
         merges: list[tuple[int, int]] = []  # (older_id, newer_id)
 
-        for kid_raw, blob in rows:
+        for kid_raw, blob, model, content in rows:
             kid = int(kid_raw)
             if not blob:
                 continue
@@ -454,14 +458,16 @@ def _cosine_dedup(
             if n <= 0:
                 continue
             unit = vec / n
+            kept = kept_by_space.setdefault((str(model or ""), int(unit.shape[0])), [])
 
             duplicate_of: int | None = None
-            for keep_id, keep_unit in kept:
+            for keep_id, keep_unit, keep_content in kept:
                 if pause_check():
                     duplicate_of = None
                     break
                 sim = float(np.dot(unit, keep_unit))
-                if sim >= threshold:
+                # A high cosine is not enough: "100 rpm" and "500 rpm" embed alike.
+                if sim >= threshold and same_values(content or "", keep_content or ""):
                     duplicate_of = keep_id
                     break
 
@@ -470,7 +476,7 @@ def _cosine_dedup(
                 # current `kid` is older → merge older(kid) into newer(duplicate_of).
                 merges.append((kid, duplicate_of))
             else:
-                kept.append((kid, unit))
+                kept.append((kid, unit, content or ""))
 
         if pause_check():
             break

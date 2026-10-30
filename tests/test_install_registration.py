@@ -38,7 +38,7 @@ def _install(home: Path, *args: str, env: dict | None = None) -> subprocess.Comp
     bin_dir = home / ".test-bin"
     bin_dir.mkdir(exist_ok=True)
     systemctl = bin_dir / "systemctl"
-    systemctl.write_text("#!/usr/bin/env bash\nexit 1\n")
+    systemctl.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
     systemctl.chmod(0o755)
     environ = {**os.environ, "HOME": str(home), "INSTALL_TEST_MODE": "1", "TAM_MEMORY_DIR": str(home / ".tam"),
                "XDG_CONFIG_HOME": str(home / ".config"),
@@ -57,7 +57,7 @@ def home(tmp_path: Path) -> Path:
 
 
 def _json(path: Path) -> dict:
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _assert_entry(entry: dict, home: Path) -> None:
@@ -73,7 +73,7 @@ def test_install_writes_the_file_each_client_reads(home: Path, ide: str):
     config = clients.BY_ID[ide].config(_host(home))
     assert config.is_file(), config
     if ide == "codex":
-        table = tomllib.loads(config.read_text())["mcp_servers"]["memory"]
+        table = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]["memory"]
         _assert_entry(table, home)
         assert table["required"] is True and table["env"]["MEMORY_TRIPLE_MAX_PREDICT"] == "512"
         assert table["env"]["MEMORY_MODE"] == "fast"
@@ -91,7 +91,7 @@ def test_install_writes_the_file_each_client_reads(home: Path, ide: str):
         assert (home / ".continue" / "rules" / "memory-protocol.md").is_file()
         assert not (home / ".continue" / "config.json").exists()
     elif ide == "aider":
-        text = config.read_text()
+        text = config.read_text(encoding="utf-8")
         assert "read:" in text and str(ROOT / "skills" / "memory-protocol" / "SKILL.md") in text
     else:
         _assert_entry(_json(config)["mcpServers"]["memory"], home)
@@ -122,7 +122,7 @@ def test_installer_keeps_keys_set_by_the_wizard_and_replaces_npm_entry(home: Pat
     cursor.write_text(json.dumps({"mcpServers": {
         "memory": {"command": "old", "args": [], "env": {"OPENAI_API_KEY": "sk-kept", "MEMORY_LLM_PROVIDER": "openai"}},
         "total-agent-memory": {"command": "/h/.tam/.venv/bin/total-agent-memory", "args": [], "env": {}},
-        "github": {"command": "gh-mcp"}}}))
+        "github": {"command": "gh-mcp"}}}), encoding="utf-8")
     result = _install(home, "--ide", "cursor")
     assert result.returncode == 0, result.stderr
     servers = _json(cursor)["mcpServers"]
@@ -137,9 +137,9 @@ def test_codex_npm_table_is_replaced_by_the_fenced_block(home: Path):
     config = home / ".codex" / "config.toml"
     config.parent.mkdir()
     config.write_text('[other]\nx = 1\n\n[mcp_servers.total-agent-memory]\ncommand = "/h/.tam/.venv/bin/total-agent-memory"'
-                      '\nargs = []\nenv = { MEMORY_MODE = "fast" }\n')
+                      '\nargs = []\nenv = { MEMORY_MODE = "fast" }\n', encoding="utf-8")
     assert _install(home, "--ide", "codex").returncode == 0
-    data = tomllib.loads(config.read_text())
+    data = tomllib.loads(config.read_text(encoding="utf-8"))
     assert set(data["mcp_servers"]) == {"memory"} and data["other"] == {"x": 1}
 
 
@@ -147,24 +147,24 @@ def test_codex_npm_table_is_replaced_by_the_fenced_block(home: Path):
 def test_broken_config_fails_the_install_and_is_left_alone(home: Path):
     cursor = home / ".cursor" / "mcp.json"
     cursor.parent.mkdir()
-    cursor.write_text('{"mcpServers": {broken')
+    cursor.write_text('{"mcpServers": {broken', encoding="utf-8")
     result = _install(home, "--ide", "cursor")
     assert result.returncode != 0 and "not valid JSON" in result.stderr
-    assert cursor.read_text() == '{"mcpServers": {broken'
+    assert cursor.read_text(encoding="utf-8") == '{"mcpServers": {broken'
     assert not (home / ".tam" / "setup.json").exists()
 
 
 @posix_installer
 def test_aider_refuses_to_merge_into_an_existing_read_list(home: Path):
     conf = home / ".aider.conf.yml"
-    conf.write_text("read:\n  - CONVENTIONS.md\n")
+    conf.write_text("read:\n  - CONVENTIONS.md\n", encoding="utf-8")
     result = _install(home, "--ide", "aider")
     assert result.returncode != 0 and "read:" in result.stderr
-    assert conf.read_text() == "read:\n  - CONVENTIONS.md\n"
-    conf.write_text("model: gpt-4.1\n")
+    assert conf.read_text(encoding="utf-8") == "read:\n  - CONVENTIONS.md\n"
+    conf.write_text("model: gpt-4.1\n", encoding="utf-8")
     assert _install(home, "--ide", "aider").returncode == 0
     assert _install(home, "--ide", "aider").returncode == 0
-    text = conf.read_text()
+    text = conf.read_text(encoding="utf-8")
     assert text.startswith("model: gpt-4.1\n") and text.count("read:") == 1
 
 
@@ -172,11 +172,11 @@ def test_aider_refuses_to_merge_into_an_existing_read_list(home: Path):
 def test_overwrite_hooks_env_is_passed_through(home: Path):
     assert _install(home, "--ide", "claude-code").returncode == 0
     hook = home / ".claude" / "hooks" / "session-start.sh"
-    hook.write_text("#!/bin/sh\nexit 99\n")
+    hook.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
     assert _install(home, "--ide", "claude-code").returncode == 0
-    assert "exit 99" in hook.read_text()
+    assert "exit 99" in hook.read_text(encoding="utf-8")
     assert _install(home, "--ide", "claude-code", env={"INSTALL_OVERWRITE_HOOKS": "1"}).returncode == 0
-    assert "exit 99" not in hook.read_text()
+    assert "exit 99" not in hook.read_text(encoding="utf-8")
 
 
 @posix_installer
@@ -185,7 +185,7 @@ def test_unregister_removes_entry_and_hooks_but_keeps_user_hooks(home: Path):
     settings = home / ".claude" / "settings.json"
     data = _json(settings)
     data["hooks"]["SessionStart"].append({"matcher": "", "hooks": [{"type": "command", "command": "/usr/local/bin/mine"}]})
-    settings.write_text(json.dumps(data))
+    settings.write_text(json.dumps(data), encoding="utf-8")
     assert register_main(["--unregister", "--client", "claude-code"], environ={}, host=_host(home)) == 0
     assert "memory" not in _json(home / ".claude.json")["mcpServers"]
     commands = [h["command"] for blocks in _json(settings)["hooks"].values() for b in blocks for h in b["hooks"]]
@@ -202,11 +202,11 @@ def test_upgrade_hints_at_registrations_older_installers_misplaced(home: Path, c
     host = _host(home)
     vscode = host.vscode_user() / "settings.json"
     vscode.parent.mkdir(parents=True)
-    vscode.write_text('{"editor.fontSize": 13, "cline": {"mcpServers": {"memory": {"command": "py"}}}}')
+    vscode.write_text('{"editor.fontSize": 13, "cline": {"mcpServers": {"memory": {"command": "py"}}}}', encoding="utf-8")
     opencode = home / ".opencode" / "config.json"
     opencode.parent.mkdir()
-    opencode.write_text('{"mcp": {"memory": {"command": "py"}}}')
-    before = (vscode.read_text(), opencode.read_text())
+    opencode.write_text('{"mcp": {"memory": {"command": "py"}}}', encoding="utf-8")
+    before = (vscode.read_text(encoding="utf-8"), opencode.read_text(encoding="utf-8"))
     env = {"TAM_MEMORY_DIR": str(home / ".tam")}
     with caplog.at_level(logging.WARNING, logger="setup_wizard.upgrade"):
         record = adopt_existing(env, host)
@@ -214,7 +214,7 @@ def test_upgrade_hints_at_registrations_older_installers_misplaced(home: Path, c
     lines = [r.getMessage() for r in caplog.records if "older installer" in r.getMessage()]
     assert len(lines) == 1 and "\n" not in lines[0]
     assert "Cline" in lines[0] and "OpenCode" in lines[0] and "tam setup --reconfigure" in lines[0]
-    assert (vscode.read_text(), opencode.read_text()) == before
+    assert (vscode.read_text(encoding="utf-8"), opencode.read_text(encoding="utf-8")) == before
 
 
 NPM_DIR = Path(os.environ.get("TAM_NPM_DIR", Path.home() / "PROJECT" / "total-agent-memory" / "npm"))

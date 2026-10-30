@@ -161,7 +161,7 @@ def test_litestream_replicate_and_restore_round_trip(stack):
     write(stack, ORIGINAL[:2], 1, 50, "delete")
     write(stack, ORIGINAL[2:], 1, 50, "wal")
     config = tmp / "litestream.yml"
-    config.write_text(replication.render_config(Path("/team-data"), settings))
+    config.write_text(replication.render_config(Path("/team-data"), settings), encoding="utf-8")
     docker("run", "-d", "--name", names["litestream"], "--network", f"container:{names['s3']}",
            "-v", f"{stack['volume']}:/team-data", "-v", f"{config}:/etc/litestream.yml:ro",
            "-e", f"AWS_ACCESS_KEY_ID={KEYS['AWS_ACCESS_KEY_ID']}",

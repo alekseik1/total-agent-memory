@@ -71,7 +71,7 @@ def test_settings_page_saves_encrypted_and_cleans_stored_keys(browser, dashboard
     playwright.expect(page.locator('.msg.good')).to_contain_text('Saved')
     playwright.expect(page.locator('#f-MEMORY_RECALL_MAX_RESULT_CHARS')).to_have_value('2500')
     playwright.expect(page.locator('section', has_text='Language model')).to_contain_text('••••6789')
-    assert KEY not in (root / 'settings.json').read_text()
+    assert KEY not in (root / 'settings.json').read_text(encoding="utf-8")
     assert KEY not in page.content()
 
     page.get_by_role('button', name='Scan memory').click()

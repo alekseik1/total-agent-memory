@@ -8,7 +8,6 @@ embedding hot path. Keep this module dumb — the heavy lifting lives in
 
 from __future__ import annotations
 
-import hashlib
 import sys
 import threading
 from collections import OrderedDict
@@ -69,36 +68,13 @@ class LRU:
             self._data.clear()
 
 
-def embedding_cache_key(
-    provider: str,
-    model: str,
-    space: str,
-    normalized_content: str,
-) -> str:
-    """Deterministic key for embedding caches.
-
-    `normalized_content` should already be lowercased/whitespace-collapsed
-    (see :func:`memory_core.dedup.normalize`). Mixing in provider/model/
-    space ensures the same text never collides across backends.
-    """
-    blob = "".join(
-        [
-            (provider or "").strip().lower(),
-            (model or "").strip(),
-            (space or "").strip().lower(),
-            normalized_content or "",
-        ]
-    )
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
 # ─── v11 Phase 7 — persistent embedding cache (multi-space) ──────────
 # Thin re-exports so callers can write
 #   from memory_core.cache import embedding_cache_get, embedding_cache_put
 # without knowing the helper module layout.
 
 from memory_core.embedding_cache import (  # noqa: E402, F401
-    cache_key as _v11_embedding_cache_key,
+    cache_key as embedding_cache_key,
     get as embedding_cache_get,
     put as embedding_cache_put,
     vacuum as embedding_cache_vacuum,

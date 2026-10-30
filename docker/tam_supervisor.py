@@ -4,7 +4,10 @@
 Runs MCP HTTP server (port 3737), dashboard HTTP UI (port 37737) and
 the reflection daemon side-by-side in one container so
 
-    docker run -p 3737:3737 -p 37737:37737 ghcr.io/.../total-agent-memory
+    docker run -p 127.0.0.1:3737:3737 -p 127.0.0.1:37737:37737 ghcr.io/.../total-agent-memory
+
+(publish on 127.0.0.1 only: both servers bind 0.0.0.0 inside the container and require the
+access token in ``<data dir>/state/http-token``).
 
 gives you the full stack with one command.
 
@@ -26,6 +29,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 
@@ -162,12 +166,29 @@ def _ensure_db_initialised() -> None:
         _log(f"warning: could not init DB ({e}) — dashboard /api/stats may return 503 until first save")
 
 
+def _ensure_http_token(services: list[ServiceDef]) -> None:
+    """Create the shared access token before the HTTP services start (they bind beyond loopback)."""
+    binds = {"mcp": os.environ.get("MCP_HTTP_HOST", "0.0.0.0"),
+             "dashboard": os.environ.get("DASHBOARD_BIND", "0.0.0.0")}
+    if not any(s.name in binds for s in services):
+        return
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+    import http_auth
+    mem_dir = Path(os.environ.get("TAM_MEMORY_DIR") or os.environ.get("CLAUDE_MEMORY_DIR") or "/data")
+    needs_token = any(not http_auth.is_loopback_bind(binds[s.name]) for s in services if s.name in binds)
+    if needs_token:
+        http_auth.load_or_create_token(mem_dir)
+        _log(f"HTTP access token required for MCP and dashboard: {http_auth.token_file(mem_dir)} "
+             f"(or set {http_auth.TOKEN_ENV})")
+
+
 def main() -> int:
     services = _select_services()
     if not services:
         _log("no services selected — exiting")
         return 0
     _ensure_db_initialised()
+    _ensure_http_token(services)
     _log(f"starting: {', '.join(s.name for s in services)}")
 
     children: list[_Child] = []

@@ -1,451 +1,453 @@
-"""A stored embedding is labelled with the backend that produced it.
+"""Embedding identity: which model made a vector, which vectors are stale, how spaces are fused."""
 
-`Store.embed` falls through FastEmbed → Ollama → SentenceTransformers and
-returns only vectors, so callers read the model name off configuration. With
-Ollama configured but unreachable that wrote rows saying `nomic-embed-text`
-(768-dim) holding 384-dim SentenceTransformer vectors - 30 of them on this
-machine - and cached those vectors under the same wrong name, so the cache's
-`expected_model` guard matched and served them back as if they belonged.
-"""
+from __future__ import annotations
 
-import json
 import sqlite3
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-import server
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from memory_core.embedding_identity import (  # noqa: E402
+    STALE_MODEL_SUFFIX,
+    EmbedIdentity,
+    FingerprintState,
+    check_fingerprint,
+    cosine,
+    fastembed_pooling,
+    record_fingerprint,
+    retire_group,
+    stale_ids,
+)
+from tests.pg_store_support import store_backend  # noqa: E402,F401 — fixture
 
-class _Embedder:
-    """Stands in for the SentenceTransformer fallback (384 dims)."""
-
-    def __init__(self, dim=384):
-        self.dim = dim
-
-    def encode(self, batch):
-        import numpy as np
-
-        return np.array([[0.1] * self.dim for _ in batch], dtype=np.float32)
+MODEL = "test-model"
+OLD_MODEL = "retired-model"
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
-    """A Store with no real backends - each test wires the ones it needs."""
-    s = server.Store.__new__(server.Store)
-    s.db = sqlite3.connect(":memory:")
-    s.db.row_factory = sqlite3.Row
-    from base_schema import apply_full_schema
+def store(store_backend, monkeypatch, tmp_path):  # noqa: F811 — pytest fixture injection
+    for flag in ("MEMORY_QUALITY_GATE_ENABLED", "MEMORY_CONTRADICTION_DETECT_ENABLED",
+                 "MEMORY_OUTBOX_ENABLED", "MEMORY_EPISODIC_ENABLED"):
+        monkeypatch.setenv(flag, "false")
+    import server as srv
 
-    apply_full_schema(s.db)
-    s.v9_cache = None
-    s._embedder = None       # `embedder` is a lazy property; back it directly
+    monkeypatch.setattr(srv, "MEMORY_DIR", tmp_path)
+    s = srv.Store(database=store_backend)
+    monkeypatch.setattr(s, "_active_embed_model_name", lambda: MODEL)
     s._embed_mode = "fastembed"
-    s._binary_search_ready = None
-    s._chroma_client = None
-    return s
+    yield s
+    s.db.close()
 
 
-def test_a_fallback_is_recorded_as_itself_not_as_the_configured_model(store, monkeypatch):
-    """The exact live failure: Ollama configured, tunnel down, ST answers."""
-    store._embed_mode = "ollama"
-    store._embedder = _Embedder(384)
-    monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
-
-    vectors, (model, provider) = store.embed_with_identity(["hello"])
-
-    assert len(vectors[0]) == 384
-    assert model == server.EMBEDDING_MODEL
-    assert provider == "st"
-    assert model != server.OLLAMA_EMBED_MODEL
-
-
-def test_the_working_backend_is_reported_as_itself(store, monkeypatch):
-    store._embed_mode = "ollama"
-    monkeypatch.setattr(store, "_ollama_embed", lambda batch: [[0.5] * 768 for _ in batch])
-
-    _vectors, (model, provider) = store.embed_with_identity(["hello"])
-
-    assert model == server.OLLAMA_EMBED_MODEL
-    assert provider == "ollama"
-
-
-def test_fastembed_reports_its_own_model(store, monkeypatch):
-    monkeypatch.setattr(store, "_fastembed_embed", lambda batch: [[0.2] * 384 for _ in batch])
-
-    _vectors, (model, provider) = store.embed_with_identity(["hello"])
-
-    assert model == server.FASTEMBED_MODEL
-    assert provider == "fastembed"
-
-
-def test_embed_keeps_its_old_shape_for_existing_callers(store, monkeypatch):
-    """A dozen call sites still expect a bare list of vectors."""
-    monkeypatch.setattr(store, "_fastembed_embed", lambda batch: [[0.2] * 384 for _ in batch])
-
-    out = store.embed(["hello"])
-
-    assert isinstance(out, list) and len(out[0]) == 384
-
-
-def test_a_backfilled_row_says_what_made_it(store, monkeypatch):
-    """End to end through the backfill drain (`_backfill_one`, which embeds via
-    `_embed_for_record` like memory_save): the row in `embeddings`, not just
-    the return value."""
-    from embedding_backfill import BackfillOutcome
-
-    store._embed_mode = "ollama"
-    store._embedder = _Embedder(384)
-    monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
+def seed(store, kid, vector, *, model=MODEL, space="text", project="p"):
     store.db.execute(
-        "INSERT INTO knowledge (id, session_id, type, content, project, created_at) "
-        "VALUES (1, 's1', 'fact', 'some knowledge', 'p', '2026-08-30T00:00:00Z')"
-    )
+        "INSERT INTO knowledge (id, session_id, type, content, project, status, created_at) "
+        "VALUES (?, 's', 'fact', ?, ?, 'active', '2026-04-27T00:00:00Z')", (kid, f"row-{kid}", project))
+    store._upsert_embedding(kid, list(vector), model, embedding_space=space)
     store.db.commit()
 
-    assert store._backfill_one(store.db, 1, use_chroma=False) == BackfillOutcome.EMBEDDED
 
-    row = store.db.execute(
-        "SELECT embed_model, embed_dim, embedding_provider, length(float32_vector)/4 AS real_dim "
-        "FROM embeddings WHERE knowledge_id=1"
-    ).fetchone()
-    assert row["embed_dim"] == row["real_dim"] == 384
-    assert row["embed_model"] == server.EMBEDDING_MODEL
-    assert row["embedding_provider"] == "st"
+def test_spaces_that_share_a_model_are_ranked_together_by_cosine(store, monkeypatch):
+    for kid, vector in {1: [1.0, 0.0], 2: [0.9, 0.1], 3: [0.8, 0.2]}.items():
+        seed(store, kid, vector)
+    for kid, vector in {4: [0.5, 0.5], 5: [0.4, 0.6]}.items():
+        seed(store, kid, vector, space="config")
+    monkeypatch.setattr(store, "embed", lambda texts: [[1.0, 0.0]])
+    store._v11_embed_provider = SimpleNamespace(active_model=lambda space: MODEL)
 
+    hits = store._search_spaces("query", project="p", limit=3)
 
-def test_nothing_available_returns_no_vectors_but_still_an_identity(store, monkeypatch):
-    store._embed_mode = "ollama"
-    monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
-    # `embedder` is lazy: left alone it would load a real SentenceTransformer
-    # and this test would measure the machine instead of the code.
-    monkeypatch.setattr(server, "HAS_ST", False)
-    store._embedder = None
-
-    vectors, identity = store.embed_with_identity(["hello"])
-
-    assert vectors is None
-    assert isinstance(identity, tuple) and len(identity) == 2
+    assert [kid for kid, _ in hits] == [1, 2, 3]
+    assert all(score > 0.5 for _, score in hits)
 
 
-# ──────────────────────────────────────────────
-# memory_rebuild_embeddings(stale_only=True)
-# ──────────────────────────────────────────────
+def test_models_that_differ_are_fused_by_rank_with_cosine_scores(store, monkeypatch):
+    seed(store, 1, [1.0, 0.0])
+    seed(store, 2, [0.0, 1.0, 0.0], model="code-model", space="code")
+    monkeypatch.setattr(store, "embed", lambda texts: [[1.0, 0.0]])
+    store._v11_embed_provider = SimpleNamespace(
+        active_model=lambda space: "code-model" if space == "code" else MODEL,
+        embed_query=lambda query, space: [0.0, 1.0, 0.0])
 
-def _seed(store, kid, model, dim, provider):
-    store.db.execute(
-        "INSERT INTO knowledge (id, session_id, type, content, project, created_at) "
-        "VALUES (?, 's1', 'fact', ?, 'p', '2026-08-30T00:00:00Z')",
-        (kid, f"content {kid}"),
-    )
-    store._upsert_embedding(kid, [0.1] * dim, model, provider=provider)
+    hits = dict(store._search_spaces("query", project="p", limit=5))
 
-
-def _rebuild(store, **args):
-    """Drive the real tool handler, not a copy of its query."""
-    import asyncio
-
-    server.store = store
-    # _do returns a JSON string (server.J), not an MCP content object.
-    return json.loads(asyncio.run(server._do("memory_rebuild_embeddings", args)))
+    assert set(hits) == {1, 2}
+    assert all(0.99 <= score <= 1.0 for score in hits.values())
 
 
-def test_stale_only_rebuilds_rows_from_another_backend(store, monkeypatch):
-    """`embedding_space` cannot express this: drifted rows are all `text` too."""
-    store._embed_mode = "fastembed"
-    monkeypatch.setattr(store, "_fastembed_embed", lambda batch: [[0.7] * 384 for _ in batch])
-    _seed(store, 1, server.FASTEMBED_MODEL, 384, "fastembed")   # current
-    _seed(store, 2, "nomic-embed-text", 768, "ollama")          # drifted
-    _seed(store, 3, "nomic-embed-text", 384, "ollama")          # drifted + mislabelled
-    store.db.commit()
+def test_fallback_vectors_carry_the_fallback_model(store, monkeypatch):
+    import server as srv
 
-    result = _rebuild(store, stale_only=True)
-
-    assert result["rebuilt"] == 2, result
-    models = dict(store.db.execute("SELECT knowledge_id, embed_model FROM embeddings").fetchall())
-    assert models[2] == server.FASTEMBED_MODEL
-    assert models[3] == server.FASTEMBED_MODEL
-
-
-def test_without_stale_only_every_row_is_rebuilt(store, monkeypatch):
-    """The flag must narrow the job, and its absence must not."""
-    store._embed_mode = "fastembed"
-    monkeypatch.setattr(store, "_fastembed_embed", lambda batch: [[0.7] * 384 for _ in batch])
-    _seed(store, 1, server.FASTEMBED_MODEL, 384, "fastembed")
-    _seed(store, 2, "nomic-embed-text", 768, "ollama")
-    store.db.commit()
-
-    assert _rebuild(store)["rebuilt"] == 2
-
-
-def test_a_record_with_no_embedding_is_not_called_stale(store, monkeypatch):
-    """Absent is a different job from stale, and a silent one to take on."""
-    store._embed_mode = "fastembed"
-    monkeypatch.setattr(store, "_fastembed_embed", lambda batch: [[0.7] * 384 for _ in batch])
-    store.db.execute(
-        "INSERT INTO knowledge (id, session_id, type, content, project, created_at) "
-        "VALUES (9, 's1', 'fact', 'never embedded', 'p', '2026-08-30T00:00:00Z')"
-    )
-    store.db.commit()
-
-    assert _rebuild(store, stale_only=True)["rebuilt"] == 0
-
-
-def test_the_cache_stores_the_model_that_made_the_vector(store, monkeypatch):
-    """`embed_get` guards on the stored name, so a wrong one serves a vector
-    from another space as if it belonged to this one."""
-    recorded = []
-
-    class _L2:
-        enabled = True
-
-    class _Cache:
-        l2 = _L2()
-
-        def embed_get(self, text, expected_model=None):
-            return None
-
-        def embed_set(self, text, vector, model):
-            recorded.append(model)
-
-    store.v9_cache = _Cache()
-    store._embed_mode = "ollama"
-    store._embedder = _Embedder(384)
-    monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
-
-    store.embed_with_identity(["hello"])
-
-    assert recorded == [server.EMBEDDING_MODEL]
-    assert server.OLLAMA_EMBED_MODEL not in recorded
-
-
-def test_the_tool_exposes_stale_only():
-    import asyncio
-
-    tools = asyncio.run(server.list_tools())
-    tool = {t.name: t for t in tools}["memory_rebuild_embeddings"]
-    schema = getattr(tool, "input_schema", None) or tool.inputSchema
-    assert "stale_only" in schema["properties"]
-
-
-def test_a_diverging_rebuild_is_skipped_not_rewritten_under_a_fallback_label(store, monkeypatch):
-    """`stale_only` compares a row's stored label to the CONFIGURED model;
-    the rebuild writes the label of whoever actually answered. When Ollama
-    is configured but unreachable, ST answers instead - those never agree,
-    so writing the fallback vector anyway would both mislabel the row and
-    leave it stale again next run. The tool must abort and skip instead of
-    reporting a fallback write as a successful rebuild."""
-    store._embed_mode = "ollama"
-    store._embedder = _Embedder(384)
-    monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
-    _seed(store, 1, "some-old-model", 384, "st")
-    store.db.commit()
-
-    result = _rebuild(store, stale_only=True)
-    assert result["rebuilt"] == 0
-    assert result["skipped"] == 1
-    assert "error" in result
-    assert "nothing was rewritten" in result["error"]
-
-    row = store.db.execute(
-        "SELECT embed_model, embed_dim, embedding_provider FROM embeddings WHERE knowledge_id=1"
-    ).fetchone()
-    assert row["embed_model"] == "some-old-model"
-    assert row["embed_dim"] == 384
-    assert row["embedding_provider"] == "st"
-
-    # A second run hits the same mismatch, not a second silent overwrite.
-    result2 = _rebuild(store, stale_only=True)
-    assert result2["rebuilt"] == 0
-    assert result2["skipped"] == 1
-
-
-def test_a_diverging_full_rebuild_aborts_too_not_only_stale_only(store, monkeypatch):
-    """The abort is not gated on `stale_only`: a full rebuild (every active
-    row, not just the stale ones) with the configured backend down must
-    abort the same way, or it would rewrite every row with a fallback
-    vector - strictly more damage than the stale_only case this is already
-    proven for."""
-    store._embed_mode = "ollama"
-    store._embedder = _Embedder(384)
-    monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
-    _seed(store, 1, "nomic-embed-text", 768, "ollama")
-    store.db.commit()
-
-    result = _rebuild(store, stale_only=False)
-
-    assert result["rebuilt"] == 0
-    assert result["skipped"] == 1
-    assert "error" in result
-
-    row = store.db.execute(
-        "SELECT embed_model, embed_dim FROM embeddings WHERE knowledge_id=1"
-    ).fetchone()
-    assert row["embed_model"] == "nomic-embed-text"
-    assert row["embed_dim"] == 768
-
-
-def test_a_mid_run_divergence_reports_rebuilt_and_skipped_separately(store, monkeypatch):
-    """The test above only covers row 0 of chunk 0, where `i == 0` makes
-    `skipped += len(rows) - i` indistinguishable from `skipped +=
-    len(chunk)`. With batch_size=1 and several stale rows, the backend
-    answers correctly for the first row (rebuilt=1, committed) and only
-    then diverges - `rebuilt` must survive the abort instead of being
-    folded into `skipped`."""
-    store._embed_mode = "fastembed"
-    calls = {"n": 0}
-
-    def _fastembed(batch):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return [[0.7] * 384 for _ in batch]
-        return None  # unavailable from the second call on
-
-    monkeypatch.setattr(store, "_fastembed_embed", _fastembed)
-    monkeypatch.setattr(store, "_check_ollama", lambda: False)
     monkeypatch.setenv("MEMORY_ALLOW_OLLAMA_IN_HOT_PATH", "true")
-    store._embedder = _Embedder(384)
+    monkeypatch.setattr(store, "_fastembed_embed", lambda texts: None)
+    monkeypatch.setattr(store, "_check_ollama", lambda: True)
+    monkeypatch.setattr(store, "_ollama_embed", lambda texts: [[0.5, 0.5, 0.5] for _ in texts])
 
-    _seed(store, 1, "nomic-embed-text", 768, "ollama")
-    _seed(store, 2, "nomic-embed-text", 768, "ollama")
-    _seed(store, 3, "nomic-embed-text", 768, "ollama")
+    vectors, identity = store.embed_identified(["hello"])
+    record, error = store._embed_for_record("hello", "", "auto")
+
+    assert vectors == [[0.5, 0.5, 0.5]]
+    assert (identity.model, identity.provider) == (srv.OLLAMA_EMBED_MODEL, "ollama")
+    assert error is None
+    assert (record["model"], record["provider"]) == (srv.OLLAMA_EMBED_MODEL, "ollama")
+    assert record["model"] != MODEL
+
+
+def test_primary_vectors_carry_the_configured_model(store, monkeypatch):
+    monkeypatch.setattr(store, "_fastembed_embed", lambda texts: [[0.1, 0.2] for _ in texts])
+
+    record, _ = store._embed_for_record("hello", "", "auto")
+
+    assert (record["model"], record["provider"]) == (MODEL, "fastembed")
+
+
+def test_fallback_vector_is_not_served_from_the_l2_cache_as_the_configured_model(store, monkeypatch, tmp_path):
+    import server as srv
+    from cache_layer import L2EmbeddingCache
+
+    l2 = L2EmbeddingCache(db_path=tmp_path / "l2.db", enabled=True)
+    store.v9_cache = SimpleNamespace(l2=l2, embed_get=l2.get, embed_set=l2.set)
+    monkeypatch.setenv("MEMORY_ALLOW_OLLAMA_IN_HOT_PATH", "true")
+    monkeypatch.setattr(store, "_fastembed_embed", lambda texts: None)
+    monkeypatch.setattr(store, "_check_ollama", lambda: True)
+    monkeypatch.setattr(store, "_ollama_embed", lambda texts: [[0.5, 0.5, 0.5] for _ in texts])
+
+    store.embed(["hello"])
+
+    assert l2.get("hello", expected_model=MODEL) is None
+    assert l2.get("hello", expected_model=srv.OLLAMA_EMBED_MODEL) == [0.5, 0.5, 0.5]
+    l2.close()
+
+
+def test_stale_ids_lists_only_records_of_other_models(store):
+    seed(store, 1, [1.0, 0.0])
+    seed(store, 2, [1.0, 0.0], model=OLD_MODEL)
+    seed(store, 3, [1.0, 0.0], model=OLD_MODEL, space="config")
+    store.db.execute("UPDATE knowledge SET status='superseded' WHERE id=3")
+
+    assert stale_ids(store.db, {"text": MODEL, "config": MODEL}) == [2]
+    assert stale_ids(store.db, {}) == []
+
+
+def test_stale_vectors_are_queued_for_reembedding(store):
+    seed(store, 1, [1.0, 0.0])
+    seed(store, 2, [1.0, 0.0], model=OLD_MODEL)
+
+    assert store.enqueue_stale_vectors(force=True) == 1
+    assert store.enqueue_stale_vectors(force=True) == 0
+    assert [row[0] for row in store.db.execute("SELECT knowledge_id FROM embedding_pending")] == [2]
+
+
+def test_stale_scan_does_nothing_while_a_fallback_serves_embeds(store):
+    seed(store, 2, [1.0, 0.0], model=OLD_MODEL)
+    store._embed_mode = "st"
+
+    assert store.enqueue_stale_vectors(force=True) == 0
+
+
+def test_stale_scan_is_rate_limited(store):
+    seed(store, 2, [1.0, 0.0], model=OLD_MODEL)
+    store.enqueue_stale_vectors(force=True)
+    seed(store, 3, [1.0, 0.0], model=OLD_MODEL)
+
+    assert store.enqueue_stale_vectors() == 0
+    assert store.enqueue_stale_vectors(force=True) == 1
+
+
+def test_drain_replaces_a_stale_vector_and_keeps_its_space(store, monkeypatch):
+    seed(store, 2, [1.0, 0.0], model=OLD_MODEL, space="text")
+    store.db.execute("UPDATE embeddings SET content_type='code', language='py' WHERE knowledge_id=2")
     store.db.commit()
+    monkeypatch.setattr(store, "_fastembed_embed", lambda texts: [[0.0, 1.0] for _ in texts])
+    monkeypatch.setattr(store, "_expected_models", lambda: {"text": MODEL})
+    monkeypatch.setattr(store, "_embed_for_record", lambda *a, **k: (
+        {"vector": [0.0, 1.0], "model": MODEL, "provider": "fastembed", "space": "text",
+         "content_type": "code", "language": "py"}, None))
+    store.enqueue_stale_vectors(force=True)
 
-    result = _rebuild(store, stale_only=True, batch_size=1)
+    counts = store.drain_embedding_backfill()
 
-    assert result["rebuilt"] == 1
-    assert result["skipped"] == 2
-    assert "error" in result
-    assert "nothing was rewritten" not in result["error"]
-    assert "1 row(s) already rebuilt" in result["error"]
-
-    models = dict(store.db.execute("SELECT knowledge_id, embed_model FROM embeddings").fetchall())
-    assert models[1] == server.FASTEMBED_MODEL  # row 1 really was rebuilt...
-    assert models[2] == "nomic-embed-text"       # ...rows 2 and 3 were left untouched
-    assert models[3] == "nomic-embed-text"
-
-
-def test_a_batch_with_a_partial_cache_hit_does_not_mix_backends(store, monkeypatch):
-    """L2 holds 'alpha' under the active model; the rest of the batch falls
-    back to a different backend. `embed_with_identity` used to return the
-    fresh half's identity for the whole batch, so the cached half (a real
-    768-dim Ollama vector) got written to a row labelled as the 384-dim ST
-    fallback that never produced it. Every vector in the batch must now
-    come back under the one identity the call returns."""
-    store._embed_mode = "ollama"
-    store._embedder = _Embedder(384)
-    monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
-    active = store._active_embed_model_name()
-
-    class _L2:
-        enabled = True
-
-    class _PartialCache:
-        l2 = _L2()
-
-        def __init__(self):
-            self.sets: list[tuple[str, int, str]] = []
-
-        def embed_get(self, text, expected_model=None):
-            return [0.5] * 768 if text == "alpha" else None
-
-        def embed_set(self, text, vector, model):
-            self.sets.append((text, len(vector), model))
-
-    store.v9_cache = _PartialCache()
-
-    vectors, (model, provider) = store.embed_with_identity(["alpha", "beta"])
-
-    assert len(vectors[0]) == 384
-    assert len(vectors[1]) == 384
-    assert model == server.EMBEDDING_MODEL and provider == "st"
-    assert model != active
-    # Both halves must be re-cached under the identity that actually
-    # produced them - "alpha" (recomputed) as well as "beta" (fresh), or
-    # the next call pays for the recompute again and reads back a wrong
-    # label from the stale L2 entry.
-    assert ("alpha", 384, server.EMBEDDING_MODEL) in store.v9_cache.sets
-    assert ("beta", 384, server.EMBEDDING_MODEL) in store.v9_cache.sets
+    assert counts["embedded"] == 1
+    model, space, content_type, language = store.db.execute(
+        "SELECT embed_model, embedding_space, content_type, language FROM embeddings WHERE knowledge_id=2").fetchone()
+    assert (model, space, content_type, language) == (MODEL, "text", "code", "py")
+    assert store.db.execute("SELECT COUNT(*) FROM embedding_pending").fetchone()[0] == 0
 
 
-def test_a_flapping_backend_does_not_answer_the_recompute_differently(store, monkeypatch):
-    """The previous fix recomputed the cached half by re-entering the whole
-    fallback chain (`_compute`) instead of calling the backend that answered
-    `fresh` directly. A backend with no failure state of its own
-    (`_ollama_embed`) that is down for the first call and back up by the
-    second answers the recompute too - mixing a 768-dim ollama vector into
-    a batch labelled 384-dim ST. The recompute must call the SAME backend
-    `fresh` used, not the fallback chain again."""
-    store._embed_mode = "ollama"
-    store._embedder = _Embedder(384)
-    calls = {"n": 0}
+def test_drain_leaves_stale_vectors_alone_during_a_fallback(store, monkeypatch):
+    seed(store, 2, [1.0, 0.0], model=OLD_MODEL)
+    store.enqueue_stale_vectors(force=True)
+    store._embed_mode = "st"
+    monkeypatch.setattr(store, "_embed_for_record", lambda *a, **k: pytest.fail("must not re-embed on a fallback"))
 
-    def _flapping_ollama(batch):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return None  # down for the fresh half
-        return [[0.9] * 768 for _ in batch]  # recovered for the would-be recompute
+    store.drain_embedding_backfill()
 
-    monkeypatch.setattr(store, "_ollama_embed", _flapping_ollama)
-
-    class _L2:
-        enabled = True
-
-    class _PartialCache:
-        l2 = _L2()
-
-        def embed_get(self, text, expected_model=None):
-            return [0.5] * 768 if text == "alpha" else None
-
-        def embed_set(self, text, vector, model):
-            pass
-
-    store.v9_cache = _PartialCache()
-
-    vectors, (model, provider) = store.embed_with_identity(["alpha", "beta"])
-
-    assert model == server.EMBEDDING_MODEL and provider == "st"
-    assert len(vectors[0]) == 384  # recomputed via ST, not the now-recovered ollama
-    assert len(vectors[1]) == 384
-    assert calls["n"] == 1  # ollama was never asked to answer the recompute
+    assert store.db.execute("SELECT embed_model FROM embeddings WHERE knowledge_id=2").fetchone()[0] == OLD_MODEL
 
 
-def test_a_failed_recompute_drops_the_cached_half_not_a_silent_hole(store, monkeypatch):
-    """When the backend that answered `fresh` can't answer again for the
-    cached half either, the cached indices are dropped (None) rather than
-    the whole call crashing or silently mixing in stale data - the fresh
-    half still comes back intact under its own honest identity."""
-    store._embed_mode = "ollama"
+def test_drain_does_not_loop_when_the_new_vector_is_still_not_the_spaces_model(store, monkeypatch):
+    seed(store, 2, [1.0, 0.0], model=OLD_MODEL)
+    monkeypatch.setattr(store, "_expected_models", lambda: {"text": MODEL})
+    monkeypatch.setattr(store, "_embed_for_record", lambda *a, **k: (
+        {"vector": [1.0, 0.0], "model": "other", "provider": "st", "space": "text",
+         "content_type": "text", "language": None}, None))
+    store.enqueue_stale_vectors(force=True)
 
-    class _FlakyEmbedder:
-        def __init__(self):
-            self.n = 0
+    counts = store.drain_embedding_backfill()
 
-        def encode(self, batch):
-            import numpy as np
-            self.n += 1
-            if self.n == 1:
-                return np.array([[0.1] * 384 for _ in batch], dtype=np.float32)
-            raise RuntimeError("backend unavailable for the recompute")
+    assert counts["retried"] == 1
+    assert store.db.execute("SELECT embed_model FROM embeddings WHERE knowledge_id=2").fetchone()[0] == OLD_MODEL
 
-    store._embedder = _FlakyEmbedder()
-    monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
 
-    class _L2:
-        enabled = True
+def test_provider_down_reports_a_fallback_not_a_model_change(store, monkeypatch):
+    import server as srv
 
-    class _PartialCache:
-        l2 = _L2()
+    seed(store, 1, [1.0, 0.0], model=srv.FASTEMBED_MODEL)
+    monkeypatch.undo()  # keep the real _active_embed_model_name for the st fallback
+    store._embed_mode = "st"
+    monkeypatch.setattr(store, "_restore_primary_embedder", lambda: None)
+    monkeypatch.setattr(store, "embed", lambda texts: [[1.0, 0.0]])
 
-        def embed_get(self, text, expected_model=None):
-            return [0.5] * 768 if text == "alpha" else None
+    assert store._search_spaces("query", project="p") == []
 
-        def embed_set(self, text, vector, model):
-            pass
+    (diagnostic,) = store._semantic_diagnostics
+    assert diagnostic["code"] == "provider_fallback"
+    assert diagnostic["count"] == 1
+    assert "re-embed required" not in diagnostic["error"]
 
-    store.v9_cache = _PartialCache()
 
-    vectors, (model, provider) = store.embed_with_identity(["alpha", "beta"])
+def test_retired_model_reports_stale_vectors(store, monkeypatch):
+    seed(store, 1, [1.0, 0.0], model=OLD_MODEL)
+    monkeypatch.setattr(store, "embed", lambda texts: [[1.0, 0.0]])
 
-    assert model == server.EMBEDDING_MODEL and provider == "st"
-    assert vectors[0] is None
-    assert len(vectors[1]) == 384
+    store._search_spaces("query", project="p")
+
+    (diagnostic,) = store._semantic_diagnostics
+    assert (diagnostic["code"], diagnostic["count"]) == ("stale_vectors", 1)
+
+
+def test_failed_query_embedding_is_not_reported_as_a_model_change(store, monkeypatch):
+    seed(store, 1, [1.0, 0.0])
+    monkeypatch.setattr(store, "embed", lambda texts: None)
+
+    assert store._search_spaces("query", project="p") == []
+
+    (diagnostic,) = store._semantic_diagnostics
+    assert diagnostic["code"] == "embed_failed"
+    assert "re-embed" not in diagnostic["error"]
+
+
+def test_group_matching_the_running_fallback_stays_searchable(store, monkeypatch):
+    """The main group waits for its provider; vectors of the fallback model are still searched."""
+    import server as srv
+
+    seed(store, 1, [1.0, 0.0], model=srv.FASTEMBED_MODEL)
+    seed(store, 2, [1.0, 0.0], model="fallback-model")
+    monkeypatch.undo()
+    store._embed_mode = "st"
+    monkeypatch.setattr(store, "_restore_primary_embedder", lambda: None)
+    monkeypatch.setattr(store, "_active_embed_model_name", lambda: "fallback-model")
+    monkeypatch.setattr(store, "embed", lambda texts: [[1.0, 0.0]])
+
+    hits = store._search_spaces("query", project="p")
+
+    assert [kid for kid, _ in hits] == [2]
+    assert [d["code"] for d in store._semantic_diagnostics] == ["provider_fallback"]
+
+
+def test_failed_fastembed_load_is_retried_after_the_cooldown(store, monkeypatch):
+    import server as srv
+    from memory_core import fastembed_loader
+
+    loaded = object()
+    monkeypatch.setattr(fastembed_loader, "load_model", lambda *a, **k: loaded)
+    monkeypatch.setattr(srv, "HAS_FASTEMBED", True)
+    store._fastembed_model = False
+    store._fastembed_failed_at = time.monotonic()
+    assert store.fastembed is None
+
+    store._fastembed_failed_at = time.monotonic() - srv.FASTEMBED_RETRY_SECONDS - 1
+    assert store.fastembed is loaded
+
+
+def test_store_returns_to_fastembed_when_the_model_loads_again(store, monkeypatch):
+    import server as srv
+
+    monkeypatch.setattr(srv, "HAS_FASTEMBED", True)
+    monkeypatch.setattr(type(store), "fastembed", property(lambda self: object()))
+    store._embed_mode = "st"
+
+    store._restore_primary_embedder()
+
+    assert store._embed_mode == "fastembed"
+
+
+def test_a_cloud_mode_is_not_replaced_by_fastembed(store, monkeypatch):
+    import server as srv
+
+    monkeypatch.setattr(srv, "HAS_FASTEMBED", True)
+    monkeypatch.setattr(type(store), "fastembed", property(lambda self: object()))
+    store._embed_mode = "openai"
+
+    store._restore_primary_embedder()
+
+    assert store._embed_mode == "openai"
+
+
+# -- fingerprints -------------------------------------------------------------
+
+
+def test_fingerprint_states(store):
+    identity = EmbedIdentity(MODEL, "fastembed", "mean", "fastembed 0.8.0")
+
+    assert check_fingerprint(store.db, "text", MODEL, [1.0, 0.0]) is FingerprintState.NEW
+    record_fingerprint(store.db, "text", identity, [1.0, 0.0])
+    assert check_fingerprint(store.db, "text", MODEL, [1.0, 0.00001]) is FingerprintState.SAME
+    assert check_fingerprint(store.db, "text", MODEL, [0.0, 1.0]) is FingerprintState.CHANGED
+    assert check_fingerprint(store.db, "text", MODEL, [1.0, 0.0, 0.0]) is FingerprintState.CHANGED
+
+
+def test_retire_group_relabels_only_that_group(store):
+    seed(store, 1, [1.0, 0.0])
+    seed(store, 2, [1.0, 0.0], model="other")
+
+    assert retire_group(store.db, "text", MODEL) == 1
+
+    models = dict(store.db.execute("SELECT knowledge_id, embed_model FROM embeddings"))
+    assert models == {1: MODEL + STALE_MODEL_SUFFIX, 2: "other"}
+
+
+def test_changed_recipe_retires_the_vectors_and_queues_them(store, monkeypatch):
+    seed(store, 1, [1.0, 0.0])
+    monkeypatch.setattr(store, "_fastembed_embed", lambda texts: [[1.0, 0.0]])
+    store._verify_embedding_fingerprint()
+    assert store.db.execute("SELECT embed_model FROM embeddings WHERE knowledge_id=1").fetchone()[0] == MODEL
+
+    monkeypatch.setattr(store, "_fastembed_embed", lambda texts: [[0.0, 1.0]])
+    store._verify_embedding_fingerprint()
+
+    assert store.db.execute("SELECT embed_model FROM embeddings WHERE knowledge_id=1").fetchone()[0] == MODEL + STALE_MODEL_SUFFIX
+    assert store.enqueue_stale_vectors(force=True) == 1
+    assert check_fingerprint(store.db, "text", MODEL, [0.0, 1.0]) is FingerprintState.SAME
+
+
+def test_unchanged_recipe_keeps_the_vectors(store, monkeypatch):
+    seed(store, 1, [1.0, 0.0])
+    monkeypatch.setattr(store, "_fastembed_embed", lambda texts: [[1.0, 0.0]])
+
+    store._verify_embedding_fingerprint()
+    store._verify_embedding_fingerprint()
+
+    assert store.db.execute("SELECT embed_model FROM embeddings WHERE knowledge_id=1").fetchone()[0] == MODEL
+
+
+def test_pooling_follows_the_fastembed_version():
+    assert fastembed_pooling("0.5.1") == "cls"
+    assert fastembed_pooling("0.6.0") == "mean"
+    assert fastembed_pooling("0.8.0") == "mean"
+
+
+def test_cosine_of_mismatched_vectors_is_zero():
+    assert cosine([1.0], [1.0, 0.0]) == 0.0
+    assert cosine([], []) == 0.0
+    assert cosine([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
+
+
+# -- text model resolution --------------------------------------------------------
+
+
+def test_one_resolver_names_the_text_model(monkeypatch):
+    from embed_provider import FastEmbedProvider
+    from memory_core.embedding_spaces import model_for_space, resolve_text_model
+
+    for name in ("FASTEMBED_MODEL", "MEMORY_EMBED_MODEL", "MEMORY_TEXT_EMBED_MODEL", "MEMORY_EMBED_PROVIDER"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MEMORY_TEXT_EMBED_MODEL", "text-model")
+    assert resolve_text_model() == "text-model"
+
+    monkeypatch.setenv("MEMORY_EMBED_MODEL", "embed-model")
+    assert resolve_text_model() == "embed-model"
+
+    monkeypatch.setenv("FASTEMBED_MODEL", "legacy-model")
+    assert resolve_text_model() == "legacy-model"
+    assert model_for_space("text") == "legacy-model"
+    assert FastEmbedProvider().model_name == "legacy-model"
+
+
+def test_cloud_provider_model_is_not_a_text_space_model(monkeypatch):
+    from memory_core.embedding_spaces import resolve_text_model
+
+    monkeypatch.delenv("FASTEMBED_MODEL", raising=False)
+    monkeypatch.setenv("MEMORY_EMBED_PROVIDER", "openai")
+    monkeypatch.setenv("MEMORY_EMBED_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("MEMORY_TEXT_EMBED_MODEL", "text-model")
+
+    assert resolve_text_model() == "text-model"
+
+
+# -- HyDE -----------------------------------------------------------------------
+
+
+def test_hyde_embeds_with_the_callers_encoder(monkeypatch):
+    import reranker
+
+    monkeypatch.setattr(reranker, "_ollama_generate", lambda *a, **k: "an answer")
+    monkeypatch.setattr("config.has_llm", lambda: True)
+    monkeypatch.setattr(reranker, "_provider_embed", lambda text: pytest.fail("provider model differs from the store's"))
+    seen = []
+
+    def encode(texts):
+        seen.append(texts)
+        return [[0.25, 0.75]]
+
+    assert reranker.hyde_expand("question", "p", embed_fn=encode) == [0.25, 0.75]
+    assert seen == [["an answer"]]
+
+
+def test_hyde_without_vector_returns_none(monkeypatch):
+    import reranker
+
+    monkeypatch.setattr(reranker, "_ollama_generate", lambda *a, **k: "an answer")
+    monkeypatch.setattr("config.has_llm", lambda: True)
+
+    assert reranker.hyde_expand("question", embed_fn=lambda texts: None) is None
+
+
+def test_provider_failure_does_not_fall_back_to_another_model(monkeypatch):
+    import reranker
+
+    class Broken:
+        def embed(self, texts):
+            raise RuntimeError("down")
+
+    monkeypatch.setattr(reranker, "_embed_provider_cache", Broken())
+    monkeypatch.setattr(reranker, "_ollama_embed", lambda *a, **k: pytest.fail("Ollama vectors are another model"))
+
+    assert reranker._provider_embed("text") is None
+
+
+def test_hyde_embed_rejects_a_fallback_answer(store, monkeypatch):
+    monkeypatch.setattr(store, "embed", lambda texts: [[1.0, 0.0]])
+    store._embed_identity_slot().value = EmbedIdentity("fallback-model", "st")
+
+    assert store._hyde_embed(["x"]) is None
+
+    store._embed_identity_slot().value = EmbedIdentity(MODEL, "fastembed")
+    assert store._hyde_embed(["x"]) == [[1.0, 0.0]]
+
+
+# -- migration ----------------------------------------------------------------------
+
+
+def test_fingerprint_migration_is_additive_and_repeatable():
+    db = sqlite3.connect(":memory:")
+    script = (Path(__file__).parents[1] / "migrations" / "044_embedding_fingerprints.sql").read_text(encoding="utf-8")
+    db.executescript(script)
+    db.executescript(script)
+    columns = [row[1] for row in db.execute("PRAGMA table_info(embedding_fingerprints)")]
+    assert columns == ["space", "model", "provider", "dim", "pooling", "library", "probe_vector", "recorded_at"]

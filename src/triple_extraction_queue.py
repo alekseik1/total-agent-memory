@@ -13,6 +13,14 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from queue_retry import (
+    defer_row,
+    ensure_queue_columns,
+    next_attempt_iso,
+    now_iso,
+    reclaim_stale_processing,
+)
+
 LOG = lambda msg: sys.stderr.write(f"[triple-queue] {msg}\n")
 
 
@@ -35,6 +43,7 @@ class TripleExtractionQueue:
     ) -> None:
         self.db = db
         self.max_attempts = max(1, max_attempts)
+        ensure_queue_columns(db, "triple_extraction_queue")
 
     # ──────────────────────────────────────────────
     # Enqueue
@@ -69,17 +78,14 @@ class TripleExtractionQueue:
     # ──────────────────────────────────────────────
 
     def reclaim_stale(self, stale_minutes: int = 30) -> int:
-        # Delete stuck processing rows older than N minutes. Without this,
-        # a crashed worker leaves a processing row that blocks new pending
-        # rows for the same knowledge_id via UNIQUE(knowledge_id, status).
-        cur = self.db.execute(
-            "DELETE FROM triple_extraction_queue "
-            "WHERE status = 'processing' "
-            "AND claimed_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
-            (f"-{int(stale_minutes)} minutes",),
+        """Reset rows stuck in 'processing' (killed worker) to 'pending'; fail them past max_attempts."""
+        return reclaim_stale_processing(
+            self.db, "triple_extraction_queue", self.max_attempts, stale_minutes
         )
-        self.db.commit()
-        return cur.rowcount or 0
+
+    def defer(self, item_id: int, error: str) -> str:
+        """Park an item whose LLM was unreachable; retried later without losing an attempt."""
+        return defer_row(self.db, "triple_extraction_queue", item_id, error, self.max_attempts)
 
     def claim_next(self) -> dict | None:
         """Atomically mark the oldest pending row as processing and return it.
@@ -92,7 +98,9 @@ class TripleExtractionQueue:
         # per queue instance; reflection.agent runs sequentially.
         row = self.db.execute(
             "SELECT id, knowledge_id, attempts FROM triple_extraction_queue "
-            "WHERE status = 'pending' ORDER BY id ASC LIMIT 1"
+            "WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
+            "ORDER BY id ASC LIMIT 1",
+            (now_iso(),),
         ).fetchone()
         if row is None:
             return None
@@ -147,11 +155,12 @@ class TripleExtractionQueue:
             "WHERE knowledge_id = ? AND status = ? AND id != ?",
             (row["knowledge_id"], new_status, item_id),
         )
+        due = next_attempt_iso(next_attempts) if new_status == "pending" else None
         self.db.execute(
             "UPDATE triple_extraction_queue "
-            "SET status = ?, attempts = ?, last_error = ?, processed_at = ? "
+            "SET status = ?, attempts = ?, last_error = ?, processed_at = ?, next_attempt_at = ? "
             "WHERE id = ?",
-            (new_status, next_attempts, (error or "")[:500], _now(), item_id),
+            (new_status, next_attempts, (error or "")[:500], _now(), due, item_id),
         )
         self.db.commit()
 

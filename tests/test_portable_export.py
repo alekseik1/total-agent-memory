@@ -345,10 +345,10 @@ def test_export_refuses_overwrite_and_missing_store(memory_dir, tmp_path):
         export(memory_dir, tmp_path / "x.tambundle")
     populate(memory_dir, RECORDS)
     existing = tmp_path / "exists.tambundle"
-    existing.write_text("keep me")
+    existing.write_text("keep me", encoding="utf-8")
     with pytest.raises(BundleError, match="already exists"):
         export(memory_dir, existing)
-    assert existing.read_text() == "keep me"
+    assert existing.read_text(encoding="utf-8") == "keep me"
     export(memory_dir, existing, force=True)
     assert existing.read_bytes().startswith(portable_crypto.MAGIC)
 
@@ -365,13 +365,13 @@ def test_cli_round_trip_with_env_passphrase_and_key_file(memory_dir, tmp_path, m
     assert json.loads(capsys.readouterr().out)["kind"] == "full"
     monkeypatch.delenv("TAM_BUNDLE_PASSPHRASE")
     key_file = tmp_path / "key"
-    key_file.write_text(PASSPHRASE + "\n")
+    key_file.write_text(PASSPHRASE + "\n", encoding="utf-8")
     key_file.chmod(0o600)
     target = tmp_path / "cli-target"
     assert portable_export.main_import([str(bundle), "--mode", "replace", "--memory-dir", str(target),
                                         "--key-file", str(key_file)]) == 0
     assert json.loads(capsys.readouterr().out)["active_records"] == 3
-    key_file.write_text("a different passphrase")
+    key_file.write_text("a different passphrase", encoding="utf-8")
     assert portable_export.main_import([str(bundle), "--memory-dir", str(target), "--key-file", str(key_file)]) == 2
     assert "wrong passphrase" in capsys.readouterr().err
 
@@ -381,3 +381,47 @@ def test_entry_point_routes_bundle_commands():
 
     assert entry._portable_cli("export") is portable_export.main_export
     assert entry._portable_cli("import-bundle") is portable_export.main_import
+
+
+def test_replace_restores_over_a_live_store_that_fails_its_integrity_check(memory_dir, tmp_path, monkeypatch):
+    populate(memory_dir, RECORDS)
+    bundle = tmp_path / "b.tambundle"
+    export(memory_dir, bundle)
+    target = tmp_path / "target"
+    populate(target, {"local": ["Record in the store that is about to be declared corrupt."]})
+    real_snapshot = portable_export.snapshot_database
+
+    def corrupt_live(source, destination):
+        if Path(source).name == "memory.db" and Path(destination).parent.name == "backups":
+            raise BundleError("database integrity check failed: [('page 7 is never used',)]")
+        return real_snapshot(source, destination)
+
+    monkeypatch.setattr(portable_export, "snapshot_database", corrupt_live)
+    result = portable_export.import_bundle(target, bundle, PASSPHRASE, mode="replace")
+    assert [row[0] for row in active(target)] == ["alpha", "alpha", "beta"]
+    assert Path(result["safety_backup"]).is_file()
+    assert any("integrity check" in warning for warning in result["warnings"])
+
+
+def test_two_replace_imports_in_one_second_keep_distinct_safety_backups(memory_dir, tmp_path, monkeypatch):
+    populate(memory_dir, RECORDS)
+    bundle = tmp_path / "b.tambundle"
+    export(memory_dir, bundle)
+    target = tmp_path / "target"
+    populate(target, {"local": ["Original data that the first backup must keep."]})
+    monkeypatch.setattr(portable_export, "utc_now", lambda: "2026-01-01T00:00:00.000000Z")
+    first = portable_export.import_bundle(target, bundle, PASSPHRASE, mode="replace")
+    second = portable_export.import_bundle(target, bundle, PASSPHRASE, mode="replace")
+    assert first["safety_backup"] != second["safety_backup"]
+    with sqlite3.connect(first["safety_backup"]) as db:
+        assert db.execute("SELECT project FROM knowledge WHERE status='active'").fetchall() == [("local",)]
+    if os.name == "posix":  # Windows protects the profile with ACLs, not mode bits
+        assert oct(os.stat(first["safety_backup"]).st_mode & 0o777) == oct(0o600)
+
+
+def test_deeply_nested_record_line_is_a_bundle_error(tmp_path):
+    path = tmp_path / "records.jsonl"
+    depth = 200_000
+    path.write_text("[" * depth + "]" * depth + "\n", encoding="utf-8")
+    with pytest.raises(BundleError, match="nested too deeply"):
+        list(portable_export._jsonl_records(path))

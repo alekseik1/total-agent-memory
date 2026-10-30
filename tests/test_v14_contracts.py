@@ -27,7 +27,7 @@ def test_scope_excludes_graph_neighbor_and_wrong_branch():
 def test_outbox_discards_completed_payload():
     import outbox
     with sqlite3.connect(":memory:") as db:
-        db.executescript((Path(__file__).parents[1] / "migrations/017_outbox.sql").read_text())
+        db.executescript((Path(__file__).parents[1] / "migrations/017_outbox.sql").read_text(encoding="utf-8"))
         intent = outbox.create_intent(db, payload={"content": "record"},
                                      session_id="s", content="record", ktype="fact", project="p")
         outbox.mark_committed(db, intent, 1)
@@ -37,7 +37,7 @@ def test_outbox_discards_completed_payload():
 def test_backdated_fact_does_not_replace_newer_state():
     with sqlite3.connect(":memory:") as db:
         db.row_factory = sqlite3.Row
-        db.executescript((Path(__file__).parents[1] / "migrations/008_temporal_kg.sql").read_text())
+        db.executescript((Path(__file__).parents[1] / "migrations/008_temporal_kg.sql").read_text(encoding="utf-8"))
         kg = TemporalKG(db)
         newer = kg.add_fact("person", "job", "engineer", valid_from="2025-06-01T00:00:00Z")
         older = kg.add_fact("person", "job", "student", valid_from="2024-06-01T00:00:00Z")
@@ -67,7 +67,7 @@ def test_context_budget_includes_source_metadata_and_unicode():
 def test_backdated_middle_assertion_splits_existing_interval():
     with sqlite3.connect(":memory:") as db:
         db.row_factory = sqlite3.Row
-        db.executescript((Path(__file__).parents[1] / "migrations/008_temporal_kg.sql").read_text())
+        db.executescript((Path(__file__).parents[1] / "migrations/008_temporal_kg.sql").read_text(encoding="utf-8"))
         kg = TemporalKG(db)
         for value, date in [("junior", "2023"), ("senior", "2025"), ("middle", "2024")]:
             kg.add_fact("person", "job", value, valid_from=f"{date}-01-01T00:00:00Z")
@@ -191,8 +191,8 @@ def test_queue_concurrent_claims_are_unique(tmp_path):
     path = tmp_path / "queue.db"
     root = Path(__file__).parents[1]
     with sqlite3.connect(path) as db:
-        db.executescript((root / "migrations/002_multi_representation.sql").read_text())
-        db.executescript((root / "migrations/005_representations_queue.sql").read_text())
+        db.executescript((root / "migrations/002_multi_representation.sql").read_text(encoding="utf-8"))
+        db.executescript((root / "migrations/005_representations_queue.sql").read_text(encoding="utf-8"))
         db.row_factory = sqlite3.Row
         queue = RepresentationsQueue(db)
         for kid in range(8):
@@ -258,7 +258,7 @@ def test_benchmark_blind_routing_does_not_read_gold_category(real_store, monkeyp
 def test_temporal_repeated_value_has_one_current_interval():
     with sqlite3.connect(":memory:") as db:
         db.row_factory = sqlite3.Row
-        db.executescript((Path(__file__).parents[1] / "migrations/008_temporal_kg.sql").read_text())
+        db.executescript((Path(__file__).parents[1] / "migrations/008_temporal_kg.sql").read_text(encoding="utf-8"))
         kg = TemporalKG(db)
         first = kg.add_fact("person", "job", "engineer", valid_from="2024-01-01T00:00:00Z")
         second = kg.add_fact("person", "job", "engineer", valid_from="2025-01-01T00:00:00Z")

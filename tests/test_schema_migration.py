@@ -46,11 +46,11 @@ def test_upgrade_queues_legacy_extractions_without_deleting_originals():
             "INSERT INTO knowledge VALUES(1,'original','p','s','','active','fact','2026-01-01');"
         )
         migrations = Path(__file__).parents[1] / "migrations"
-        db.executescript((migrations / "020_async_enrichment.sql").read_text())
-        db.executescript((migrations / "029_atomic_facts.sql").read_text())
+        db.executescript((migrations / "020_async_enrichment.sql").read_text(encoding="utf-8"))
+        db.executescript((migrations / "029_atomic_facts.sql").read_text(encoding="utf-8"))
         db.execute("INSERT INTO atomic_fact_runs VALUES(1,'original',0,'old-model')")
         db.commit()
-        db.executescript((migrations / "030_evidence_lifecycle.sql").read_text())
+        db.executescript((migrations / "030_evidence_lifecycle.sql").read_text(encoding="utf-8"))
         assert (
             db.execute("SELECT knowledge_id FROM atomic_fact_rebuild").fetchone()[0]
             == 1

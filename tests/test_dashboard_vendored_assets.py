@@ -192,17 +192,17 @@ def test_static_rejects_anything_outside_vendor_files(base_url: str, path: str) 
 
 
 def test_vendored_files_ship_in_wheel_and_sdist() -> None:
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     patterns = pyproject["tool"]["setuptools"]["package-data"]["src"]
     for rel in (*VENDORED, *LICENSES):
         pkg_rel = f"dashboard_static/{rel}"
         assert any(fnmatch(pkg_rel, pat) for pat in patterns), pkg_rel
-    manifest = (ROOT / "MANIFEST.in").read_text().splitlines()
+    manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines()
     assert "recursive-include src/dashboard_static *.js *.txt" in manifest
     assert "include THIRD-PARTY-LICENSES.md" in manifest
 
 
 def test_third_party_licenses_lists_every_vendored_file() -> None:
-    notice = (ROOT / "THIRD-PARTY-LICENSES.md").read_text()
+    notice = (ROOT / "THIRD-PARTY-LICENSES.md").read_text(encoding="utf-8")
     for rel in (*VENDORED, *LICENSES):
         assert Path(rel).name in notice, rel

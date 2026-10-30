@@ -73,10 +73,16 @@ class LeaseHeartbeat(AbstractContextManager):
         try:
             with closing(sqlite3.connect(self.path, timeout=self.interval)) as db:
                 while not self.stop.wait(self.interval):
-                    self.renew(db)
+                    try:
+                        self.renew(db)
+                    except sqlite3.Error:
+                        # One locked database must not end the heartbeat: the leases
+                        # would expire while their tasks are still running.
+                        counters.bump("enrichment_heartbeat_errors")
+                        self.logger.exception("Enrichment heartbeat renewal failed; will retry")
         except sqlite3.Error:
             counters.bump("enrichment_heartbeat_errors")
-            self.logger.exception("Enrichment heartbeat failed")
+            self.logger.exception("Enrichment heartbeat could not open its connection")
 
     def renew(self, db: sqlite3.Connection) -> None:
         with op_timer("enrichment_heartbeat_ms"):

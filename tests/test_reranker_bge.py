@@ -296,7 +296,7 @@ def _walk_pkg(pkg_dir: Path) -> list[Path]:
 
 def _module_imports(py_path: Path) -> set[str]:
     try:
-        source = py_path.read_text()
+        source = py_path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError):
         return set()
     try:

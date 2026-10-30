@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from functools import lru_cache
+import threading
 
 import snowballstemmer
 
@@ -116,9 +116,15 @@ def lexical_terms(query: str) -> list[str]:
     return (meaningful or terms)[:MAX_LEXICAL_TERMS]
 
 
-@lru_cache(maxsize=1)
+_STEMMERS = threading.local()
+
+
 def _russian_stemmer() -> snowballstemmer.stemmer:
-    return snowballstemmer.stemmer("russian")
+    """One stemmer per thread: `stemWord` mutates the instance."""
+    stemmer = getattr(_STEMMERS, "russian", None)
+    if stemmer is None:
+        stemmer = _STEMMERS.russian = snowballstemmer.stemmer("russian")
+    return stemmer
 
 
 def russian_stem(word: str) -> str:

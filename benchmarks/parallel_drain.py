@@ -36,7 +36,7 @@ def setup_env(db_path: str) -> None:
 
 
 def import_memory_mods():
-    sys.path.insert(0, "/Users/vitalii-macpro/claude-memory-server/src")
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
     from triple_extraction_queue import TripleExtractionQueue
     from ingestion.extractor import ConceptExtractor
     return TripleExtractionQueue, ConceptExtractor

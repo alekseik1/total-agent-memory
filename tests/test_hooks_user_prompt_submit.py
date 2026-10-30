@@ -39,7 +39,7 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
         """
     )
     mig = REPO_ROOT / "migrations" / "013_intents.sql"
-    conn.executescript(mig.read_text())
+    conn.executescript(mig.read_text(encoding="utf-8"))
     conn.commit()
     conn.close()
 

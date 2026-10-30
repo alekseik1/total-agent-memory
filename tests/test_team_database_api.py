@@ -717,7 +717,7 @@ def test_setup_test_never_borrows_the_servers_libpq_credentials(pg_database, tmp
     password = parsed.password.get_secret_value()
     home = tmp_path / 'home'
     home.mkdir()
-    (home / '.pgpass').write_text(f'*:*:*:*:{password}\n')
+    (home / '.pgpass').write_text(f'*:*:*:*:{password}\n', encoding="utf-8")
     (home / '.pgpass').chmod(0o600)
     monkeypatch.setenv('PGPASSWORD', password)
     monkeypatch.setenv('HOME', str(home))

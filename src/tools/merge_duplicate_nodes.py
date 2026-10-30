@@ -36,7 +36,7 @@ Options:
     --add-unique         After merge, install UNIQUE INDEX on
                          (name_norm, type). Refuses if any duplicate
                          remains.
-    --db PATH            Override DB path (default: ~/.claude-memory/memory.db).
+    --db PATH            Override DB path (default: <memory dir>/memory.db).
     --limit N            Cap number of groups processed per phase.
 """
 
@@ -387,7 +387,9 @@ def _parse_args(argv: list[str]) -> dict:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
 
-    db_path = Path(args["db"]) if args["db"] else Path.home() / ".claude-memory" / "memory.db"
+    from paths import memory_dir
+
+    db_path = Path(args["db"]) if args["db"] else memory_dir() / "memory.db"
     if not db_path.exists():
         _log(f"db not found: {db_path}")
         return 1

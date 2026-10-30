@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from memory_core.evidence_window import NOT_TAGGED_SQL, quoted_tag
 from memory_core.retrieval import EventEvidence, MemoryHit, SearchScope
 from memory_core.telemetry import counters, op_timer
 
@@ -21,8 +22,8 @@ class EvidenceChains:
         with op_timer("evidence_chain_ms"):
             predicates, params = scope.sql()
             for tag in self.excluded_tags:
-                predicates.append("instr(lower(COALESCE(k.tags,'')),lower(?))=0")
-                params.append(tag)
+                predicates.append(NOT_TAGGED_SQL)
+                params.append(quoted_tag(tag))
             input_ids = list(dict.fromkeys(hit["id"] for hit in hits))
             allowed_anchors = {
                 row[0]
@@ -54,8 +55,8 @@ class EvidenceChains:
             ).fetchall()
             predicates, params = scope.sql()
             for tag in self.excluded_tags:
-                predicates.append("instr(lower(COALESCE(k.tags,'')),lower(?))=0")
-                params.append(tag)
+                predicates.append(NOT_TAGGED_SQL)
+                params.append(quoted_tag(tag))
             source_ids = list(dict.fromkeys(row["id"] for row in rows))
             if not source_ids:
                 return hits

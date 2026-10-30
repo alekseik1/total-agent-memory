@@ -18,7 +18,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-MEMORY_DIR = os.environ.get("CLAUDE_MEMORY_DIR", os.path.expanduser("~/.claude-memory"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from paths import memory_dir  # noqa: E402
+
+MEMORY_DIR = str(memory_dir())
 DB_PATH = os.path.join(MEMORY_DIR, "memory.db")
 
 # Display order: decisions first, then solutions, conventions, facts, lessons

@@ -13,7 +13,17 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from queue_retry import (
+    defer_row,
+    ensure_queue_columns,
+    next_attempt_iso,
+    now_iso,
+    reclaim_stale_processing,
+)
+
 LOG = lambda msg: sys.stderr.write(f"[deep-enr-queue] {msg}\n")
+
+STALE_PROCESSING_MINUTES = 30
 
 
 def _now() -> str:
@@ -30,6 +40,7 @@ class DeepEnrichmentQueue:
     def __init__(self, db: sqlite3.Connection, max_attempts: int = 3) -> None:
         self.db = db
         self.max_attempts = max(1, max_attempts)
+        ensure_queue_columns(db, "deep_enrichment_queue")
 
     def enqueue(self, knowledge_id: int) -> bool:
         existing = self.db.execute(
@@ -47,10 +58,19 @@ class DeepEnrichmentQueue:
         self.db.commit()
         return True
 
+    def reclaim_stale(self, stale_minutes: int = STALE_PROCESSING_MINUTES) -> int:
+        """Return rows left in 'processing' by a killed drain to 'pending'."""
+        return reclaim_stale_processing(
+            self.db, "deep_enrichment_queue", self.max_attempts, stale_minutes
+        )
+
     def claim_next(self) -> dict | None:
+        self.reclaim_stale()
         row = self.db.execute(
             "SELECT id, knowledge_id, attempts FROM deep_enrichment_queue "
-            "WHERE status = 'pending' ORDER BY id ASC LIMIT 1"
+            "WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
+            "ORDER BY id ASC LIMIT 1",
+            (now_iso(),),
         ).fetchone()
         if row is None:
             return None
@@ -82,6 +102,10 @@ class DeepEnrichmentQueue:
         )
         self.db.commit()
 
+    def defer(self, item_id: int, error: str) -> str:
+        """Park an item whose LLM was unreachable; it is retried later without losing an attempt."""
+        return defer_row(self.db, "deep_enrichment_queue", item_id, error, self.max_attempts)
+
     def mark_failed(self, item_id: int, error: str) -> None:
         row = self.db.execute(
             "SELECT attempts, knowledge_id FROM deep_enrichment_queue WHERE id=?",
@@ -96,10 +120,11 @@ class DeepEnrichmentQueue:
             "WHERE knowledge_id = ? AND status = ? AND id != ?",
             (row["knowledge_id"], new_status, item_id),
         )
+        due = next_attempt_iso(next_attempts) if new_status == "pending" else None
         self.db.execute(
             "UPDATE deep_enrichment_queue "
-            "SET status=?, attempts=?, last_error=?, processed_at=? WHERE id=?",
-            (new_status, next_attempts, (error or "")[:500], _now(), item_id),
+            "SET status=?, attempts=?, last_error=?, processed_at=?, next_attempt_at=? WHERE id=?",
+            (new_status, next_attempts, (error or "")[:500], _now(), due, item_id),
         )
         self.db.commit()
 
@@ -110,7 +135,7 @@ class DeepEnrichmentQueue:
     def process_pending(
         self, enricher: EnricherFn, limit: int = 10
     ) -> dict[str, int]:
-        stats = {"processed": 0, "failed": 0, "skipped": 0}
+        stats = {"processed": 0, "failed": 0, "skipped": 0, "deferred": 0}
 
         for _ in range(limit):
             item = self.claim_next()
@@ -128,6 +153,13 @@ class DeepEnrichmentQueue:
 
             try:
                 result = enricher(content_row["content"] or "", None) or {}
+                if result.get("degraded"):
+                    # The LLM failed: storing the empty defaults as "done" would
+                    # make the loss permanent. Park the item and stop draining,
+                    # the provider is down for the rest of the batch too.
+                    self.defer(item["id"], str(result.get("degraded_reason") or "LLM unavailable"))
+                    stats["deferred"] += 1
+                    break
                 self._store(kid, result)
                 self.mark_done(item["id"])
                 stats["processed"] += 1

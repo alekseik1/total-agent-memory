@@ -4,7 +4,7 @@
 # Prereqs:
 #   1) export OPENAI_API_KEY=sk-...
 #   2) pip install sentence-transformers 'FlagEmbedding>=1.2' torch
-#   3) cd /Users/vitalii-macpro/PROJECT/claude-memory
+#   3) cd <your clone of claude-memory>
 #
 # Usage:
 #   bash scripts/v9_cheap_full_run.sh [smoke|full]

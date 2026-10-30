@@ -1,5 +1,5 @@
 # ===========================================
-# Session End Hook (PowerShell) — twin of hooks/session-end.sh
+# Session End Hook (PowerShell) - twin of hooks/session-end.sh
 #
 # 1. Parses the transcript (nested Claude Code JSONL and the legacy flat
 #    format, via src/auto_episode_capture.extract_messages_from_transcript)

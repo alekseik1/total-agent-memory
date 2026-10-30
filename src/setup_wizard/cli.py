@@ -178,4 +178,7 @@ def main(argv: Sequence[str] | None = None, first_run: bool = False, environ: Ma
 
 
 if __name__ == "__main__":
+    from stdio_utf8 import never_fail_on_output
+
+    never_fail_on_output()
     sys.exit(main(sys.argv[1:]))

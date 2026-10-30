@@ -68,9 +68,13 @@ def loopback(tmp_path_factory: pytest.TempPathFactory):
     stop(proc)
 
 
+# A non-loopback bind requires a bearer token (src/http_auth.py).
+WILDCARD_TOKEN = "wildcard-test-token-0123456789-abcdef"
+
+
 @pytest.fixture(scope="module")
 def wildcard(tmp_path_factory: pytest.TempPathFactory):
-    proc, port = start(tmp_path_factory.mktemp("mcp_wildcard"), "0.0.0.0", {"MCP_HTTP_ALLOWED_HOSTS": "mem.test"})
+    proc, port = start(tmp_path_factory.mktemp("mcp_wildcard"), "0.0.0.0", {"MCP_HTTP_ALLOWED_HOSTS": "mem.test", "TAM_HTTP_TOKEN": WILDCARD_TOKEN})
     yield port
     stop(proc)
 
@@ -82,7 +86,7 @@ def post_initialize(port: int, host: str | None, origin: str | None = None) -> t
         if host is not None:
             conn.putheader("Host", host)
         headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
-                   "Content-Length": str(len(INITIALIZE))}
+                   "Content-Length": str(len(INITIALIZE)), "Authorization": f"Bearer {WILDCARD_TOKEN}"}
         if origin is not None:
             headers["Origin"] = origin
         for name, value in headers.items():
@@ -94,10 +98,12 @@ def post_initialize(port: int, host: str | None, origin: str | None = None) -> t
         conn.close()
 
 
-async def list_tools(url: str) -> list[str]:
+async def list_tools(url: str, token: str | None = None) -> list[str]:
     from mcp import ClientSession
 
-    async with streamable_http.streamable_http_client(url) as (read, write), ClientSession(read, write) as session:
+    client = httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}) if token else None
+    async with streamable_http.streamable_http_client(url, http_client=client) as (read, write), \
+            ClientSession(read, write) as session:
         await session.initialize()
         return [tool.name for tool in (await session.list_tools()).tools]
 
@@ -143,7 +149,7 @@ def test_wildcard_bind_accepts_listed_host_only(wildcard: int) -> None:
     assert post_initialize(wildcard, f"0.0.0.0:{wildcard}")[0] == 421
     assert post_initialize(wildcard, f"evil.example:{wildcard}")[0] == 421
     assert post_initialize(wildcard, f"mem.test:{wildcard}", "http://evil.example")[0] == 403
-    assert "memory_recall" in asyncio.run(list_tools(f"http://127.0.0.1:{wildcard}/mcp"))
+    assert "memory_recall" in asyncio.run(list_tools(f"http://127.0.0.1:{wildcard}/mcp", WILDCARD_TOKEN))
 
 
 # In-process checks of the helpers and of the fallback guard for mcp releases without TransportSecuritySettings.

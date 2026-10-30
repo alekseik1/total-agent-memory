@@ -90,18 +90,30 @@ $TaskDashboard      = "ClaudeTotalMemoryDashboard"
 # ===================================================================
 # Uninstall branch (short-circuits before Python bootstrap)
 # ===================================================================
+# Stop a running instance before unregistering: Unregister-ScheduledTask alone leaves the
+# started process (the dashboard) running, holding the port and the install directory.
+function Remove-TamScheduledTask ([string]$Name) {
+    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return $false }
+    $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+    if (-not $task) { return $false }
+    if ($task.State -eq "Running") { Stop-ScheduledTask -TaskName $Name }
+    Unregister-ScheduledTask -TaskName $Name -Confirm:$false
+    return $true
+}
+
 function Invoke-Uninstall {
     Write-Host "-> Uninstalling total-agent-memory (config + scheduled tasks)..." -ForegroundColor Yellow
 
     # Scheduled tasks
     foreach ($t in @($TaskReflection, $TaskOrphanBackfill, $TaskCheckUpdates, $TaskDashboard)) {
         try {
-            if (Get-Command Unregister-ScheduledTask -ErrorAction SilentlyContinue) {
-                Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue
-                Write-Host "  OK: Removed scheduled task $t" -ForegroundColor Green
+            if (Remove-TamScheduledTask $t) {
+                Write-Host "  OK: Stopped and removed scheduled task $t" -ForegroundColor Green
+            } else {
+                Write-Host "  SKIP: $t (not registered)" -ForegroundColor DarkYellow
             }
         } catch {
-            Write-Host "  SKIP: $t (not registered)" -ForegroundColor DarkYellow
+            Write-Host "  WARN: Could not remove scheduled task ${t}: $($_.Exception.Message)" -ForegroundColor DarkYellow
         }
     }
 
@@ -270,7 +282,7 @@ function Register-BackgroundTask {
         return
     }
 
-    try { Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+    Remove-TamScheduledTask $Name | Out-Null
 
     $launcher = Write-PythonLauncher -FileName "$Name.py" -ScriptPath $ScriptPath -ScriptArgs $ScriptArgs
     $action = New-ScheduledTaskAction -Execute $VenvPython -Argument "`"$launcher`"" -WorkingDirectory $InstallDir
@@ -364,9 +376,8 @@ function Write-DashboardLauncher {
 function Install-DashboardService {
     Write-Host "-> Step 5b: Setting up dashboard service..." -ForegroundColor Yellow
 
-    try { Unregister-ScheduledTask -TaskName $TaskDashboard -Confirm:$false -ErrorAction SilentlyContinue } catch {}
-
     try {
+        Remove-TamScheduledTask $TaskDashboard | Out-Null
         $WrapperPath = Write-DashboardLauncher
 
         $Action = New-ScheduledTaskAction -Execute $VenvPython `

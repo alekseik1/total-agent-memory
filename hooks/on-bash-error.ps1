@@ -1,5 +1,5 @@
 # ===========================================
-# Bash failure hook (PowerShell) — v7.0 learn_error trigger
+# Bash failure hook (PowerShell) - v7.0 learn_error trigger
 #
 # Twin of hooks/on-bash-error.sh. Fires when a Bash call fails
 # (PostToolUseFailure, or PostToolUse with a non-zero exit code) and error

@@ -38,6 +38,19 @@ IDENTIFIER = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 HEALTH_TIMEOUT_SECONDS = 3
 SERVICE_NAME = "tam-team"
 LAUNCHD_LABEL = "dev.totalmemory.tam-team"
+
+
+def login_name() -> str | None:
+    """The account name, or None when the process has none (a container uid without a passwd entry)."""
+    try:
+        return getpass.getuser()
+    except (KeyError, OSError):
+        return None
+
+
+def service_user() -> str:
+    """systemd `User=`: the account name, else the numeric uid, which systemd accepts as well."""
+    return login_name() or str(os.getuid())
 KEEP = "keep"
 REPLICA_CREDENTIALS = "replica-credentials.env"
 
@@ -245,7 +258,7 @@ def ask_admin(ctx: Context) -> AdminAnswer:
         ctx.prompter.say(f"  Administrator already set up: {', '.join(existing)}. New invite codes: "
                          "tam-team --root <data dir> invite <user-id>.")
         return AdminAnswer(existing=existing)
-    default_id = slug(getpass.getuser()) or None
+    default_id = slug(login_name() or "") or None
     user_id = ctx.prompter.text("admin_id", "Administrator user ID (for signing in)", default_id, _id_problem)
     name = ctx.prompter.text("admin_name", "Administrator full name", None, _name_problem).strip()
     return AdminAnswer(user_id=user_id, name=name)
@@ -414,7 +427,7 @@ def systemd_unit(root: Path, network: NetworkAnswer) -> str:
     environment = {"TAM_TEAM_DIR": str(root), **env}
     return "\n".join([
         "[Unit]", "Description=total-agent-memory team server", "After=network-online.target",
-        "Wants=network-online.target", "", "[Service]", "Type=simple", f"User={getpass.getuser()}",
+        "Wants=network-online.target", "", "[Service]", "Type=simple", f"User={service_user()}",
         "ExecStart=" + " ".join(_systemd_quote(a) for a in serve_args(root, network)),
         *(f"Environment={_systemd_quote(k + '=' + v)}" for k, v in environment.items()),
         "Restart=on-failure", "RestartSec=5", "NoNewPrivileges=true", "PrivateTmp=true", "",
@@ -613,7 +626,7 @@ def litestream_unit(root: Path) -> str:
     return "\n".join([
         "[Unit]", "Description=Litestream continuous backup of the total-agent-memory team server",
         "After=network-online.target", "Wants=network-online.target", "", "[Service]", "Type=simple",
-        f"User={getpass.getuser()}",
+        f"User={service_user()}",
         "EnvironmentFile=" + _systemd_quote(str(root / "deploy" / REPLICA_CREDENTIALS)),
         "ExecStart=litestream replicate -config " + _systemd_quote(config),
         "Restart=on-failure", "RestartSec=5", "NoNewPrivileges=true", "PrivateTmp=true", "",

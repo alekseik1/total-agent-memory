@@ -25,7 +25,7 @@ def srv(monkeypatch, tmp_path):
     s = server.Store()
     # Apply migration 012 so task_phases table exists in the ephemeral store.
     mig = Path(__file__).parent.parent / "migrations" / "012_task_phases.sql"
-    s.db.executescript(mig.read_text())
+    s.db.executescript(mig.read_text(encoding="utf-8"))
     s.db.commit()
 
     # Register the store globally so MCP dispatchers see it.

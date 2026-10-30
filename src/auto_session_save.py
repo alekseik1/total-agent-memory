@@ -19,9 +19,15 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from memory_core.timestamps import utc_now
 from paths import memory_dir
+from stdio_utf8 import use_utf8_stdio
+from secret_redaction import redact_secrets
 
 MEMORY_DIR = str(memory_dir())
 DB_PATH = os.path.join(MEMORY_DIR, "memory.db")
+
+
+def _count_lines(text: str) -> int:
+    return sum(1 for line in text.splitlines() if line.strip())
 
 
 def save_session_context(project: str, cwd: str, reason: str,
@@ -31,21 +37,20 @@ def save_session_context(project: str, cwd: str, reason: str,
         print(f"Memory DB not found at {DB_PATH}", file=sys.stderr)
         return
 
-    # Build content summary
-    user_summary = user_context.strip()[:500] if user_context else ""
-    assistant_summary = assistant_context.strip()[:500] if assistant_context else ""
+    user_text = redact_secrets(user_context.strip())[0] if user_context else ""
+    assistant_text = redact_secrets(assistant_context.strip())[0] if assistant_context else ""
 
-    if not user_summary and not assistant_summary:
+    if not user_text and not assistant_text:
         return  # Nothing to save
 
     timestamp = utc_now()
     session_id = f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    content = f"Session auto-save ({reason}).\n"
-    if user_summary:
-        content += f"User was working on: {user_summary}\n"
-    if assistant_summary:
-        content += f"Assistant context: {assistant_summary}\n"
+    # Only a size summary is stored: prompts and replies stay in the (redacted, private) recovery file and
+    # the transcript, never in an active fact that recall, export and team sync would spread.
+    content = (f"Session auto-save ({redact_secrets(reason)[0]}). "
+               f"{_count_lines(user_text)} user message(s), {len(user_text) + len(assistant_text)} characters "
+               "of context were captured to the session recovery file.\n")
 
     context_field = f"Project: {project}, CWD: {cwd}, Ended: {timestamp}"
     tags = json.dumps(["session-autosave", "context-recovery", project])
@@ -87,17 +92,25 @@ def main():
     parser.add_argument("--project", required=True, help="Project name")
     parser.add_argument("--cwd", required=True, help="Working directory")
     parser.add_argument("--reason", required=True, help="Session end reason")
-    parser.add_argument("--user-context", default="", help="Last user messages")
+    parser.add_argument("--user-context", default="", help="Last user messages (visible in ps; prefer stdin)")
     parser.add_argument("--assistant-context", default="", help="Last assistant context")
+    parser.add_argument("--context-stdin", action="store_true",
+                        help='Read {"user": ..., "assistant": ...} from stdin instead of argv')
 
     args = parser.parse_args()
+    use_utf8_stdio()
+    user_context, assistant_context = args.user_context, args.assistant_context
+    if args.context_stdin:
+        payload = json.loads(sys.stdin.read() or "{}")
+        user_context = str(payload.get("user") or "")
+        assistant_context = str(payload.get("assistant") or "")
 
     save_session_context(
         project=args.project,
         cwd=args.cwd,
         reason=args.reason,
-        user_context=args.user_context,
-        assistant_context=args.assistant_context,
+        user_context=user_context,
+        assistant_context=assistant_context,
     )
 
 

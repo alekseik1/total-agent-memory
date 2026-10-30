@@ -65,11 +65,31 @@ elif [ -z "${TAM_MEMORY_DIR:-}" ]; then
 fi
 CLAUDE_MEMORY_DIR="$TAM_MEMORY_DIR"
 export TAM_MEMORY_DIR CLAUDE_MEMORY_DIR CLAUDE_MEMORY_INSTALL_DIR
+[ -z "${TAM_HOOKS_VERSION:-}" ] || export TAM_HOOKS_VERSION
 
-# Python from venv (prefer install dir venv, fallback to system)
+# Python: the venv of the checkout, then the server venv the plugin bootstrap creates in the memory
+# dir (or ~/.tam), POSIX and Windows layouts both; finally a system python, newest first (ambient
+# memory needs 3.11+, so plain python3 comes last).
+hook_find_python() {
+    local candidate dir
+    for dir in "${CLAUDE_MEMORY_INSTALL_DIR}" "${TAM_MEMORY_DIR}" "${HOME}/.tam"; do
+        for candidate in "$dir/.venv/bin/python" "$dir/.venv/Scripts/python.exe"; do
+            if [ -x "$candidate" ]; then
+                printf '%s' "$candidate"
+                return 0
+            fi
+        done
+    done
+    for candidate in python3.13 python3.12 python3.11 python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    printf '%s' "python3"
+}
 if [ -z "${HOOK_PYTHON:-}" ]; then
-    HOOK_PYTHON="${CLAUDE_MEMORY_INSTALL_DIR}/.venv/bin/python"
-    [ -x "$HOOK_PYTHON" ] || HOOK_PYTHON="python3"
+    HOOK_PYTHON="$(hook_find_python)"
 fi
 
 # Recovery and state directories

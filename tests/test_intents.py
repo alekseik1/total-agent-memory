@@ -33,7 +33,7 @@ def intents_db(tmp_path: Path) -> Path:
         """
     )
     mig = Path(__file__).parent.parent / "migrations" / "013_intents.sql"
-    conn.executescript(mig.read_text())
+    conn.executescript(mig.read_text(encoding="utf-8"))
     conn.commit()
     conn.close()
     return db_path

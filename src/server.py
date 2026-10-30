@@ -17,6 +17,8 @@ Features: BM25 scoring, 3-level progressive disclosure, decay scoring, fuzzy sea
 
 import asyncio
 import atexit
+import contextvars
+import inspect
 import json
 import logging
 import math
@@ -30,6 +32,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -40,6 +43,10 @@ from typing import Literal
 # module reads `USE_ADVANCED_RAG`, `MEMORY_QUALITY_GATE_ENABLED`, etc. at
 # import time. Default mode = `fast` (zero LLM in hot path).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Launched as `python src/server.py` this module is `__main__`; modules that `import server`
+# must get this live copy (with its SID and store), not a second import of the file.
+if __name__ == "__main__":
+    sys.modules.setdefault("server", sys.modules[__name__])
 # Settings saved from the local dashboard override the environment; they must land
 # before any module below reads its configuration at import time.
 import local_settings as _local_settings
@@ -75,7 +82,13 @@ from rule_surfaces import (
     record_rule_outcome,
     should_suspend,
 )
-from secret_redaction import redact_secrets, redact_value
+import http_auth
+import provenance
+from erasure import RAW_CALL_TYPE, RAW_RESULT_TYPE
+from path_roots import cwd_root
+from privacy_filter import redact_private_value
+from private_file import open_private_text
+from secret_redaction import PRIVATE_BLOCK_RE, redact_secrets, redact_value
 from tam_db.contracts import Backend, StoreDatabase
 
 # chromadb (~70 MB RSS) and sentence_transformers (which pulls in torch,
@@ -176,10 +189,18 @@ from paths import restrict_permissions  # noqa: E402
 MEMORY_DIR = _resolve_memory_dir()
 # Records a supersede=true save compares against (most recent first).
 SUPERSEDE_CANDIDATES = 500
+# Modes the store falls into when the configured provider cannot start.
+FALLBACK_EMBED_MODES = ("st", "ollama", "none")
+# A fastembed model that failed to load is tried again after this long.
+FASTEMBED_RETRY_SECONDS = 120.0
+# Stale-vector scan: how often a running process looks for records embedded by a retired model.
+STALE_SCAN_INTERVAL_SECONDS = 600.0
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 # The text space is embedded by the store itself; MEMORY_TEXT_EMBED_MODEL names its model
 # (FASTEMBED_MODEL is the older name and still wins when set).
-FASTEMBED_MODEL = os.environ.get("FASTEMBED_MODEL") or _v11_config.get_text_embed_model()
+from memory_core.embedding_spaces import resolve_text_model as _resolve_text_model  # noqa: E402
+
+FASTEMBED_MODEL = _resolve_text_model()
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 USE_OLLAMA_EMBED = os.environ.get("USE_OLLAMA_EMBED", "auto")  # auto|true|false
@@ -311,7 +332,7 @@ def _get_v5(name, db):
     return _v5_modules[name]
 
 
-PRIVACY_TAG_RE = re.compile(r'<private>.*?</private>', re.DOTALL)
+PRIVACY_TAG_RE = PRIVATE_BLOCK_RE
 
 
 # ═══════════════════════════════════════════════════════════
@@ -381,29 +402,22 @@ class Store:
         self.evidence_embedder = EmbeddingProvider()
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
-        # Avoid SQLITE_BUSY when reflection runner / dashboard hold reader locks.
-        self.db.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
+        # Avoid SQLITE_BUSY when 8-10 sessions plus the dashboard contend for
+        # the single writer lock.
+        from config import get_db_busy_timeout_ms, get_db_journal_size_limit_bytes
+        busy_timeout_ms = get_db_busy_timeout_ms()
+        self.db.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         # Larger negative value = larger page cache (SQLite uses kibibytes when
         # negative). 20MB cache cuts disk I/O for repeat reads in hot path.
         self.db.execute("PRAGMA cache_size=-20000")
-        self.db.execute(f"PRAGMA journal_size_limit={DB_JOURNAL_SIZE_LIMIT_BYTES}")
-
-        # Opportunistic WAL reclaim: a PASSIVE checkpoint that copies every
-        # frame lets the next writer restart the WAL, and journal_size_limit
-        # then shrinks the file. PASSIVE, not TRUNCATE: the team server runs
-        # this same Store under Litestream, which owns forced checkpoints.
-        # Use a short timeout so a busy result fails fast instead of stalling
-        # startup.
-        try:
-            self.db.execute(f"PRAGMA busy_timeout={DB_STARTUP_CHECKPOINT_TIMEOUT_MS}")
-            row = self.db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
-            if row and row[0] == 0 and row[1] == row[2]:
-                LOG(f"WAL checkpoint: complete ({row[2]} pages)")
-        except sqlite3.OperationalError:
-            pass
-        finally:
-            self.db.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
-
+        self.db.execute(f"PRAGMA journal_size_limit={get_db_journal_size_limit_bytes()}")
+        if self.background_queues:
+            # Team workers (background_queues=False) leave checkpoints to Litestream.
+            from config import get_db_startup_checkpoint_timeout_ms
+            from sqlite_startup import checkpoint_on_open
+            checkpoint_on_open(self.db, self.db_path,
+                               checkpoint_timeout_ms=get_db_startup_checkpoint_timeout_ms(),
+                               restore_timeout_ms=busy_timeout_ms, log=LOG)
         self._schema()
         self._migrate()
         self._apply_sql_migrations()
@@ -487,6 +501,10 @@ class Store:
         # path swallows re-inserts of the same content.
         self._reconcile_outbox_at_startup()
 
+        # Vectors from a retired model or recipe go through the same backfill queue.
+        self._verify_embedding_fingerprint()
+        self.enqueue_stale_vectors(force=True)
+
         # Records saved while the embedding provider was down get their
         # vectors in the background (own connection, never blocks startup).
         self._embedding_backfill_thread = self._start_backfill_on_startup()
@@ -523,6 +541,9 @@ class Store:
     @property
     def fastembed(self):
         """Lazy-init FastEmbed model."""
+        if (self._fastembed_model is False and HAS_FASTEMBED
+                and time.monotonic() - getattr(self, "_fastembed_failed_at", 0.0) >= FASTEMBED_RETRY_SECONDS):
+            self._fastembed_model = None  # a purged model cache may have been restored
         if self._fastembed_model is None and HAS_FASTEMBED:
             try:
                 from memory_core.fastembed_loader import load_model
@@ -531,8 +552,29 @@ class Store:
                 LOG(f"FastEmbed: loaded {FASTEMBED_MODEL}")
             except Exception as e:
                 LOG(f"FastEmbed: init failed ({e})")
-                self._fastembed_model = False  # sentinel to avoid retries
+                self._fastembed_model = False  # not retried before FASTEMBED_RETRY_SECONDS pass
+                self._fastembed_failed_at = time.monotonic()
         return self._fastembed_model if self._fastembed_model is not False else None
+
+    def _configured_embed_provider(self):
+        try:
+            import config as _cfg
+            return _cfg.get_embed_provider()
+        except Exception:  # noqa: BLE001 — a broken config reads as the default provider
+            return "fastembed"
+
+    def _primary_active(self):
+        """True while the configured embedding provider is the one serving embeds (no fallback)."""
+        return self._embed_mode == self._configured_embed_provider()
+
+    def _restore_primary_embedder(self):
+        """Switch back from a fallback backend once the configured fastembed model loads again."""
+        if (self._embed_mode not in FALLBACK_EMBED_MODES or self._configured_embed_provider() != "fastembed"
+                or not HAS_FASTEMBED):
+            return
+        if self.fastembed:
+            LOG(f"FastEmbed recovered: switching embedding mode {self._embed_mode} -> fastembed")
+            self._embed_mode = "fastembed"
 
     @property
     def embed_provider(self):
@@ -786,13 +828,53 @@ class Store:
             self._swallowed("embed.fastembed", e, "FastEmbed error")
             return None
 
+    def _primary_identity(self):
+        """Identity of the configured embedding backend."""
+        from memory_core.embedding_identity import EmbedIdentity
+        provider = self._embed_mode or "fastembed"
+        return EmbedIdentity(self._active_embed_model_name(), provider, *self._recipe(provider))
+
+    @staticmethod
+    def _recipe(provider):
+        """(pooling, library) the provider applies to the model it serves."""
+        if provider == "fastembed":
+            from memory_core.embedding_identity import fastembed_pooling
+            try:
+                import fastembed
+                version = fastembed.__version__
+            except (ImportError, AttributeError):
+                return "", ""
+            return fastembed_pooling(version), f"fastembed {version}"
+        return "", ""
+
     def embed(self, texts):
-        """Get embeddings. See `embed_with_identity` for which backend ran."""
-        vectors, _identity = self.embed_with_identity(texts)
+        """Get embeddings (see :meth:`embed_identified`); the vectors only.
+
+        The identity of the backend that answered stays readable through
+        :meth:`last_embed_identity` on the calling thread.
+        """
+        vectors, identity = self.embed_identified(texts)
+        self._embed_identity_slot().value = identity
         return vectors
 
-    def embed_with_identity(self, texts):
-        """Embeddings plus the (model, provider) that actually produced them.
+    def _embed_identity_slot(self):
+        slot = self.__dict__.get("_embed_identity_local")
+        if slot is None:
+            import threading
+            slot = self.__dict__.setdefault("_embed_identity_local", threading.local())
+        return slot
+
+    def last_embed_identity(self):
+        """Identity behind the latest :meth:`embed` call of this thread, None before the first."""
+        return getattr(self._embed_identity_slot(), "value", None)
+
+    def embed_identified(self, texts):
+        """Get embeddings and the identity of the backend that produced them.
+
+        Returns ``(vectors, identity)``; ``vectors`` is None when no backend
+        produced anything. The identity names the backend that really answered:
+        when the configured one fails and a fallback serves the request, the
+        vectors are labelled with the fallback's model, never the configured one.
 
         Dispatch order:
           1. Cloud providers (openai / cohere) via EmbeddingProvider when selected.
@@ -808,13 +890,16 @@ class Store:
         cache an identity must take it from here, never from configuration.
 
         v9 A2: when ``V9_CACHE_L2_ENABLED`` is set, individual texts are
-        looked up in the persistent ``embedding_cache`` table first; misses
-        go through the provider and their vectors are stored back. Keyed
-        by sha256(text) so identical inputs short-circuit the embedder.
+        looked up in the persistent ``embedding_cache`` table first (only a
+        vector made by the configured model is a hit); misses go through the
+        provider and their vectors are stored back under the model that made
+        them.
         """
+        from memory_core.embedding_identity import EmbedIdentity
+        primary = self._primary_identity()
         # ── v9 L2 pre-lookup ───────────────────────────────
         l2 = getattr(self, "v9_cache", None)
-        model_name = self._active_embed_model_name() if l2 is not None else ""
+        model_name = primary.model if l2 is not None else ""
         cached: list[list[float] | None] = [None] * len(texts)
         missing_idx: list[int] = []
         if l2 is not None and l2.l2.enabled:
@@ -828,24 +913,21 @@ class Store:
             missing_idx = list(range(len(texts)))
 
         if not missing_idx:
-            # Full L2 hit. `embed_get` only returns rows whose stored model is
-            # the active one, so the cache's identity is the active identity.
-            return cached, (model_name, self._embed_mode)
-
-        missing_texts = [texts[i] for i in missing_idx]
+            return cached, primary  # full L2 hit
 
         # ── upstream embedding ─────────────────────────────
         # Each branch reports the backend it used, so a fallback is recorded
         # as itself rather than as whatever was configured.
         def _compute(batch):
+            """(vectors, identity) from the first backend that answers, else None."""
             if self._embed_mode in HTTP_EMBED_MODES:
                 r = self._provider_embed(batch)
                 if r:
-                    return r, self._active_embed_model_name(), self._embed_mode
+                    return r, primary
             if self._embed_mode == "fastembed":
                 r = self._fastembed_embed(batch)
                 if r:
-                    return r, FASTEMBED_MODEL, "fastembed"
+                    return r, primary
                 # v11: silent fallback to Ollama is forbidden in fast mode.
                 # Power users opt back in with MEMORY_ALLOW_OLLAMA_IN_HOT_PATH=true.
                 allow_ollama = os.environ.get(
@@ -854,11 +936,11 @@ class Store:
                 if allow_ollama and self._check_ollama():
                     r = self._ollama_embed(batch)
                     if r:
-                        return r, OLLAMA_EMBED_MODEL, "ollama"
+                        return r, EmbedIdentity(OLLAMA_EMBED_MODEL, "ollama")
             if self._embed_mode == "ollama":
                 r = self._ollama_embed(batch)
                 if r:
-                    return r, OLLAMA_EMBED_MODEL, "ollama"
+                    return r, primary
             # v11: SentenceTransformer fallback is also gated. Allowed when
             # the user explicitly opts in OR the mode is not "fastembed"
             # (i.e. they configured embed_mode=st on purpose).
@@ -870,66 +952,27 @@ class Store:
             )
             if allow_st and self._embed_mode in ("st", "ollama", "fastembed", "openai", "cohere") and self.embedder:
                 try:
-                    return self.embedder.encode(batch).tolist(), EMBEDDING_MODEL, "st"
-                except Exception:
-                    pass
-            return None, None, None
-
-        fresh, fresh_model, fresh_provider = _compute(missing_texts)
-        if fresh is None:
-            # Upstream failed — honour legacy contract and return None
-            # only when nothing at all can be produced.
-            if all(v is None for v in cached):
-                return None, (model_name, self._embed_mode)
-            return cached, (model_name, self._embed_mode)
-
-        def _compute_via(batch, provider):
-            """Call exactly the backend that produced `fresh`, with no
-            fallback chain. Re-entering `_compute` here would let a
-            flapping backend (e.g. an ollama tunnel with no failure state
-            of its own, `_ollama_embed`) answer from a DIFFERENT backend
-            on this second call than it just did on the first, mixing two
-            backends' vectors under the one identity this call reports.
-            """
-            if provider == "fastembed":
-                return self._fastembed_embed(batch)
-            if provider == "ollama":
-                return self._ollama_embed(batch)
-            if provider == "st":
-                try:
-                    return self.embedder.encode(batch).tolist()
+                    r = self.embedder.encode(batch).tolist()
                 except Exception:
                     return None
+                return r, (primary if self._embed_mode == "st" else EmbedIdentity(EMBEDDING_MODEL, "st"))
             return None
 
-        # A partial L2 hit whose fresh half fell back to a different backend
-        # cannot be returned under one identity: the cached half really is
-        # `model_name` (embed_get guarded on it), the fresh half is not. Don't
-        # merge two backends' vectors under a single label - recompute the
-        # cached texts too, through the backend that just answered, so every
-        # vector in the batch agrees with the one identity this call returns.
-        cached_idx = [i for i in range(len(texts)) if cached[i] is not None]
-        if cached_idx and fresh_model != model_name:
-            recomputed = _compute_via([texts[i] for i in cached_idx], fresh_provider)
-            if recomputed is None or len(recomputed) != len(cached_idx):
-                # The backend that just answered for the fresh half didn't
-                # answer for the cached half either - abandon the merge for
-                # these indices rather than emit a hole under a healthy
-                # identity. What survives is the fresh half, honestly
-                # labelled by the identity this call returns.
-                for i in cached_idx:
-                    cached[i] = None
-            else:
-                for local_i, global_i in enumerate(cached_idx):
-                    cached[global_i] = recomputed[local_i]
-                    # Persist under the identity that produced it so the
-                    # next call for this text doesn't pay this recompute
-                    # again.
-                    if l2 is not None and l2.l2.enabled:
-                        try:
-                            l2.embed_set(texts[global_i], recomputed[local_i], fresh_model)
-                        except Exception:
-                            pass
+        computed = _compute([texts[i] for i in missing_idx])
+        if computed is None:
+            # Upstream failed — honour legacy contract and return None
+            # only when nothing at all can be produced.
+            return (None if all(v is None for v in cached) else cached), primary
+        fresh, identity = computed
+        if identity.model != primary.model and len(missing_idx) < len(texts):
+            # A fallback answered: the L2 hits come from another model, so the whole batch is redone
+            # (or, if that fails, returned unmixed) to keep one model per result.
+            everything = _compute(list(texts))
+            if everything is None:
+                return None, primary
+            fresh, identity = everything
+            missing_idx = list(range(len(texts)))
+            cached = [None] * len(texts)
 
         # ── merge + persist back into L2 ───────────────────
         # Cache under the model that actually produced the vector: `embed_get`
@@ -939,11 +982,11 @@ class Store:
             cached[global_i] = fresh[local_i]
             if l2 is not None and l2.l2.enabled and fresh[local_i] is not None:
                 try:
-                    l2.embed_set(texts[global_i], fresh[local_i], fresh_model)
+                    l2.embed_set(texts[global_i], fresh[local_i], identity.model)
                 except Exception:
                     pass
 
-        return cached, (fresh_model, fresh_provider)
+        return cached, identity
 
     # ── Binary Quantization ──
 
@@ -1105,6 +1148,7 @@ class Store:
                     context=payload.get("context", "") or "",
                     branch=payload.get("branch", "") or "",
                     skip_dedup=False,
+                    supersedes=payload.get("supersedes"),
                     filter_name=payload.get("filter_name"),
                     source_format=payload.get("source_format", "auto"),
                     importance=payload.get("importance", "medium"),
@@ -1171,8 +1215,9 @@ class Store:
         # `Store.embed_with_identity` so the embedding cache, binary
         # quantization and ST fallback stay wired.
         vector = None
-        model_name = self._active_embed_model_name()
-        provider_name = self._embed_mode or "fastembed"
+        identity = self._primary_identity()
+        model_name = identity.model
+        provider_name = identity.provider
         if embedding is not None:
             # A precomputed vector is always in the text space of the active model.
             vector = [float(x) for x in embedding]
@@ -1192,16 +1237,16 @@ class Store:
                                 f"per-space embed for space={space} fell back to text")
         if vector is None:
             try:
-                # The identity comes from the chain that ran, not from the
-                # configuration: with Ollama configured but unreachable this
-                # returns SentenceTransformer vectors, which must not be
-                # labelled `nomic-embed-text`.
-                embs, (model_name, provider_name) = self.embed_with_identity([f"{content} {context}"])
+                self._embed_identity_slot().value = None
+                embs = self.embed([f"{content} {context}"])
+                identity = self.last_embed_identity() or identity
             except Exception as exc:  # noqa: BLE001 — provider errors become a backfill entry
                 return None, f"{type(exc).__name__}: {exc}"
             if not embs or not embs[0]:
                 return None, f"embedding provider ({self._embed_mode or 'none'}) returned no vector"
             vector = embs[0]
+            # The vector is labelled with the backend that made it: a fallback is never recorded as the configured model.
+            model_name, provider_name = identity.model, identity.provider
             # Honest record-keeping: the row IS in `text` model space when
             # the per-space encoder failed — degrade gracefully.
             space = "text"
@@ -1248,15 +1293,29 @@ class Store:
         from embedding_backfill import BackfillOutcome, EmbeddingUnavailable
         row = db.execute(
             "SELECT k.content, k.context, k.type, k.project, k.session_id, k.created_at, "
-            "k.source_format, k.status, e.knowledge_id FROM knowledge k "
-            "LEFT JOIN embeddings e ON e.knowledge_id = k.id WHERE k.id = ?", (knowledge_id,)).fetchone()
+            "k.source_format, k.status, e.knowledge_id, COALESCE(e.embedding_space, 'text'), e.embed_model "
+            "FROM knowledge k LEFT JOIN embeddings e ON e.knowledge_id = k.id WHERE k.id = ?",
+            (knowledge_id,)).fetchone()
         if row is None or row[7] != "active":
             return BackfillOutcome.GONE
+        stale = False
         if row[8] is not None:
-            return BackfillOutcome.EMBEDDED
+            expected = self._expected_models().get(row[9])
+            # A vector from the model that serves its space is done. During a fallback nothing is
+            # re-embedded: the stale scan queues the record again once the configured provider is back.
+            if expected is None or row[10] == expected:
+                return BackfillOutcome.EMBEDDED
+            stale = True
         record_vector, error = self._embed_for_record(row[0], row[1] or "", row[6] or "auto")
         if record_vector is None:
             raise EmbeddingUnavailable(error)
+        if stale:
+            produced = self._expected_models().get(record_vector["space"])
+            if produced != record_vector["model"]:
+                # Replacing a stale vector with one that is still not the space's model would loop forever.
+                raise EmbeddingUnavailable(
+                    f"re-embed produced {record_vector['model']} for space {record_vector['space']}, "
+                    f"expected {produced}")
         self._persist_record_embedding(knowledge_id, record_vector, ktype=row[2], project=row[3],
                                        sid=row[4], created_at=row[5], content=row[0], db=db,
                                        use_chroma=use_chroma)
@@ -1271,6 +1330,7 @@ class Store:
         from embedding_backfill import DEFAULT_DRAIN_LIMIT
         conn = self.db if db is None else db
         sink = journal if journal is not None else getattr(self, "error_journal", None)
+        self.enqueue_stale_vectors(conn)
         if use_chroma is None:
             use_chroma = bool(self._chroma_client) and not self._check_binary_search()
         result = self._embedding_backfill(conn).drain(
@@ -1279,6 +1339,81 @@ class Store:
             on_error=sink.log_error if sink is not None else None,
         )
         return result.as_dict()
+
+    def _expected_models(self):
+        """space -> model that serves it now; empty while a fallback backend is active."""
+        if not self._primary_active():
+            return {}
+        from memory_core.embedding_spaces import SUPPORTED_SPACES
+        expected = {"text": self._active_embed_model_name()}
+        others = [space for space in SUPPORTED_SPACES if space != "text"]
+        if others:
+            from memory_core.embeddings import EmbeddingProvider
+            provider = getattr(self, "_v11_embed_provider", None)
+            if provider is None:
+                provider = self._v11_embed_provider = EmbeddingProvider()
+            expected.update({space: provider.active_model(space) for space in others})
+        return expected
+
+    def enqueue_stale_vectors(self, db=None, *, force=False):
+        """Queue active records whose vector came from a model other than the one serving their space.
+
+        The queue is the embedding backfill (``embedding_pending``); its drain
+        re-embeds them. Does nothing during a fallback (the vectors would be
+        replaced by another wrong model), and at most every
+        STALE_SCAN_INTERVAL_SECONDS per process unless ``force``. Returns how
+        many records were queued.
+        """
+        from memory_core.embedding_identity import stale_ids
+        now = time.monotonic()
+        if not force and now - getattr(self, "_stale_scan_at", float("-inf")) < STALE_SCAN_INTERVAL_SECONDS:
+            return 0
+        expected = self._expected_models()
+        if not expected:
+            return 0
+        conn = self.db if db is None else db
+        try:
+            ids = stale_ids(conn, expected)
+            queued = self._embedding_backfill(conn).enqueue_many(ids, "stale vector: embedded by another model") if ids else 0
+        except sqlite3.Error as exc:
+            self._swallowed("embedding_backfill.stale_scan", exc, "stale vector scan failed")
+            return 0
+        self._stale_scan_at = now
+        if queued:
+            LOG(f"{queued} records carry vectors of a retired embedding model; queued for re-embedding")
+        return queued
+
+    def _verify_embedding_fingerprint(self):
+        """Retire the text vectors when the model now answers differently than when they were written.
+
+        The model name does not capture pooling or library version. A probe text
+        embedded at write time is kept in ``embedding_fingerprints``; if today's
+        vector for it disagrees, the group is relabelled stale and the backfill
+        re-embeds it. Only the local fastembed text model is checked, on both backends.
+        """
+        if self._embed_mode != "fastembed":
+            return
+        from memory_core.embedding_identity import (
+            PROBE_TEXT,
+            FingerprintState,
+            check_fingerprint,
+            record_fingerprint,
+            retire_group,
+        )
+        probe = self._fastembed_embed([PROBE_TEXT])
+        if not probe:
+            return
+        identity = self._primary_identity()
+        try:
+            state = check_fingerprint(self.db, "text", identity.model, probe[0])
+            if state is FingerprintState.CHANGED:
+                retired = retire_group(self.db, "text", identity.model)
+                LOG(f"embedding recipe for {identity.model} changed ({identity.library}, {identity.pooling}): "
+                    f"{retired} vectors retired for re-embedding")
+            if state is not FingerprintState.SAME:
+                record_fingerprint(self.db, "text", identity, probe[0])
+        except sqlite3.Error as exc:
+            self._swallowed("embedding.fingerprint", exc, "embedding fingerprint check failed")
 
     def _open_side_connection(self):
         """A second connection to the same database, for work off the main thread."""
@@ -1328,6 +1463,35 @@ class Store:
         join_at_exit(thread)  # it embeds through onnxruntime; see memory_core/exit_join.py
         return thread
 
+    def _configured_text_model(self):
+        """Model the configured provider serves for the text space (not the model of a running fallback)."""
+        configured = self._configured_embed_provider()
+        if configured in HTTP_EMBED_MODES:
+            provider = self.embed_provider
+            if provider is not None:
+                return getattr(provider, "model", None) or getattr(provider, "model_name", configured)
+            return configured
+        return FASTEMBED_MODEL
+
+    def _unavailable_space(self, space, model, dimension, actual_model, project):
+        """Diagnostic for a vector group that cannot be searched with the active query encoder.
+
+        Three different situations used to share one "re-embed required" message:
+        the configured provider is down and a fallback encodes queries (the stored
+        vectors are fine and wait for the provider), the vectors come from a retired
+        model (the background backfill is re-embedding them), or the model changed.
+        """
+        from memory_core.embedding_identity import count_stale
+        count = count_stale(self.db, space, model, dimension, project)
+        if space == "text" and model == self._configured_text_model() and not self._primary_active():
+            return {"space": space, "code": "provider_fallback", "count": count,
+                    "error": (f"configured embedding provider {self._configured_embed_provider()} is unavailable "
+                              f"(queries run on {self._embed_mode}); {count} vectors from {model} are not searched "
+                              "until it loads again - check the model cache (TAM_MODEL_CACHE)")}
+        return {"space": space, "code": "stale_vectors", "count": count,
+                "error": (f"{count} vectors in {space} were made by {model}, not {actual_model}; "
+                          "they are re-embedded in the background")}
+
     def _search_spaces(self, query, *, project=None, spaces=None, limit=10, kind="all", branch=None):
         from memory_core.embeddings import EmbeddingProvider
         from memory_core.telemetry import op_timer
@@ -1337,10 +1501,12 @@ class Store:
             MIN_BINARY_CANDIDATES,
         )
 
+        self._restore_primary_embedder()
         groups = self._vector_search.groups(project)
-        rankings = {}
         query_vectors = {}
-        self._semantic_diagnostics = []
+        # Spaces that share a model and a query vector are searched together: one ranking by cosine.
+        buckets = {}
+        diagnostics = []
         for space, model, dimension in groups:
             if spaces and space not in spaces:
                 continue
@@ -1355,7 +1521,8 @@ class Store:
                             self._v11_embed_provider = provider
                         actual_model = provider.active_model(space)
                     if actual_model != model:
-                        raise ValueError(f"Embedding model changed for {space}; re-embed required")
+                        diagnostics.append(self._unavailable_space(space, model, dimension, actual_model, project))
+                        continue
                     uses_store = space == "text" or (
                         self._embed_mode == "fastembed" and actual_model == self._active_embed_model_name()
                     )
@@ -1367,23 +1534,55 @@ class Store:
                         else:
                             query_vectors[vector_key] = provider.embed_query(query, space=space)
                     vector = query_vectors[vector_key]
+                    if not len(vector):
+                        diagnostics.append({"space": space, "code": "embed_failed",
+                                            "error": f"the query could not be embedded ({self._embed_mode})"})
+                        continue
                     if len(vector) != dimension:
-                        raise ValueError(f"Embedding model changed for {space}; re-embed required")
-                    rankings[space] = self._binary_search(
-                        vector, n_candidates=max(limit, MIN_BINARY_CANDIDATES, min(MAX_BINARY_CANDIDATES, limit * BINARY_CANDIDATE_MULTIPLIER)), project=project,
-                        n_results=limit, embedding_spaces=[space], embedding_model=model,
-                        exact_small_pool=True, kind=kind, branch=branch,
-                    )
+                        diagnostics.append(self._unavailable_space(space, model, dimension, actual_model, project))
+                        continue
+                    buckets.setdefault((vector_key, model, dimension), []).append(space)
             except Exception as error:  # noqa: BLE001 — report failed spaces while other tiers remain usable
-                self._semantic_diagnostics.append({"space": space, "error": str(error)})
-                LOG(f"semantic space {space} unavailable: {error}")
+                diagnostics.append({"space": space, "code": "embed_failed", "error": str(error)})
+        rankings = []
+        for (vector_key, model, _), bucket_spaces in buckets.items():
+            try:
+                with op_timer("search_space_ms"):
+                    rankings.append(self._binary_search(
+                        query_vectors[vector_key], n_candidates=max(limit, MIN_BINARY_CANDIDATES, min(MAX_BINARY_CANDIDATES, limit * BINARY_CANDIDATE_MULTIPLIER)), project=project,
+                        n_results=limit, embedding_spaces=sorted(bucket_spaces), embedding_model=model,
+                        exact_small_pool=True, kind=kind, branch=branch,
+                    ))
+            except Exception as error:  # noqa: BLE001 — report failed spaces while other tiers remain usable
+                diagnostics.extend({"space": space, "code": "embed_failed", "error": str(error)}
+                                   for space in bucket_spaces)
+        self._semantic_diagnostics = diagnostics
+        self._log_semantic_diagnostics(diagnostics)
         if len(rankings) == 1:
-            return next(iter(rankings.values()))
-        scores = {}
-        for hits in rankings.values():
-            for rank, (kid, _) in enumerate(hits, 1):
-                scores[kid] = scores.get(kid, 0.0) + 1.0 / (60 + rank)
-        return sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
+            return rankings[0]
+        # Different models: fuse by rank, report the best cosine so the score keeps its scale.
+        fused, best = {}, {}
+        for hits in rankings:
+            for rank, (kid, similarity) in enumerate(hits, 1):
+                fused[kid] = fused.get(kid, 0.0) + 1.0 / (60 + rank)
+                best[kid] = max(best.get(kid, similarity), similarity)
+        ordered = sorted(fused, key=lambda kid: fused[kid], reverse=True)[:limit]
+        return [(kid, best[kid]) for kid in ordered]
+
+    def _log_semantic_diagnostics(self, diagnostics):
+        """One stderr line per distinct problem, not one per recall."""
+        seen = {(entry["space"], entry["code"], entry["error"]) for entry in diagnostics}
+        for space, code, error in sorted(seen - getattr(self, "_logged_semantic", set())):
+            LOG(f"semantic space {space} unavailable ({code}): {error}")
+        self._logged_semantic = seen
+
+    def _hyde_embed(self, texts):
+        """Embed with the model the vectors are stored in; None when a fallback would answer instead."""
+        vectors = self.embed(texts)
+        identity = self.last_embed_identity()
+        if not vectors or (identity is not None and identity.model != self._active_embed_model_name()):
+            return None
+        return vectors
 
     def _binary_search(self, query_embedding, n_candidates=50, project=None, n_results=10,
                        embedding_spaces=None, embedding_model=None, exact_small_pool=False,
@@ -1883,7 +2082,8 @@ class Store:
                         importance="medium", skip_quality=False, coref=None,
                         agent_id=None, parent_agent_id=None,
                         _from_outbox=False, source_format: Literal['auto', 'conversation'] = 'auto',
-                        repeat: Literal['replace', 'confirm'] = 'replace', embedding=None):
+                        repeat: Literal['replace', 'confirm'] = 'replace', embedding=None,
+                        supersedes: int | None = None):
         """Save knowledge. Returns
         ``(record_id, was_deduplicated, was_redacted, private_sections, quality_meta)``.
 
@@ -1903,6 +2103,9 @@ class Store:
         ``embedding`` is an optional precomputed text-space vector from the
         configured provider (callers that batch their embedding requests);
         when given, the store does not embed the content again.
+
+        ``supersedes`` names an active record that the new row replaces in the
+        same transaction (``memory_update``); the duplicate lookup is skipped.
         """
         # v11 Phase 5 — total wall-clock for this save. Recorded into
         # `memory_core.telemetry.counters['save_total_ms']` so the bench
@@ -1921,23 +2124,30 @@ class Store:
         if repeat not in ("replace", "confirm"):
             raise ValueError(f"repeat must be 'replace' or 'confirm', got {repeat!r}")
         with _v11_op_timer("save_total_ms"):
-            return self._save_knowledge_impl(
+            saved = self._save_knowledge_impl(
                 sid, content, ktype, project=project, tags=tags,
                 context=context, branch=branch, skip_dedup=skip_dedup,
                 filter_name=filter_name, importance=importance,
                 skip_quality=skip_quality, coref=coref,
                 agent_id=agent_id, parent_agent_id=parent_agent_id,
                 _from_outbox=_from_outbox, source_format=source_format,
-                repeat=repeat, embedding=embedding,
+                repeat=repeat, embedding=embedding, supersedes=supersedes,
             )
+        _note_written_record(saved[0])
+        return saved
 
     def _save_knowledge_impl(self, sid, content, ktype, project="general", tags=None,
                               context="", branch="", skip_dedup=False, filter_name=None,
                               importance="medium", skip_quality=False, coref=None,
                               agent_id=None, parent_agent_id=None,
                               _from_outbox=False, source_format: Literal['auto', 'conversation'] = 'auto',
-                              repeat: Literal['replace', 'confirm'] = 'replace', embedding=None):
-        """Underlying implementation; wrapped by `save_knowledge` for telemetry."""
+                              repeat: Literal['replace', 'confirm'] = 'replace', embedding=None,
+                              supersedes: int | None = None):
+        """Underlying implementation; wrapped by `save_knowledge` for telemetry.
+
+        `supersedes` is the id of an active record the new row replaces; the insert
+        and the status change commit together or not at all.
+        """
         if source_format not in ('auto', 'conversation'):
             raise ValueError('Unsupported source format')
         if source_format == 'conversation' and filter_name:
@@ -1966,34 +2176,63 @@ class Store:
 
         # Optional content filter (token-saving preprocessor)
         # Auto-detect filter when caller didn't specify one.
+        auto_filter = False
         if not filter_name and source_format == 'auto':
             try:
                 from autofilter import detect_filter
                 filter_name = detect_filter(content)
+                auto_filter = bool(filter_name)
                 if filter_name:
                     LOG(f"autofilter detected: {filter_name}")
             except Exception as e:
                 self._swallowed("save.autofilter", e, "autofilter error")
         filter_stats = None
+        _SAVE_FILTER_STATS.set(None)
         if filter_name:
+            if FILTER_PATH_CHARS_RE.search(str(filter_name)):
+                raise ValueError(f"Unknown filter {filter_name!r}")
             try:
                 from pathlib import Path as _Path
 
+                from autofilter import filter_preserving_prose
                 from content_filter import filter_with_stats as _fws
                 from content_filter import load_filter_config
                 cfg_path = _Path(__file__).resolve().parent.parent / "filters" / f"{filter_name}.toml"
-                if cfg_path.exists():
+                # Only canonical names are looked up, so case-insensitive filesystems agree with Linux.
+                if not FILTER_NAME_RE.fullmatch(str(filter_name)) or not cfg_path.exists():
+                    _SAVE_FILTER_STATS.set({"unknown_filter": filter_name})
+                    LOG(f"filter '{filter_name}' not found at {cfg_path}")
+                else:
                     cfg = load_filter_config(cfg_path)
                     safety = cfg.get("safety", "strict")
-                    content, filter_stats = _fws(content, cfg.get("stages", {}), safety=safety)
+                    stages = cfg.get("stages", {})
+                    if auto_filter:
+                        # A detected filter trims the pasted output only; the caller's own
+                        # sentences around it stay as written.
+                        # on_empty is dropped here: a run the filter empties is kept as written
+                        # instead of being replaced by the placeholder.
+                        original = content
+                        run_stages = {key: value for key, value in stages.items() if key != "on_empty"}
+                        content = filter_preserving_prose(
+                            original, lambda run: _fws(run, run_stages, safety=safety)[0])
+                        filter_stats = {
+                            "input_chars": len(original), "input_lines": len(original.splitlines()),
+                            "output_chars": len(content), "output_lines": len(content.splitlines()),
+                            "reduction_pct": round(max(0.0, (1 - len(content) / max(1, len(original))) * 100), 1),
+                            "safety": safety,
+                        }
+                    else:
+                        content, filter_stats = _fws(content, stages, safety=safety)
                     filter_stats["filter_name"] = filter_name
+                    filter_stats["auto"] = auto_filter
+                    _SAVE_FILTER_STATS.set(filter_stats)
                     LOG(
                         f"filter '{filter_name}' applied: "
                         f"{filter_stats['input_chars']} -> {filter_stats['output_chars']} "
                         f"chars (-{filter_stats['reduction_pct']}%)"
                     )
-                else:
-                    LOG(f"filter '{filter_name}' not found at {cfg_path}")
+            except ValueError:
+                raise
             except Exception as e:
                 self._swallowed("save.content_filter", e, f"filter '{filter_name}' failed")
 
@@ -2018,6 +2257,7 @@ class Store:
                         "filter_name": filter_name, "importance": importance,
                         "source_format": source_format,
                         "agent_id": agent_id, "parent_agent_id": parent_agent_id,
+                        "supersedes": supersedes,
                     },
                     session_id=sid, content=content, ktype=ktype, project=project,
                 )
@@ -2093,6 +2333,7 @@ class Store:
         # runs before dedup so dropped records never pollute storage. Gate
         # fails open: any LLM error or unavailability lets the save proceed.
         quality_meta: dict | None = None
+        gate_log_id: int | None = None
         if not skip_quality and not _async_enrich:
             try:
                 from quality_gate import log_decision, score_quality
@@ -2131,7 +2372,7 @@ class Store:
                     return None, False, was_redacted, private_sections, quality_meta
                 # Non-drop decisions ('skip'/'error'/'pass') only journal
                 # when MEMORY_QUALITY_LOG_ALL=1; helper handles the gating.
-                log_decision(
+                gate_log_id = log_decision(
                     self.db, score, project=project, ktype=ktype,
                     content=content, knowledge_id=None,
                 )
@@ -2145,8 +2386,8 @@ class Store:
         # see that. repeat='confirm' keeps the stored row and its authorship
         # (team stores record a confirmation). An outbox replay is the same
         # write, not a new statement, and always confirms.
-        replaces = None
-        if not skip_dedup:
+        replaces = supersedes
+        if not skip_dedup and supersedes is None:
             dup_id = self._find_duplicate(content, ktype, project)
             if dup_id and repeat == "replace" and not _from_outbox:
                 replaces = dup_id
@@ -2195,13 +2436,22 @@ class Store:
             LOG(f"importance budget: id={rid} {budget_decision.requested} -> {budget_decision.applied}")
             quality_meta = dict(quality_meta or {})
             quality_meta["importance_budget"] = budget_decision.as_dict()
+        if replaces:
+            # Same transaction as the insert: a crash cannot leave both versions active.
+            superseded_now = self.db.execute(
+                "UPDATE knowledge SET status='superseded', superseded_by=? WHERE id=? AND status='active'",
+                (rid, replaces),
+            ).rowcount
+            if supersedes is not None and not superseded_now:
+                self.db.rollback()
+                message = f"Record {supersedes} is no longer active; it was changed by another writer"
+                if intent is not None:
+                    import outbox as _ob
+                    _ob.mark_superseded(self.db, intent, None)  # resolved: must not replay as a new record
+                raise ValueError(message)
         self.db.commit()
 
         if replaces:
-            self.db.execute(
-                "UPDATE knowledge SET status='superseded', superseded_by=? WHERE id=? AND status='active'",
-                (rid, replaces),
-            )
             self._delete_embedding(replaces)
             self.db.commit()
             if self.chroma and not self._check_binary_search():
@@ -2318,14 +2568,9 @@ class Store:
 
         # Backfill the audit log row with the freshly minted knowledge_id so
         # 'pass' rows in quality_gate_log can be joined back to records.
-        if quality_meta and quality_meta.get("decision") == "pass":
+        if gate_log_id is not None and quality_meta and quality_meta.get("decision") == "pass":
             try:
-                self.db.execute(
-                    "UPDATE quality_gate_log SET knowledge_id=? "
-                    "WHERE id = (SELECT MAX(id) FROM quality_gate_log "
-                    "            WHERE knowledge_id IS NULL AND decision='pass')",
-                    (rid,),
-                )
+                self.db.execute("UPDATE quality_gate_log SET knowledge_id=? WHERE id=?", (rid, gate_log_id))
                 self.db.commit()
             except Exception as e:
                 self._swallowed("save.quality_gate_log", e, "quality_gate_log backfill error")
@@ -2524,20 +2769,55 @@ class Store:
             params.append(project)
         rows = self.q(f"SELECT id, content, type, project FROM knowledge WHERE {' AND '.join(conds)} ORDER BY id", params)
 
-        groups = []
-        used = set()
-        for i, a in enumerate(rows):
-            if a["id"] in used:
+        buckets: dict[tuple, list[dict]] = {}
+        for row in rows:
+            buckets.setdefault((row["project"], row["type"]), []).append(row)
+        threshold = max(float(threshold), 0.0)
+
+        found = []
+        for bucket in buckets.values():
+            found.extend(self._similar_groups_in_bucket(bucket, threshold))
+        # Same order as the former all-pairs scan: by the id of each group's first record.
+        found.sort(key=lambda group: group[0]["id"])
+        return found
+
+    @staticmethod
+    def _similar_groups_in_bucket(bucket: list[dict], threshold: float) -> list[list[dict]]:
+        """Greedy Jaccard grouping of records of one (project, type), without comparing all pairs.
+
+        Prefix filtering: two sets with Jaccard > t share a token among the first
+        len - ceil(t * len) + 1 tokens of each, in one global rarity order. Only such
+        candidates are compared, and every comparison is the exact Jaccard.
+        """
+        tokens = [set(row["content"].lower().split()) for row in bucket]
+        frequency: dict[str, int] = {}
+        for token_set in tokens:
+            for token in token_set:
+                frequency[token] = frequency.get(token, 0) + 1
+        ordered = [sorted(token_set, key=lambda t: (frequency[t], t)) for token_set in tokens]
+        postings: dict[str, list[int]] = {}
+        prefixes: list[list[str]] = []
+        for index, token_list in enumerate(ordered):
+            length = len(token_list)
+            prefix = token_list[:max(1, length - math.ceil(threshold * length) + 1)] if length else []
+            prefixes.append(prefix)
+            for token in prefix:
+                postings.setdefault(token, []).append(index)
+
+        groups: list[list[dict]] = []
+        used: set[int] = set()
+        for i, row in enumerate(bucket):
+            if i in used or not tokens[i]:
                 continue
-            group = [a]
-            for b in rows[i+1:]:
-                if b["id"] in used or b["type"] != a["type"] or b["project"] != a["project"]:
-                    continue
-                if self._jaccard(a["content"], b["content"]) > threshold:
-                    group.append(b)
-                    used.add(b["id"])
+            candidates = sorted({j for token in prefixes[i] for j in postings[token] if j > i and j not in used})
+            group = [row]
+            for j in candidates:
+                union = len(tokens[i] | tokens[j])
+                if len(tokens[i] & tokens[j]) / union > threshold:
+                    group.append(bucket[j])
+                    used.add(j)
             if len(group) > 1:
-                used.add(a["id"])
+                used.add(i)
                 groups.append(group)
         return groups
 
@@ -2557,8 +2837,9 @@ class Store:
                 if self.chroma and not self._check_binary_search():
                     try:
                         self.chroma.delete(ids=[str(r["id"])])
-                    except Exception:
-                        pass
+                    except Exception as e:  # noqa: BLE001 — chroma raises its own types
+                        self._swallowed("consolidate.chroma_delete", e,
+                                        f"Chroma delete of consolidated id={r['id']} failed")
         self.db.commit()
         return {"kept": longest["id"], "merged": merged_ids}
 
@@ -2570,27 +2851,32 @@ class Store:
         archive_cutoff = format_utc(now - timedelta(days=ARCHIVE_AFTER_DAYS))
         purge_cutoff = format_utc(now - timedelta(days=PURGE_AFTER_DAYS))
 
-        archived = self.db.execute("""
-            UPDATE knowledge SET status='archived'
-            WHERE status='active' AND last_confirmed < ? AND recall_count = 0
-            AND confidence < 0.8
-        """, (archive_cutoff,)).rowcount
+        archive_where = ("status='active' AND last_confirmed < ? AND recall_count = 0 AND confidence < 0.8")
+        archive_ids = [r[0] for r in self.db.execute(f"SELECT id FROM knowledge WHERE {archive_where}",
+                                                      (archive_cutoff,))]
+        archived = self.db.execute(f"UPDATE knowledge SET status='archived' WHERE {archive_where}",
+                                   (archive_cutoff,)).rowcount
 
-        purged = self.db.execute("""
-            UPDATE knowledge SET status='purged'
-            WHERE status='archived' AND last_confirmed < ?
-        """, (purge_cutoff,)).rowcount
+        purge_where = "status='archived' AND last_confirmed < ?"
+        purge_ids = [r[0] for r in self.db.execute(f"SELECT id FROM knowledge WHERE {purge_where}",
+                                                    (purge_cutoff,))]
+        purged = self.db.execute(f"UPDATE knowledge SET status='purged' WHERE {purge_where}",
+                                 (purge_cutoff,)).rowcount
 
         self.db.commit()
 
-        if archived or purged:
-            for r in self.q("SELECT id FROM knowledge WHERE status IN ('archived','purged')"):
-                self._delete_embedding(r["id"])
-                if self.chroma and not self._check_binary_search():
+        # Only the rows moved in this run lose their vectors; earlier ones were cleaned then.
+        moved = list(dict.fromkeys([*archive_ids, *purge_ids]))
+        for record_id in moved:
+            self._delete_embedding(record_id)
+        if moved:
+            if self.chroma and not self._check_binary_search():
+                for start in range(0, len(moved), RETENTION_CHROMA_BATCH):
+                    batch = moved[start:start + RETENTION_CHROMA_BATCH]
                     try:
-                        self.chroma.delete(ids=[str(r["id"])])
-                    except Exception:
-                        pass
+                        self.chroma.delete(ids=[str(record_id) for record_id in batch])
+                    except Exception as e:  # noqa: BLE001 — chroma raises its own types
+                        self._swallowed("retention.chroma_delete", e, f"Chroma delete of {len(batch)} retired ids failed")
             self.db.commit()
 
         return {"archived": archived, "purged": purged, "actions_pruned": self.prune_agent_actions()}
@@ -2843,6 +3129,10 @@ class Store:
                 return r
         return None
 
+    @staticmethod
+    def _not_found(kind: str, record_id) -> dict:
+        return {"error": f"{kind} {record_id} not found", "id": record_id}
+
     def manage_insight(self, sid, action, **kw):
         """ExpeL-style insight management: add/upvote/downvote/edit/list/promote."""
         now = utc_now()
@@ -2880,11 +3170,13 @@ class Store:
             return {"action": "added", "id": insight_id, "importance": 2}
 
         elif action == "upvote":
-            self.db.execute(
+            changed = self.db.execute(
                 "UPDATE insights SET importance=importance+1, "
                 "confidence=MIN(1.0, confidence+0.05), updated_at=? "
-                "WHERE id=? AND status='active'", (now, kw["id"]))
+                "WHERE id=? AND status='active'", (now, kw["id"])).rowcount
             self.db.commit()
+            if not changed:
+                return self._not_found("Insight", kw["id"])
             rec = self.q1("SELECT id, importance, confidence FROM insights WHERE id=?", (kw["id"],))
             eligible = rec and rec["importance"] >= 5 and rec["confidence"] >= 0.8
             return {"action": "upvoted", "id": kw["id"],
@@ -2892,10 +3184,12 @@ class Store:
                     "promotion_eligible": eligible}
 
         elif action == "downvote":
-            self.db.execute(
+            changed = self.db.execute(
                 "UPDATE insights SET importance=importance-1, updated_at=? "
-                "WHERE id=? AND status='active'", (now, kw["id"]))
+                "WHERE id=? AND status='active'", (now, kw["id"])).rowcount
             self.db.commit()
+            if not changed:
+                return self._not_found("Insight", kw["id"])
             rec = self.q1("SELECT id, importance FROM insights WHERE id=?", (kw["id"],))
             if rec and rec["importance"] <= 0:
                 self.db.execute(
@@ -2908,10 +3202,12 @@ class Store:
                     "importance": rec["importance"] if rec else None}
 
         elif action == "edit":
-            self.db.execute(
+            changed = self.db.execute(
                 "UPDATE insights SET content=?, updated_at=? WHERE id=? AND status='active'",
-                (kw["content"], now, kw["id"]))
+                (kw["content"], now, kw["id"])).rowcount
             self.db.commit()
+            if not changed:
+                return self._not_found("Insight", kw["id"])
             return {"action": "edited", "id": kw["id"]}
 
         elif action == "list":
@@ -3014,10 +3310,12 @@ class Store:
                     "returned_ids": [r["id"] for r in rows]}
 
         elif action == "fire":
-            self.db.execute(
+            changed = self.db.execute(
                 "UPDATE rules SET fire_count=fire_count+1, last_fired=?, updated_at=? "
-                "WHERE id=? AND status='active'", (now, now, kw["id"]))
+                "WHERE id=? AND status='active'", (now, now, kw["id"])).rowcount
             self.db.commit()
+            if not changed:
+                return self._not_found("Rule", kw["id"])
             return {"fired": True, "id": kw["id"]}
 
         elif action == "rate":
@@ -3026,7 +3324,8 @@ class Store:
             # fires are not ratings, so they must not dilute it.
             outcome = record_rule_outcome(self.db, rid, bool(kw.get("success")), now)
             if outcome is None:
-                return {"rated": True, "id": rid, "success_rate": None}
+                return {"rated": True, "id": rid, "success_rate": None,
+                        **self._not_found("Rule", rid)}
             success, fail, rate = outcome.success_count, outcome.fail_count, outcome.success_rate
             ci_upper = outcome.upper_bound
             if outcome.status == "active" and should_suspend(success, fail):
@@ -3056,21 +3355,27 @@ class Store:
             return RuleSurfacer(self.db).effectiveness_report(kw.get("project"), min_n).to_dict()
 
         elif action == "suspend":
-            self.db.execute("UPDATE rules SET status='suspended', updated_at=? WHERE id=?",
-                           (now, kw["id"]))
+            changed = self.db.execute("UPDATE rules SET status='suspended', updated_at=? WHERE id=?",
+                                      (now, kw["id"])).rowcount
             self.db.commit()
+            if not changed:
+                return self._not_found("Rule", kw["id"])
             return {"suspended": True, "id": kw["id"]}
 
         elif action == "activate":
-            self.db.execute("UPDATE rules SET status='active', updated_at=? WHERE id=?",
-                           (now, kw["id"]))
+            changed = self.db.execute("UPDATE rules SET status='active', updated_at=? WHERE id=?",
+                                      (now, kw["id"])).rowcount
             self.db.commit()
+            if not changed:
+                return self._not_found("Rule", kw["id"])
             return {"activated": True, "id": kw["id"]}
 
         elif action == "retire":
-            self.db.execute("UPDATE rules SET status='retired', updated_at=? WHERE id=?",
-                           (now, kw["id"]))
+            changed = self.db.execute("UPDATE rules SET status='retired', updated_at=? WHERE id=?",
+                                      (now, kw["id"])).rowcount
             self.db.commit()
+            if not changed:
+                return self._not_found("Rule", kw["id"])
             return {"retired": True, "id": kw["id"]}
 
         elif action == "add_manual":
@@ -3154,15 +3459,16 @@ class Store:
                 result["phase_filter"] = phase
             return result
 
-        scopes = ["'global'", f"'project:{project}'"]
+        scopes = ["global", f"project:{project}"]
         if categories:
-            scopes.extend(f"'category:{c}'" for c in categories)
+            scopes.extend(f"category:{c}" for c in categories)
+        placeholders = ",".join("?" for _ in scopes)
         rows = self.q(f"""
             SELECT * FROM rules
-            WHERE status='active' AND scope IN ({','.join(scopes)})
+            WHERE status='active' AND scope IN ({placeholders})
             ORDER BY priority DESC,
                      created_at DESC
-        """)
+        """, tuple(scopes))
 
         if phase is not None:
             # Tag-based routing: a rule is phase-specific iff it has a tag
@@ -3885,6 +4191,7 @@ class Recall:
                                                 extra={"tier": "atomic_facts", "error": str(error)})
 
         # Search each embedding model in its own vector space.
+        self.s._restore_primary_embedder()
         can_embed = self.s._embed_mode != "none"
         self.s._semantic_diagnostics = []
         semantic_tier = self.s._search_spaces(
@@ -3909,7 +4216,7 @@ class Recall:
         if (can_embed and _tier_on("hyde") and use_advanced and query_info and query_info.get("expand")
                 and (not _v11_spaces or "text" in _v11_spaces)):
             try:
-                hyde_vector = hyde_expand(query, project)
+                hyde_vector = hyde_expand(query, project, embed_fn=self.s._hyde_embed)
                 if hyde_vector:
                     hyde_tier = self.s._binary_search(
                         hyde_vector, project=project, n_results=pool * 2,
@@ -4244,27 +4551,14 @@ class Recall:
         # that hold value for forensics but inflate recall noise. They remain
         # accessible via the dedicated ``memory_search_by_tag`` path.
         try:
-            from config import get_recall_excluded_tags
+            from config import get_recall_excluded_tags, has_excluded_tag
             _ex = get_recall_excluded_tags()
         except Exception:
             _ex = tuple()
         if _ex:
-            def _has_excluded(rec_tags) -> bool:
-                if not rec_tags:
-                    return False
-                if isinstance(rec_tags, str):
-                    raw = rec_tags
-                else:
-                    try:
-                        raw = json.dumps(rec_tags)
-                    except Exception:
-                        raw = str(rec_tags)
-                low = raw.lower()
-                return any(t.lower() in low for t in _ex)
-
             dropped: set[int] = set()
             for kid, item in list(results.items()):
-                if _has_excluded(item["r"].get("tags", "")):
+                if has_excluded_tag(item["r"].get("tags", ""), _ex):
                     dropped.add(kid)
                     results.pop(kid, None)
             if dropped:
@@ -4857,14 +5151,24 @@ class Recall:
 
     def timeline(self, query=None, session_number=None, sessions_ago=None,
                  date_from=None, date_to=None, project=None, limit=5):
+        limit = TIMELINE_DEFAULT_LIMIT if limit is None else limit
         total = self.s.total_sessions()
+        # `project` narrows every mode; positions (sessions_ago, session_number) count within it.
+        scope_sql = " AND project=?" if project else ""
+        scope_params: tuple = (project,) if project else ()
+        scoped_total = self.s.db.execute(
+            f"SELECT COUNT(*) FROM sessions WHERE 1=1{scope_sql}", scope_params).fetchone()[0]
 
         if sessions_ago is not None:
-            offset = max(0, total - sessions_ago - 1)
-            sessions = self.s.q("SELECT * FROM sessions ORDER BY started_at ASC LIMIT ? OFFSET ?", (limit, offset))
+            offset = max(0, scoped_total - sessions_ago - 1)
+            sessions = self.s.q(
+                f"SELECT * FROM sessions WHERE 1=1{scope_sql} ORDER BY started_at ASC LIMIT ? OFFSET ?",
+                (*scope_params, limit, offset))
         elif session_number is not None:
-            offset = max(0, (total + session_number) if session_number < 0 else (session_number - 1))
-            sessions = self.s.q("SELECT * FROM sessions ORDER BY started_at ASC LIMIT ? OFFSET ?", (limit, offset))
+            offset = max(0, (scoped_total + session_number) if session_number < 0 else (session_number - 1))
+            sessions = self.s.q(
+                f"SELECT * FROM sessions WHERE 1=1{scope_sql} ORDER BY started_at ASC LIMIT ? OFFSET ?",
+                (*scope_params, limit, offset))
         elif date_from or date_to:
             c, p = ["1=1"], []
             if date_from:
@@ -4878,33 +5182,40 @@ class Recall:
         elif query:
             fts_q = " OR ".join(Store._fts_escape(w) for w in query.split() if len(w) > 2) or Store._fts_escape(query)
             sids = set()
+            knowledge_scope = " AND k.project=?" if project else ""
             try:
                 if self.s.is_postgres:
                     from memory_core.pg_fts import match_source
                     source, source_params = match_source("knowledge_fts", f"content : ({fts_q})")
                     session_rows = self.s.q(
                         f"SELECT DISTINCT k.session_id as sid FROM ({source}) f "
-                        "JOIN knowledge k ON k.id=f.id LIMIT ?", (*source_params, limit * 3))
+                        f"JOIN knowledge k ON k.id=f.id WHERE k.status='active'{knowledge_scope} LIMIT ?",
+                        (*source_params, *scope_params, limit * 3))
                 else:
                     session_rows = self.s.q(
                         "SELECT DISTINCT k.session_id as sid FROM knowledge_fts f "
-                        "JOIN knowledge k ON k.id=f.rowid WHERE f.content MATCH ? LIMIT ?",
-                        (fts_q, limit * 3))
+                        "JOIN knowledge k ON k.id=f.rowid "
+                        f"WHERE f.content MATCH ? AND k.status='active'{knowledge_scope} LIMIT ?",
+                        (fts_q, *scope_params, limit * 3))
                 for r in session_rows:
                     sids.add(r["sid"])
-            except Exception:
-                pass
-            for r in self.s.q("SELECT id FROM sessions WHERE summary LIKE ? LIMIT ?", (f"%{query}%", limit * 2)):
+            except (sqlite3.Error, ValueError) as error:
+                self.s._swallowed("timeline.fts", error, "memory_timeline: full-text lookup failed")
+            for r in self.s.q(f"SELECT id FROM sessions WHERE summary LIKE ?{scope_sql} LIMIT ?",
+                              (f"%{query}%", *scope_params, limit * 2)):
                 sids.add(r["id"])
             sids = list(sids)[:limit]
             if sids:
                 ph = ",".join("?" * len(sids))
-                sessions = self.s.q(f"SELECT * FROM sessions WHERE id IN ({ph}) ORDER BY started_at DESC", sids)
+                sessions = self.s.q(f"SELECT * FROM sessions WHERE id IN ({ph}){scope_sql} ORDER BY started_at DESC",
+                                    (*sids, *scope_params))
             else:
                 sessions = []
         else:
-            offset = max(0, total - limit)
-            sessions = self.s.q("SELECT * FROM sessions ORDER BY started_at ASC LIMIT ? OFFSET ?", (limit, offset))
+            offset = max(0, scoped_total - limit)
+            sessions = self.s.q(
+                f"SELECT * FROM sessions WHERE 1=1{scope_sql} ORDER BY started_at ASC LIMIT ? OFFSET ?",
+                (*scope_params, limit, offset))
 
         result = []
         for sess in sessions:
@@ -6555,7 +6866,46 @@ async def _tool_catalogue():
 TELEMETRY: tool_telemetry.ToolTelemetry | None = None
 
 
-async def _call_tool_impl(name, args) -> tuple[list[TextContent], bool]:
+TIMELINE_DEFAULT_LIMIT = 5
+EXTRACT_CHUNK_CHARS = 100_000  # ~100 KB per memory_extract_session chunk
+EXTRACT_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_.-]+")
+RECALL_MAX_LIMIT = 100
+RETENTION_CHROMA_BATCH = 500
+FILTER_NAME_RE = re.compile(r"[a-z0-9_]+")
+FILTER_PATH_CHARS_RE = re.compile(r"\.\.|[/\\\x00]")
+
+# Stats of the content filter the last save in this context applied (None when none ran).
+_SAVE_FILTER_STATS: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "tam_save_filter_stats", default=None)
+
+# Ids of the records one tool call wrote, so the raw call log can tie the submitted
+# arguments to them and `memory_delete(hard=true)` can erase those arguments.
+_WRITTEN_RECORD_IDS: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
+    "tam_written_record_ids", default=None)
+
+
+def _add_filter_report(result: dict) -> None:
+    """Tell the caller when the save trimmed its content, and by how much."""
+    stats = _SAVE_FILTER_STATS.get()
+    if stats and "unknown_filter" in stats:
+        result["filter_warning"] = f"filter {stats['unknown_filter']!r} not found; content stored unfiltered"
+    elif stats:
+        result["filter_applied"] = stats["filter_name"]
+        result["filter_stats"] = {key: stats[key] for key in ("input_chars", "output_chars", "reduction_pct")}
+
+
+def _note_written_record(record_id: int | None) -> None:
+    written = _WRITTEN_RECORD_IDS.get()
+    if record_id is not None and written is not None and record_id not in written:
+        written.append(record_id)
+
+
+def _log_written_records(call_id: str, record_ids: list[int] | None) -> None:
+    if store is not None and record_ids:
+        store.raw_append(SID, {"type": RAW_RESULT_TYPE, "call_id": call_id, "knowledge_ids": list(record_ids)})
+
+
+async def _call_tool_impl(name, args, request_meta=None) -> tuple[list[TextContent], bool]:
     """Run a tool and report whether it failed.
 
     The bool is the MCP ``isError`` flag: a tool that raised is reported
@@ -6571,11 +6921,22 @@ async def _call_tool_impl(name, args) -> tuple[list[TextContent], bool]:
         # run (or after a failed bootstrap). Losing the audit line is fine;
         # crashing the transport is not.
         # Credentials never reach the raw log, the store or any derived table.
+        args, call_provenance = provenance.split_call(args, request_meta)
         args, _ = redact_value(args or {})
         args_bytes = tool_telemetry.payload_bytes(args)
+        call_id = uuid.uuid4().hex
+        written_ids = _WRITTEN_RECORD_IDS.set([])
         if store is not None:
-            store.raw_append(SID, {"type": "tool_call", "tool": name, "args": args})
-        r = await _do(name, args)
+            # <private> sections never reach disk, so the log gets the arguments without them.
+            store.raw_append(SID, {"type": RAW_CALL_TYPE, "tool": name, "call_id": call_id,
+                                   "args": redact_private_value(args)})
+        try:
+            r = await _do(name, args)
+        finally:
+            _log_written_records(call_id, _WRITTEN_RECORD_IDS.get())
+            if getattr(store, "db_path", None) is not None:
+                provenance.record(store.db_path, name, call_provenance, _WRITTEN_RECORD_IDS.get())
+            _WRITTEN_RECORD_IDS.reset(written_ids)
         content, is_error = [TextContent(type="text", text=r)], False
     except Exception as e:
         LOG(f"Error in {name}: {e}")
@@ -6625,8 +6986,44 @@ def _install_telemetry(db_path: Path) -> None:
 
 
 async def call_tool(name, args):
-    content, _is_error = await _call_tool_impl(name, args)
+    try:
+        request_meta = app.request_context.meta
+    except (LookupError, AttributeError):  # outside a request, or an SDK without request_context
+        request_meta = None
+    content, _is_error = await _call_tool_impl(name, args, request_meta)
     return content
+
+
+class ToolCallError(Exception):
+    """A tool failed; the 1.x SDK turns a raised exception into a result with isError=true."""
+
+
+async def _call_tool_raising(name, args):
+    """1.x handler: same as call_tool, but a failed tool raises so the SDK sets isError."""
+    try:
+        request_meta = app.request_context.meta
+    except (LookupError, AttributeError):
+        request_meta = None
+    content, is_error = await _call_tool_impl(name, args, request_meta)
+    if is_error:
+        raise ToolCallError(content[0].text)
+    return content
+
+
+async def _validate_tool_arguments(name, args) -> None:
+    """Input validation the 1.x SDK would do, run after `_ctx` is split off so the published schemas stay closed."""
+    try:
+        import jsonschema
+    except ImportError:
+        LOG("jsonschema is not installed; tool input validation skipped")
+        return
+    schemas = {tool.name: getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None)
+               for tool in await list_tools()}
+    if schemas.get(name):
+        try:
+            jsonschema.validate(args or {}, schemas[name])
+        except jsonschema.ValidationError as error:
+            raise ValueError(f"Input validation error: {error.message}") from error
 
 
 def _structured_content(content: list[TextContent], is_error: bool):
@@ -6655,7 +7052,17 @@ def _register_mcp_handlers(server) -> str:
     """Wire tools/list + tools/call onto `server` for either SDK era."""
     if hasattr(server, "list_tools"):
         server.list_tools()(list_tools)
-        server.call_tool()(call_tool)
+        async def _call_tool_validated(name, args):
+            # The SDK validated before our handler and would reject `_ctx` on closed schemas.
+            stripped, _ = provenance.split_call(args)
+            await _validate_tool_arguments(name, stripped)
+            return await _call_tool_raising(name, args)
+
+        if "validate_input" in inspect.signature(server.call_tool).parameters:
+            server.call_tool(validate_input=False)(_call_tool_validated)
+        else:
+            # mcp < 1.10 does no input validation of its own, so there is nothing to bypass.
+            server.call_tool()(_call_tool_raising)
         return "1.x"
 
     from mcp.types import (  # noqa: PLC0415 — 2.x-only symbols
@@ -6669,7 +7076,7 @@ def _register_mcp_handlers(server) -> str:
         return ListToolsResult(tools=await list_tools())
 
     async def _handle_call_tool(_ctx, params):
-        content, is_error = await _call_tool_impl(params.name, params.arguments or {})
+        content, is_error = await _call_tool_impl(params.name, params.arguments or {}, getattr(params, "meta", None))
         return CallToolResult(
             content=list(content),
             structured_content=_structured_content(content, is_error),
@@ -6856,7 +7263,70 @@ def _drop_none(hit):
     return {key: value for key, value in hit.items() if value is not None} if isinstance(hit, dict) else hit
 
 
+ALLOWED_ROOTS_ENV = "TAM_ALLOWED_PATH_ROOTS"
+
+
+def allowed_path(raw: str) -> Path:
+    """Resolve a caller-supplied filesystem path; it must lie under the working directory,
+    the memory directory, the install directory or a root listed in TAM_ALLOWED_PATH_ROOTS
+    (os.pathsep separated). The home directory itself and `/` are never accepted."""
+    resolved = Path(raw).expanduser().resolve()
+    roots = [root for root in (cwd_root(), MEMORY_DIR.resolve(), Path(__file__).resolve().parent.parent) if root]
+    roots.extend(Path(item).expanduser().resolve()
+                 for item in os.environ.get(ALLOWED_ROOTS_ENV, "").split(os.pathsep) if item.strip())
+    if resolved in (Path.home().resolve(), Path(resolved.anchor)) or not any(
+            resolved == root or root in resolved.parents for root in roots):
+        raise ValueError(f"Path {raw!r} is outside the allowed roots; add its root to {ALLOWED_ROOTS_ENV}")
+    return resolved
+
+
+# Rows an eval tool seeds into the live store are erased when the call ends.
+EVAL_MAX_RECORDS = 5000
+_EVAL_FIXTURES: contextvars.ContextVar[list[tuple[str, int]] | None] = contextvars.ContextVar(
+    "tam_eval_fixtures", default=None)
+
+
+def _register_eval_fixture(project: str) -> None:
+    """Remember where `project`'s ids start, so only rows seeded after this point are erased."""
+    fixtures = _EVAL_FIXTURES.get()
+    if fixtures is None or store is None:
+        return
+    baseline = store.db.execute("SELECT COALESCE(MAX(id), 0) FROM knowledge").fetchone()[0]
+    fixtures.append((project, int(baseline)))
+
+
+def _erase_eval_fixtures(fixtures: list[tuple[str, int]]) -> None:
+    import erasure
+    for project, baseline in fixtures:
+        try:
+            ids = [row[0] for row in store.db.execute(
+                "SELECT id FROM knowledge WHERE project=? AND id>?", (project, baseline))]
+            if ids:
+                try:
+                    erasure.erase_many(store, ids, MEMORY_DIR / "raw", MEMORY_DIR / "chroma")
+                except erasure.ErasureUnsupported:
+                    marks = ",".join("?" * len(ids))
+                    store.db.execute(f"DELETE FROM knowledge WHERE id IN ({marks})", ids)
+                    store.db.commit()
+            store.db.execute("DELETE FROM fact_assertions WHERE project=?", (project,))
+            store.db.commit()
+        except Exception as error:  # noqa: BLE001 — cleanup must not mask the eval result
+            store._swallowed("eval.fixture_cleanup", error, f"eval fixtures of {project} not erased")
+
+
 async def _do(name, a):
+    """Run a tool; fixtures an eval tool seeded into the live store never outlive the call."""
+    fixtures: list[tuple[str, int]] = []
+    token = _EVAL_FIXTURES.set(fixtures)
+    try:
+        return await _dispatch_tool(name, a)
+    finally:
+        _EVAL_FIXTURES.reset(token)
+        if fixtures:
+            _erase_eval_fixtures(fixtures)
+
+
+async def _dispatch_tool(name, a):
     J = _render
 
     if name == "memory_recall":
@@ -6877,7 +7347,8 @@ async def _do(name, a):
         # neighbours. Underlying search runs at "full" detail regardless of the
         # caller's detail= for those modes.
         search_detail = "full" if mode_param != "search" else detail_param
-        search_limit = min(50, a.get("limit", 10) * 2) if mode_param == "evidence" else a.get("limit", 10)
+        requested_limit = max(1, min(int(a.get("limit", 10)), RECALL_MAX_LIMIT))
+        search_limit = min(50, requested_limit * 2) if mode_param == "evidence" else requested_limit
         fill_context = mode_param == "context" and bool(a.get("fill_budget", False))
         if fill_context:
             from memory_core.context_budget import FILL_SEARCH_LIMIT
@@ -6962,11 +7433,14 @@ async def _do(name, a):
                     for group in result.get("results", {}).values():
                         for item in group:
                             existing_ids.add(item.get("id"))
+                    from config import get_recall_excluded_tags, has_excluded_tag
+                    _noise = get_recall_excluded_tags()
                     # The engine's concept-activation path ignores the project.
                     solutions = [
                         s for s in cognitive_ctx["available_solutions"]
                         if s.get("id") not in existing_ids
                         and (not a.get("project") or s.get("project") == a["project"])
+                        and not has_excluded_tag(s.get("tags", ""), _noise)
                     ][:5]
                     if detail_param == "compact":
                         solutions = [{"id": s["id"], "project": s["project"], "title": _first_line(s["content"])}
@@ -7179,6 +7653,7 @@ async def _do(name, a):
             result["privacy_redacted"] = True
         if private_sections:
             result["privacy_redacted_sections"] = private_sections
+        _add_filter_report(result)
         if quality_meta and quality_meta.get("decision") == "pass":
             result["quality_score"] = quality_meta.get("total")
         if quality_meta and quality_meta.get("importance_budget"):
@@ -7226,12 +7701,7 @@ async def _do(name, a):
             json.loads(old_rec.get("tags", "[]")),
             f"Updated: {a.get('reason', '')}. Was: {old_rec['content'][:200]}",
             branch=old_rec.get("branch", ""), skip_dedup=True, skip_quality=True,
-            source_format=old_rec.get("source_format", "auto"))
-        store.db.execute(
-            "UPDATE knowledge SET status='superseded',superseded_by=? WHERE id=?",
-            (new_id, old["id"]))
-        store._delete_embedding(old["id"])
-        store.db.commit()
+            source_format=old_rec.get("source_format", "auto"), supersedes=old["id"])
         # B1 — content changed, so any cached representations on the OLD
         # record are now drift-stale; the NEW record gets its own views
         # generated by the async repr queue. Without this enqueue the new
@@ -7242,11 +7712,6 @@ async def _do(name, a):
             RepresentationsQueue(store.db).enqueue(new_id)
         except Exception as _e:
             store._swallowed("update.repr_enqueue", _e, f"memory_update: repr-queue enqueue failed for new_id={new_id}")
-        if store.chroma and not store._check_binary_search():
-            try:
-                store.chroma.delete(ids=[str(old["id"])])
-            except Exception:
-                pass
         # Invalidate cache on update
         if store.cache is not None:
             store.cache.invalidate(project=old_rec.get("project"))
@@ -7262,7 +7727,8 @@ async def _do(name, a):
     elif name == "memory_consolidate":
         threshold = a.get("threshold", 0.75)
         dry_run = a.get("dry_run", True)
-        groups = store.find_similar_groups(a.get("project"), threshold)
+        # Read-only scan off the event loop, so other tool calls are not frozen meanwhile.
+        groups = await asyncio.to_thread(store.find_similar_groups, a.get("project"), threshold)
         if dry_run:
             preview = []
             for g in groups:
@@ -7287,9 +7753,12 @@ async def _do(name, a):
         save = a.get("save_to_file", True)
         if save:
             ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            proj = a.get("project", "all")
-            path = MEMORY_DIR / "backups" / f"export_{proj}_{ts}.json"
-            with open(path, "w", encoding="utf-8") as f:
+            proj = re.sub(r"[^A-Za-z0-9._-]", "_", str(a.get("project") or "all"))
+            backups = (MEMORY_DIR / "backups").resolve()
+            path = (backups / f"export_{proj}_{ts}.json").resolve()
+            if path.parent != backups:
+                raise ValueError("Export path escapes the backups directory")
+            with open_private_text(path) as f:
                 json.dump(data, f, ensure_ascii=False, indent=2, default=str)
             return J({"exported": True, "file": str(path),
                        "knowledge_count": len(data["knowledge"]), "sessions_count": len(data["sessions"])})
@@ -7469,6 +7938,9 @@ async def _do(name, a):
     elif name == "memory_extract_session":
         action = a.get("action", "list")
         eq_dir = MEMORY_DIR / "extract-queue"
+        if action in ("get", "complete") and a.get("session_id") and not EXTRACT_SESSION_ID_RE.fullmatch(
+                str(a["session_id"])):
+            return J({"error": "session_id may contain only letters, digits, '.', '_' and '-'"})
 
         if action == "list":
             pending = []
@@ -7496,8 +7968,13 @@ async def _do(name, a):
                 return J({"error": f"No pending extraction for {sid}"})
 
             content = fpath.read_text(encoding="utf-8")
-            chunk = a.get("chunk", 0)
-            chunk_size = 100_000  # ~100 KB per chunk
+            chunk = int(a.get("chunk", 0))
+            chunk_size = EXTRACT_CHUNK_CHARS
+
+            total_chunks = max(1, (len(content) + chunk_size - 1) // chunk_size)
+            if not 0 <= chunk < total_chunks:
+                return J({"error": f"chunk must be between 0 and {total_chunks - 1}",
+                          "_total_chunks": total_chunks})
 
             if len(content) <= chunk_size:
                 data = json.loads(content)
@@ -7876,13 +8353,13 @@ async def _do(name, a):
     elif name == "ingest_codebase":
         from ast_ingest import ASTIngester
         ing = ASTIngester()
-        p = Path(a["path"]).expanduser()
+        p = allowed_path(a["path"])
         include = set(a.get("include", [])) or None
         if p.is_dir():
             chunks = ing.parse_directory(p, include=include)
         else:
             chunks = ing.parse_file(p)
-        sample = [c.to_dict() for c in chunks[: a.get("sample_limit", 5)]]
+        sample = [redact_value(c.to_dict())[0] for c in chunks[: a.get("sample_limit", 5)]]
         return J({
             "path": str(p),
             "total_chunks": len(chunks),
@@ -7919,7 +8396,8 @@ async def _do(name, a):
                 path, project=params.get("project")
             )
         h = EvalHarness(recall_fn=_recall_fn, file_warnings_fn=_warn_fn)
-        report = h.run_suite(a.get("scenarios_path"))
+        scenarios_arg = a.get("scenarios_path")
+        report = h.run_suite(str(allowed_path(scenarios_arg)) if scenarios_arg else None)
         return J(report)
 
     elif name in ("classify_task", "task_create", "phase_transition", "task_phases_list"):
@@ -8027,6 +8505,7 @@ async def _do(name, a):
             out["privacy_redacted"] = True
         if private_sections:
             out["privacy_redacted_sections"] = private_sections
+        _add_filter_report(out)
         if quality_meta and quality_meta.get("importance_budget"):
             out["importance"] = quality_meta["importance_budget"]["applied"]
             out["importance_note"] = quality_meta["importance_budget"]["note"]
@@ -8192,10 +8671,11 @@ async def _do(name, a):
             # Same rule as the save path: the rebuilt row is labelled with the
             # backend that produced it. Reading the name off configuration is
             # what let a fallback masquerade as the configured model.
-            embs, (model_name, provider) = store.embed_with_identity(texts)
+            embs, identity = store.embed_identified(texts)
             if not embs or len(embs) != len(chunk):
                 skipped += len(chunk)
                 continue
+            model_name, provider = identity.model, identity.provider
             divergence = store.embed_diverges_from_active(model_name)
             if divergence:
                 # The identity that actually answered is not the configured
@@ -8245,11 +8725,12 @@ async def _do(name, a):
         top_k = int(a.get("top_k", 5))
         limit = a.get("limit")
         scenarios_path = a.get("scenarios_path")
+        if scenarios_path:
+            scenarios_path = str(allowed_path(scenarios_path))
 
         with _EvalModeContext(mode):
             try:
                 from memory_core.telemetry import counters as _c
-                _c.reset()
                 before = _c.snapshot()
             except Exception:
                 before = {}
@@ -8292,11 +8773,14 @@ async def _do(name, a):
         top_k = int(a.get("top_k", 5))
         limit = a.get("limit")
         dataset_path = a.get("dataset_path")
+        if dataset_path:
+            dataset_path = str(allowed_path(dataset_path))
 
         # Built-in fixture when no dataset_path: a tiny self-test that seeds
         # two records and asks for them back. Deterministic; no LLM.
         builtin: list[dict] | None = None
         if not dataset_path:
+            _register_eval_fixture("memory_eval_recall")
             seed_pairs = [
                 ("eval-recall fixture postgres autovacuum tuning notes",
                  "fact", "postgres autovacuum"),
@@ -8306,11 +8790,11 @@ async def _do(name, a):
             for content, ktype, _q in seed_pairs:
                 try:
                     store.save_knowledge(
-                        sid=getattr(__import__("server"), "SID", "eval-session"),
+                        sid=SID or "eval-session",
                         content=content, ktype=ktype, project="memory_eval_recall",
                     )
-                except Exception:
-                    pass
+                except Exception as error:  # noqa: BLE001 — a missing seed shows up as a failed scenario
+                    store._swallowed("eval.seed", error, "eval seed record not saved")
             builtin = [
                 {"name": f"recall_{i}", "type": "recall", "query": q,
                  "project": "memory_eval_recall", "must_contain": [q.split()[0]],
@@ -8321,7 +8805,6 @@ async def _do(name, a):
         with _EvalModeContext(mode):
             try:
                 from memory_core.telemetry import counters as _c
-                _c.reset()
                 before = _c.snapshot()
             except Exception:
                 before = {}
@@ -8400,13 +8883,13 @@ async def _do(name, a):
         with _EvalModeContext(mode):
             try:
                 from memory_core.telemetry import counters as _c
-                _c.reset()
                 before = _c.snapshot()
             except Exception:
                 before = {}
 
             t_kg = TemporalKG(store.db)
             project = "memory_eval_temporal"
+            _register_eval_fixture(project)
             # Two-fact timeline: stack=postgres at t1, then stack=mysql at t2.
             t1 = "2026-01-01T00:00:00Z"
             t2 = "2026-04-01T00:00:00Z"
@@ -8466,7 +8949,6 @@ async def _do(name, a):
         with _EvalModeContext(mode):
             try:
                 from memory_core.telemetry import counters as _c
-                _c.reset()
                 before = _c.snapshot()
             except Exception:
                 before = {}
@@ -8546,7 +9028,6 @@ async def _do(name, a):
         with _EvalModeContext(mode):
             try:
                 from memory_core.telemetry import counters as _c
-                _c.reset()
                 before = _c.snapshot()
             except Exception:
                 before = {}
@@ -8636,36 +9117,39 @@ async def _do(name, a):
     elif name == "memory_eval_long_context":
         mode = a.get("mode", "fast")
         n_records = max(10, int(a.get("n_records", 200)))
+        if n_records > EVAL_MAX_RECORDS:
+            return J({"status": "error", "reason": f"n_records must be at most {EVAL_MAX_RECORDS}",
+                      "mode": mode})
         top_k = int(a.get("top_k", 5))
 
         with _EvalModeContext(mode):
             try:
                 from memory_core.telemetry import counters as _c
-                _c.reset()
                 before = _c.snapshot()
             except Exception:
                 before = {}
 
             project = "memory_eval_long_context"
+            _register_eval_fixture(project)
             # Seed a haystack of N filler records + 1 needle at the tail.
             for i in range(n_records):
                 try:
                     store.save_knowledge(
-                        sid=getattr(__import__("server"), "SID", "eval-session"),
+                        sid=SID or "eval-session",
                         content=f"long-context filler {i} — generic noise about caches and queues",
                         ktype="fact", project=project,
                     )
-                except Exception:
-                    pass
+                except Exception as error:  # noqa: BLE001 — a missing seed shows up as a failed scenario
+                    store._swallowed("eval.seed", error, "eval filler record not saved")
             needle_phrase = "tachyon-aluminium hyperspecific marker"
             try:
                 store.save_knowledge(
-                    sid=getattr(__import__("server"), "SID", "eval-session"),
+                    sid=SID or "eval-session",
                     content=f"NEEDLE — {needle_phrase}",
                     ktype="fact", project=project,
                 )
-            except Exception:
-                pass
+            except Exception as error:  # noqa: BLE001 — a missing needle shows up as a failed scenario
+                store._swallowed("eval.seed", error, "eval needle record not saved")
 
             scenarios = [{
                 "name": "long_context_needle",
@@ -8934,6 +9418,7 @@ async def _run_streamable_http(host: str, port: int, sock: socket.socket | None 
 
     # mcp releases without TransportSecuritySettings get the same checks here.
     handle_mcp = serve_mcp if security else _RebindingGuard(serve_mcp, hosts, origins)
+    handle_mcp = http_auth.guard_asgi(handle_mcp, bind=host, root=MEMORY_DIR)
 
     async def healthz(request: Request) -> Response:
         return JSONResponse({"status": "ok", "version": _SERVER_VERSION})
@@ -9080,7 +9565,7 @@ def _hold_init_lock():
     import fcntl
 
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    lock = open(MEMORY_DIR / ".http-workers.lock", "w")  # noqa: SIM115 — released in _http_worker
+    lock = open(MEMORY_DIR / ".http-workers.lock", "w", encoding="utf-8")  # noqa: SIM115 — released in _http_worker
     fcntl.flock(lock, fcntl.LOCK_EX)
     return lock
 

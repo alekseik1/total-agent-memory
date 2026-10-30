@@ -1,10 +1,13 @@
 import hashlib
+import os
 import re
 import secrets
 import sqlite3
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -27,6 +30,11 @@ from team_memory.database import SwitchableControlPlane, serializable
 
 REGISTRY_TIMEOUT_SECONDS = 10
 TOKEN_BYTES = 32
+TOKEN_TTL_ENV = "TAM_TEAM_TOKEN_TTL_DAYS"
+DEFAULT_TOKEN_TTL_DAYS = 180
+SECONDS_PER_DAY = 24 * 3600
+# last_used_at is a staleness hint for admins, so it is written at most this often per token.
+TOKEN_USE_RESOLUTION_SECONDS = 3600
 MAX_AUDIT_PAGE = 200
 CLI_ACTOR = "cli"
 AUDIT_ACTOR: ContextVar[str] = ContextVar("team_memory_audit_actor", default=CLI_ACTOR)
@@ -47,7 +55,8 @@ SCHEMA = f"""
         PRIMARY KEY(user_id,team_id));
     CREATE TABLE IF NOT EXISTS tokens (
         digest TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
-        client TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created_at TEXT);
+        client TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created_at TEXT,
+        expires_at REAL, last_used_at REAL);
     CREATE TABLE IF NOT EXISTS admin_events (
         id INTEGER PRIMARY KEY, at TEXT NOT NULL DEFAULT ({NOW}),
         action TEXT NOT NULL, subject TEXT NOT NULL, actor TEXT, detail TEXT);
@@ -63,6 +72,10 @@ SCHEMA = f"""
     CREATE TABLE IF NOT EXISTS login_failures (
         key TEXT PRIMARY KEY, failures INTEGER NOT NULL, window_start REAL NOT NULL,
         locked_until REAL NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS known_devices (
+        digest TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at REAL NOT NULL, last_seen_at REAL NOT NULL);
+    CREATE INDEX IF NOT EXISTS known_devices_user ON known_devices(user_id);
     CREATE TABLE IF NOT EXISTS login_log (
         id INTEGER PRIMARY KEY, at REAL NOT NULL, user_id TEXT NOT NULL,
         method TEXT NOT NULL, outcome TEXT NOT NULL);
@@ -84,9 +97,23 @@ ADDED_COLUMNS = {
     "users": (("org_role", ("TEXT NOT NULL DEFAULT 'member' "
                             "CHECK(org_role IN ('member','company_viewer','superadmin'))")),
               ("password_hash", "TEXT"), ("created_at", "TEXT"), ("last_login_at", "TEXT")),
-    "tokens": (("created_at", "TEXT"),),
+    "tokens": (("created_at", "TEXT"), ("expires_at", "REAL"), ("last_used_at", "REAL")),
     "admin_events": (("actor", "TEXT"), ("detail", "TEXT")),
 }
+
+
+def token_ttl_seconds(environ: Mapping[str, str] | None = None) -> int:
+    """Lifetime of newly issued tokens; 0 (``TAM_TEAM_TOKEN_TTL_DAYS=0``) keeps them valid until revoked."""
+    env = os.environ if environ is None else environ
+    raw = env.get(TOKEN_TTL_ENV, "").strip()
+    days = int(raw) if raw else DEFAULT_TOKEN_TTL_DAYS
+    if days < 0:
+        raise ValueError(TOKEN_TTL_ENV + " must be zero or positive")
+    return days * SECONDS_PER_DAY
+
+
+def _iso(epoch: float | None) -> str | None:
+    return None if epoch is None else datetime.fromtimestamp(epoch, UTC).isoformat()
 
 
 def _like_prefix(value: str) -> str:
@@ -97,7 +124,10 @@ class Registry:
     """Identity control plane. Without ``plane`` it opens the configured one (database.json >
     TAM_TEAM_DATABASE_URL > SQLite); on PostgreSQL the schema is provisioned by pg_provision."""
 
-    def __init__(self, root: Path, plane: SwitchableControlPlane | None = None):
+    def __init__(self, root: Path, plane: SwitchableControlPlane | None = None,
+                 clock: Callable[[], float] = time.time, token_ttl: int | None = None):
+        self.clock = clock
+        self.token_ttl = token_ttl_seconds() if token_ttl is None else token_ttl
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         if plane is None:
@@ -161,14 +191,18 @@ class Registry:
 
     @serializable
     def add_user(self, user_id: str, name: str) -> None:
-        self._identifier(user_id)
-        self._name(name)
         with self.connect() as db:
-            try:
-                db.execute(f"INSERT INTO users(id,name,created_at) VALUES (?,?,{NOW})", (user_id, name))
-            except sqlite3.IntegrityError as exc:
-                raise Conflict("User already exists") from exc
-            self._event(db, "user_created", user_id)
+            self.insert_user(db, user_id, name)
+
+    @classmethod
+    def insert_user(cls, db: CompatConnection, user_id: str, name: str) -> None:
+        cls._identifier(user_id)
+        cls._name(name)
+        try:
+            db.execute(f"INSERT INTO users(id,name,created_at) VALUES (?,?,{NOW})", (user_id, name))
+        except sqlite3.IntegrityError as exc:
+            raise Conflict("User already exists") from exc
+        cls._event(db, "user_created", user_id)
 
     @serializable
     def set_active(self, user_id: str, active: bool) -> dict[str, int]:
@@ -184,6 +218,7 @@ class Registry:
             if not active:
                 self._keep_superadmin(db, user_id)
                 sessions = db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,)).rowcount
+                db.execute("DELETE FROM known_devices WHERE user_id=?", (user_id,))
                 tokens = db.execute("UPDATE tokens SET revoked=1 WHERE user_id=? AND revoked=0", (user_id,)).rowcount
                 invites = db.execute("DELETE FROM invites WHERE user_id=? AND used_at IS NULL", (user_id,)).rowcount
             db.execute("UPDATE users SET active=? WHERE id=?", (int(active), user_id))
@@ -201,14 +236,18 @@ class Registry:
 
     @serializable
     def set_org_role(self, user_id: str, role: str) -> None:
+        with self.connect(write=True) as db:
+            self.apply_org_role(db, user_id, role)
+
+    @classmethod
+    def apply_org_role(cls, db: CompatConnection, user_id: str, role: str) -> None:
         if role not in ORG_ROLES:
             raise ValueError("org_role must be member, company_viewer or superadmin")
-        with self.connect(write=True) as db:
-            self._require_user(db, user_id)
-            if role != "superadmin":
-                self._keep_superadmin(db, user_id)
-            db.execute("UPDATE users SET org_role=? WHERE id=?", (role, user_id))
-            self._event(db, "org_role:" + role, user_id)
+        cls._require_user(db, user_id)
+        if role != "superadmin":
+            cls._keep_superadmin(db, user_id)
+        db.execute("UPDATE users SET org_role=? WHERE id=?", (role, user_id))
+        cls._event(db, "org_role:" + role, user_id)
 
     @serializable
     def add_team(self, team_id: str, name: str) -> None:
@@ -310,20 +349,20 @@ class Registry:
     def issue_token(self, user_id: str, client: str) -> str:
         self._name(client)
         token = secrets.token_urlsafe(TOKEN_BYTES)
+        now = self.clock()
+        expires = now + self.token_ttl if self.token_ttl else None
         with self.connect() as db:
             if not db.execute("SELECT 1 FROM users WHERE id=? AND active=1", (user_id,)).fetchone():
                 raise Forbidden("Unknown or disabled user")
-            db.execute(f"INSERT INTO tokens(digest,user_id,client,created_at) VALUES (?,?,?,{NOW})",
-                       (self.digest(token), user_id, client))
+            db.execute(f"INSERT INTO tokens(digest,user_id,client,created_at,expires_at) "
+                       f"VALUES (?,?,?,{NOW},?)", (self.digest(token), user_id, client, expires))
             self._event(db, "token_created", user_id + ":" + client)
         return token
 
     @serializable
     def revoke(self, token: str) -> None:
         with self.connect() as db:
-            db.execute("UPDATE tokens SET revoked=1 WHERE digest=?", (self.digest(token),))
-            db.execute("DELETE FROM sessions WHERE token_digest=?", (self.digest(token),))
-            self._event(db, "token_revoked", self.digest(token))
+            self._revoke_one(db, self.digest(token))
 
     @serializable
     def revoke_token_id(self, token_id: str, owner_id: str | None = None) -> None:
@@ -331,24 +370,34 @@ class Registry:
             row = db.execute("SELECT user_id FROM tokens WHERE digest=?", (token_id,)).fetchone()
             if row is None or (owner_id is not None and row["user_id"] != owner_id):
                 raise DomainError("Unknown token")
-            db.execute("UPDATE tokens SET revoked=1 WHERE digest=?", (token_id,))
-            db.execute("DELETE FROM sessions WHERE token_digest=?", (token_id,))
-            self._event(db, "token_revoked", token_id)
+            self._revoke_one(db, token_id)
+
+    @classmethod
+    def _revoke_one(cls, db: CompatConnection, digest: str) -> None:
+        db.execute("UPDATE tokens SET revoked=1 WHERE digest=?", (digest,))
+        db.execute("DELETE FROM sessions WHERE token_digest=?", (digest,))
+        cls._event(db, "token_revoked", digest)
 
     @serializable
     def tokens_of(self, user_id: str | None = None) -> list[dict]:
-        query = "SELECT digest,user_id,client,revoked,created_at FROM tokens"
+        query = "SELECT digest,user_id,client,revoked,created_at,expires_at,last_used_at FROM tokens"
         with self.connect() as db:
             rows = (db.execute(query + " WHERE user_id=? ORDER BY created_at DESC", (user_id,)) if user_id
                     else db.execute(query + " ORDER BY user_id, created_at DESC")).fetchall()
         return [{"id": row["digest"], "user_id": row["user_id"], "client": row["client"],
-                 "revoked": bool(row["revoked"]), "created_at": row["created_at"]} for row in rows]
+                 "revoked": bool(row["revoked"]), "created_at": row["created_at"],
+                 "expires_at": _iso(row["expires_at"]), "last_used_at": _iso(row["last_used_at"])} for row in rows]
 
     @serializable
     def authenticate(self, token: str) -> Actor:
+        digest, now = self.digest(token), self.clock()
         with self.connect() as db:
-            row = db.execute("SELECT u.id,u.name,u.org_role,t.client FROM tokens t JOIN users u ON u.id=t.user_id "
-                             "WHERE digest=? AND revoked=0 AND active=1", (self.digest(token),)).fetchone()
+            row = db.execute("SELECT u.id,u.name,u.org_role,t.client,t.last_used_at FROM tokens t "
+                             "JOIN users u ON u.id=t.user_id WHERE digest=? AND revoked=0 AND active=1 "
+                             "AND (t.expires_at IS NULL OR t.expires_at>?)", (digest, now)).fetchone()
+            if row is not None and (row["last_used_at"] is None or row["last_used_at"] + TOKEN_USE_RESOLUTION_SECONDS <= now) \
+                    and not self.plane.maintenance_active():
+                db.execute("UPDATE tokens SET last_used_at=? WHERE digest=?", (now, digest))
         if row is None:
             raise Unauthorized("Invalid or revoked token")
         return Actor(user_id=row["id"], display_name=row["name"], client=row["client"], org_role=row["org_role"])

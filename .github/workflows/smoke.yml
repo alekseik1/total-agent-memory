@@ -13,12 +13,12 @@ jobs:
   package:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build candidate artifacts in Docker
         run: |
           docker build -f docker/Dockerfile.dev -t tam-release-dev .
           docker run --rm -v "$PWD:/workspace" tam-release-dev python -m build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: candidate-package
           path: dist/*
@@ -44,15 +44,15 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: candidate-package
           path: dist
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.FASTEMBED_CACHE_PATH }}
           key: tam-minilm-v14-${{ runner.os }}-${{ runner.arch }}
@@ -88,7 +88,7 @@ jobs:
         run: bash install.sh --ide claude-code
       - name: Installed background dashboard reports candidate release
         run: python tests/smoke/check_dashboard.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: native-${{ matrix.os }}-py${{ matrix.python }}
@@ -98,12 +98,12 @@ jobs:
     timeout-minutes: 30
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build candidate image
-        run: docker build -t tam-compose-candidate:14.9.0 .
+        run: docker build -t tam-compose-candidate:14.10.0 .
       - name: Compose cold start, real MCP, restart and persistence
         env:
-          TAM_TEAM_IMAGE: tam-compose-candidate:14.9.0
+          TAM_TEAM_IMAGE: tam-compose-candidate:14.10.0
         run: bash tests/smoke/compose-candidate.sh
 
   browser:
@@ -111,8 +111,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: candidate-package
           path: dist
@@ -124,7 +124,7 @@ jobs:
         run: |
           docker run --rm --init --shm-size=1g -v "$PWD:/workspace" -w /workspace tam-release-browser sh -c \
             'python -m pip install --no-deps dist/*.whl && python -m pytest tests/browser -q --junitxml=browser-results.xml'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: browser-results
@@ -133,16 +133,17 @@ jobs:
   source-archive:
     needs: package
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # The full suite in the unpacked sdist took 19 min on a slow runner; 20 left no margin.
+    timeout-minutes: 30
     env:
       FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.tam-models
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: candidate-package
           path: dist
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.FASTEMBED_CACHE_PATH }}
           key: tam-models-source-v14-${{ runner.os }}-${{ hashFiles('src/config.py') }}
@@ -151,7 +152,7 @@ jobs:
           docker build -f docker/Dockerfile.dev -t tam-release-dev .
           docker run --rm -v "$PWD:/workspace" -w /workspace -e FASTEMBED_CACHE_PATH=/workspace/.tam-models tam-release-dev sh -c \
             'set -eu; mkdir -p /tmp/source-candidate; tar -xzf dist/*.tar.gz --strip-components=1 -C /tmp/source-candidate; cd /tmp/source-candidate; python tests/smoke/prewarm_models.py; python -m pytest tests -q --junitxml=/workspace/source-results.xml'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: source-results

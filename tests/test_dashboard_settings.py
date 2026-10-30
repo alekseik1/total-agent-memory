@@ -84,7 +84,7 @@ def test_save_encrypts_the_key_and_reads_back_only_a_hint(served):
                            page_headers(port))
     assert status == 200, body
     assert json.loads(body)["changed"] == ["ANTHROPIC_API_KEY", "MEMORY_RECALL_MAX_RESULT_CHARS"]
-    assert KEY not in (root / "settings.json").read_text()
+    assert KEY not in (root / "settings.json").read_text(encoding="utf-8")
     status, _, body = call(port, "GET", "/api/settings")
     assert KEY.encode() not in body
     views = {v["key"]: v for v in json.loads(body)["settings"]}

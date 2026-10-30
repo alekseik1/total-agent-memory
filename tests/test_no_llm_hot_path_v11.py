@@ -501,7 +501,7 @@ def test_memory_core_does_not_import_llm_provider():
         pytest.skip("memory_core/ not extracted yet (Phase 3)")
     offenders: list[str] = []
     for py in core.rglob("*.py"):
-        tree = ast.parse(py.read_text())
+        tree = ast.parse(py.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for n in node.names:

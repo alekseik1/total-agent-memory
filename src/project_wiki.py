@@ -359,7 +359,7 @@ def generate_wiki(
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", project)
     target = out_dir / f"{safe}.md"
     try:
-        target.write_text(body)
+        target.write_text(body, encoding="utf-8")
     except Exception as exc:
         LOG(f"wiki write failed for {project}: {exc}")
         return None

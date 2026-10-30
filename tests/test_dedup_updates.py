@@ -131,3 +131,33 @@ def test_confirm_keeps_the_stored_record(store):
 def test_unknown_repeat_mode_is_rejected(store):
     with pytest.raises(ValueError, match="repeat must be"):
         store.save_knowledge("s1", "Deploy runs nightly", "fact", project="p", repeat="merge")
+
+
+RUSSIAN_E_REPEATS = [
+    ("Время обеда перенесено", "Время обеда перенесено."),
+    ("Ёлка стоит в холле", "Елка стоит в холле"),
+]
+
+
+@pytest.mark.parametrize(("old", "new"), RUSSIAN_E_REPEATS)
+def test_russian_repeat_with_e_words_replaces_stored_record(store, old, new):
+    first_id, _, *_ = store.save_knowledge("s1", old, "fact", project="p")
+    second_id, second_dup, *_ = store.save_knowledge("s1", new, "fact", project="p")
+
+    assert second_dup
+    assert second_id != first_id
+    assert active(store) == [new]
+
+
+def test_candidate_query_keeps_words_with_e():
+    from memory_core.dedup import candidate_match_query
+
+    query = candidate_match_query("Время обеда перенесено")
+    assert '"время"' in query and '"врёмя"' in query
+
+
+def test_candidate_query_is_bounded_for_long_words():
+    from memory_core.dedup import MAX_CANDIDATE_TERMS, candidate_match_query
+
+    query = candidate_match_query("е" * 40 + " " + " ".join(f"слово{i}" for i in range(100)))
+    assert query.count('"') // 2 <= MAX_CANDIDATE_TERMS * 12

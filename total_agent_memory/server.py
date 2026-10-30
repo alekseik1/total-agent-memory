@@ -81,6 +81,13 @@ def _adopt_existing_install():
 def main_sync():
     """Synchronous entry point for console_scripts."""
     argv = sys.argv[1:]
+    # Human-facing subcommands print paths and arrows; the MCP transports (no argument, `proxy`) own stdout.
+    if argv and argv[0] != "proxy":
+        if _src not in sys.path:
+            sys.path.insert(0, _src)
+        from stdio_utf8 import never_fail_on_output
+
+        never_fail_on_output()
     if argv[:1] == ["report"]:
         sys.exit(_report_cli().main(argv[1:]))
     if argv[:1] == ["redact-existing"]:

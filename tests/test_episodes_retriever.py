@@ -100,7 +100,7 @@ def db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(_BASE_DDL)
-    migration = (_MIGRATIONS_DIR / "023_episodes.sql").read_text()
+    migration = (_MIGRATIONS_DIR / "023_episodes.sql").read_text(encoding="utf-8")
     conn.executescript(migration)
     yield conn
     conn.close()
@@ -298,3 +298,11 @@ def test_unknown_project_returns_empty(populated_db):
         populated_db, "stripe", "no-such-project", k=5, embed_fn=_embed,
     )
     assert out == []
+
+
+def test_fts_expression_stems_russian_terms():
+    from memory_core.episodes.retriever import _sanitize_fts
+
+    assert _sanitize_fts("Маша") == '"маш"*'
+    assert _sanitize_fts("a") == ""
+    assert _sanitize_fts("deploy") == '"deploy"'

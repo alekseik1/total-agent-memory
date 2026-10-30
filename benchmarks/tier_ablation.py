@@ -80,7 +80,7 @@ def split_text(text: str, max_chars: int) -> list[str]:
 
 
 def locomo_units(split: str):
-    data = json.loads(LOCOMO.read_text())
+    data = json.loads(LOCOMO.read_text(encoding="utf-8"))
     for index in LOCOMO_SPLITS[split]:
         sample = data[index]
         conv = sample["conversation"]
@@ -108,11 +108,11 @@ def locomo_units(split: str):
 
 
 def lme_units(split: str, limit: int, categories: frozenset[str] = frozenset()):
-    data = {entry["question_id"]: entry for entry in json.loads(LONGMEMEVAL.read_text())}
+    data = {entry["question_id"]: entry for entry in json.loads(LONGMEMEVAL.read_text(encoding="utf-8"))}
     if split == "all":
         ids = sorted(data, key=lambda qid: hashlib.sha256(qid.encode()).hexdigest())
     else:
-        ids = (LME_SPLITS / f"longmemeval-{split}-ids.txt").read_text().split()
+        ids = (LME_SPLITS / f"longmemeval-{split}-ids.txt").read_text(encoding="utf-8").split()
     taken = 0
     for qid in ids:
         if limit and taken >= limit:
@@ -183,7 +183,7 @@ def open_store(srv, unit_dir: Path, fragments: list[dict] | None):
     # would feed the graph tier with the answer key.
     store.db.execute(f"CREATE TABLE IF NOT EXISTS {GOLD_TABLE} (knowledge_id INTEGER PRIMARY KEY, gold TEXT NOT NULL)")
     store.db.commit()
-    if marker.exists() and json.loads(marker.read_text()).get("fragments") == len(fragments):
+    if marker.exists() and json.loads(marker.read_text(encoding="utf-8")).get("fragments") == len(fragments):
         return store
     started = time.perf_counter()
     texts = [fragment["text"] for fragment in fragments]
@@ -210,7 +210,7 @@ def open_store(srv, unit_dir: Path, fragments: list[dict] | None):
     if getattr(store, "v9_cache", None) is not None:
         store.v9_cache.invalidate_all()
     marker.write_text(json.dumps({"fragments": len(fragments), "seconds": round(time.perf_counter() - started, 1),
-                                  "embed_model": store._active_embed_model_name()}))
+                                  "embed_model": store._active_embed_model_name()}), encoding="utf-8")
     return store
 
 
@@ -444,10 +444,10 @@ def main() -> int:
         categories = []  # one column per project is not a category breakdown
     table = markdown(results, categories)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=1))
+    args.output.write_text(json.dumps(payload, indent=1), encoding="utf-8")
     args.output.with_suffix(".md").write_text(
         f"# Tier ablation: {args.bench} {args.split} (cross-rerank {args.cross_rerank})\n\n{table}\n\n"
-        f"Tier fired (full): {json.dumps(results['full']['tier_fired'])}\n")
+        f"Tier fired (full): {json.dumps(results['full']['tier_fired'])}\n", encoding="utf-8")
     print(table)
     print(json.dumps({"seconds": payload["seconds"], "output": str(args.output)}))
     if args.tune:

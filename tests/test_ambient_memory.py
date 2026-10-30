@@ -157,7 +157,7 @@ def test_postgres_workspace_twin_is_numbered_without_gaps():
 
     migrations = pg_schema.workspace_migrations()
     assert [m.version for m in migrations] == list(range(1, len(migrations) + 1))
-    twin = (ROOT / "migrations" / "postgres" / "workspace" / "0006_agent_actions.sql").read_text()
+    twin = (ROOT / "migrations" / "postgres" / "workspace" / "0006_agent_actions.sql").read_text(encoding="utf-8")
     assert "CREATE TABLE agent_actions" in twin and "success_lower_bound" in twin and "'040'" in twin
 
 
@@ -248,13 +248,13 @@ def test_settings_defaults_env_and_dashboard_precedence(tmp_path):
     assert loaded.latency_ms == AmbientSettings().latency_ms
     assert loaded.action_log_retention_days == 1
     (tmp_path / "settings.json").write_text(json.dumps(
-        {"version": 1, "values": {AMBIENT_RECALL_ENV: "true", TURN_AUTOSAVE_ENV: "false"}, "secrets": {}}))
+        {"version": 1, "values": {AMBIENT_RECALL_ENV: "true", TURN_AUTOSAVE_ENV: "false"}, "secrets": {}}), encoding="utf-8")
     loaded = AmbientSettings.load(tmp_path, env)
     assert loaded.ambient_recall is True and loaded.turn_autosave is False
 
 
 def test_unreadable_settings_file_falls_back_to_environment(tmp_path):
-    (tmp_path / "settings.json").write_text("{not json")
+    (tmp_path / "settings.json").write_text("{not json", encoding="utf-8")
     assert AmbientSettings.load(tmp_path, {TURN_AUTOSAVE_ENV: "false"}).turn_autosave is False
 
 
@@ -283,7 +283,7 @@ def test_session_state_round_trip_caps_and_pruning(tmp_path):
     again = SessionState.load(tmp_path, "s/1")
     assert len(again.records) == 500 and again.records[-1] == 599
     assert again.rules == [1, 3] and again.reminded_since(50.0) == {7} and again.last_stop == NOW
-    state_path(tmp_path, "s/1").write_text("garbage")
+    state_path(tmp_path, "s/1").write_text("garbage", encoding="utf-8")
     assert SessionState.load(tmp_path, "s/1").records == []
     os.utime(state_path(tmp_path, "s/1"), (0, 0))
     assert prune_states(tmp_path) == 1
@@ -412,7 +412,7 @@ def test_daemon_recall_talks_to_the_registered_daemon_with_its_token(tmp_path, m
         paths.ensure_root()
         write_record(paths, DaemonRecord(pid=os.getpid(), host="127.0.0.1", port=httpd.server_address[1],
                                          version="t", started_at=0.0, memory_dir=str(tmp_path), python="py"))
-        paths.token.write_text("tok\n")
+        paths.token.write_text("tok\n", encoding="utf-8")
         monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
         caller = prompt_context.daemon_recall(tmp_path)
         assert caller is not None
@@ -597,7 +597,9 @@ def test_manual_rating_keeps_its_contract_and_stores_the_lower_bound(mem):
     finally:
         store.db.close()
     assert result["rated"] is True and result["success_rate"] == 1.0 and result["ci_upper"] == 1.0
-    assert missing == {"rated": True, "id": 987654, "success_rate": None}
+    assert {k: missing[k] for k in ("rated", "id", "success_rate")} == {
+        "rated": True, "id": 987654, "success_rate": None}
+    assert missing["error"] == "Rule 987654 not found"
     assert rule_row(mem, rule)["success_lower_bound"] == pytest.approx(rs.wilson_interval(1, 1)[0])
 
 
@@ -766,7 +768,7 @@ def test_hooks_drive_the_whole_turn(mem, tmp_path):
     with connect(mem) as db:
         assert db.execute("SELECT tool, status FROM agent_actions ORDER BY id").fetchall() == \
             [("Bash", "ok"), ("Edit", "failed")]
-    nudge_state = json.loads((mem / "state" / "nudge-H1.json").read_text())
+    nudge_state = json.loads((mem / "state" / "nudge-H1.json").read_text(encoding="utf-8"))
     assert nudge_state["edits"] == 0, "a failed edit is not counted as an edit"
 
     stopped = only_json(run_hook("on-stop.sh", {**base, "hook_event_name": "Stop",
@@ -802,7 +804,7 @@ def test_ambient_hooks_stay_silent_without_src_or_store(tmp_path):
     (mem / "memory.db").write_bytes(b"")
     proc = run_hook("user-prompt-submit.sh", payload, env)
     assert proc.returncode == 0 and proc.stdout.decode().strip() == ""
-    assert "ambient memory unavailable" in (mem / "hooks.log").read_text()
+    assert "ambient memory unavailable" in (mem / "hooks.log").read_text(encoding="utf-8")
 
 
 @needs_bash
@@ -813,7 +815,7 @@ def test_prompt_hook_survives_a_broken_store(tmp_path):
     proc = run_hook("user-prompt-submit.sh", {"hook_event_name": "UserPromptSubmit", "session_id": "x",
                                               "prompt": "explain the deployment pipeline"}, hook_env(mem, tmp_path))
     assert proc.returncode == 0 and proc.stdout.decode().strip() == ""
-    assert "ambient_rules_skipped" in (mem / "hooks.log").read_text()
+    assert "ambient_rules_skipped" in (mem / "hooks.log").read_text(encoding="utf-8")
 
 
 @needs_bash
@@ -834,7 +836,7 @@ def test_codex_notify_hook_reads_the_argument_and_stdin(mem, tmp_path):
 def test_plugin_and_installer_register_the_ambient_hooks(tmp_path):
     from setup_wizard import clients, extras
 
-    plugin = json.loads((HOOKS / "hooks.json").read_text())["hooks"]
+    plugin = json.loads((HOOKS / "hooks.json").read_text(encoding="utf-8"))["hooks"]
     pre = [h["command"] for block in plugin["PreToolUse"] for h in block["hooks"]]
     failure = [h["command"] for block in plugin["PostToolUseFailure"] for h in block["hooks"]]
     assert any(c.endswith('rule-reminder.sh"') for c in pre)
@@ -862,16 +864,16 @@ def test_ps1_twins_call_the_same_ambient_helper(name, command):
 
 
 def test_codex_twins_do_not_block_on_stdin_when_given_an_argument():
-    assert "HOOK_SKIP_STDIN=1" in (HOOKS / "codex-notify.sh").read_text()
-    assert "$HookSkipStdin = $args.Count -gt 0" in (HOOKS / "codex-notify.ps1").read_text()
-    assert "HookSkipStdin" in (HOOKS / "lib" / "common.ps1").read_text()
+    assert "HOOK_SKIP_STDIN=1" in (HOOKS / "codex-notify.sh").read_text(encoding="utf-8")
+    assert "$HookSkipStdin = $args.Count -gt 0" in (HOOKS / "codex-notify.ps1").read_text(encoding="utf-8")
+    assert "HookSkipStdin" in (HOOKS / "lib" / "common.ps1").read_text(encoding="utf-8")
 
 
 @pytest.mark.postgres
 def test_postgres_backfill_matches_the_python_wilson_bound(pg_database):
     import psycopg
 
-    twin = (ROOT / "migrations" / "postgres" / "workspace" / "0006_agent_actions.sql").read_text()
+    twin = (ROOT / "migrations" / "postgres" / "workspace" / "0006_agent_actions.sql").read_text(encoding="utf-8")
     update = twin[twin.index("UPDATE rules SET success_lower_bound"):]
     update = update[:update.index(";") + 1]
     with psycopg.connect(pg_database.url) as conn:
@@ -912,7 +914,7 @@ def fake_bin(tmp_path: Path, scripts: dict[str, str]) -> Path:
     bin_dir.mkdir(exist_ok=True)
     for name, body in scripts.items():
         path = bin_dir / name
-        path.write_text(body)
+        path.write_text(body, encoding="utf-8")
         path.chmod(0o755)
     return bin_dir
 
@@ -953,7 +955,7 @@ def test_docker_mode_runs_the_ambient_commands_inside_the_container(mem, tmp_pat
         assert db.execute("SELECT session_id, tool FROM agent_actions ORDER BY id").fetchall() == \
             [("D1", "Bash"), ("DC", "codex_turn")]
     assert rule_row(mem, sudo)["auto_fail_count"] == 1
-    calls = docker_log.read_text().splitlines()
+    calls = docker_log.read_text(encoding="utf-8").splitlines()
     assert any("tam-mcp python -m ambient prompt-context" in c and "TAM_AMBIENT_TOKEN_BUDGET=300" in c
                for c in calls)
     assert not (host_mem / "memory.db").exists()
@@ -969,7 +971,7 @@ def test_docker_mode_without_a_running_container_stays_silent(tmp_path):
     proc = run_hook("user-prompt-submit.sh", {"hook_event_name": "UserPromptSubmit", "session_id": "x",
                                               "prompt": "explain the deployment pipeline"}, env)
     assert proc.returncode == 0 and proc.stdout.decode().strip() == ""
-    assert "No such container" in (mem / "hooks.log").read_text()
+    assert "No such container" in (mem / "hooks.log").read_text(encoding="utf-8")
 
 
 def test_hook_runtime_forwards_every_ambient_setting():
@@ -990,6 +992,8 @@ def test_docker_installer_registers_the_ambient_hooks(tmp_path):
     root = tmp_path / "checkout"
     shutil.copytree(HOOKS, root / "hooks", ignore=shutil.ignore_patterns("_docker-launchers", "__pycache__"))
     shutil.copy2(ROOT / "install-docker.sh", root / "install-docker.sh")
+    shutil.copytree(ROOT / "src" / "setup_wizard", root / "src" / "setup_wizard",
+                    ignore=shutil.ignore_patterns("__pycache__"))
     home = tmp_path / "home"
     home.mkdir()
     bin_dir = fake_bin(tmp_path, {"docker": "#!/usr/bin/env bash\nexit 0\n", "curl": "#!/usr/bin/env bash\nexit 0\n"})
@@ -997,7 +1001,7 @@ def test_docker_installer_registers_the_ambient_hooks(tmp_path):
     proc = subprocess.run([BASH or "bash", str(root / "install-docker.sh")], env=env, capture_output=True,
                           timeout=120, check=False)
     assert proc.returncode == 0, proc.stderr.decode()
-    hooks = json.loads((home / ".claude" / "settings.json").read_text())["hooks"]
+    hooks = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"]
     launchers = root / "hooks" / "_docker-launchers"
 
     def commands(event: str, matcher: str) -> list[str]:
@@ -1005,10 +1009,12 @@ def test_docker_installer_registers_the_ambient_hooks(tmp_path):
 
     assert commands("UserPromptSubmit", "") == [str(launchers / "user-prompt-submit.sh")]
     assert commands("PreToolUse", "Bash|Edit|Write|MultiEdit|NotebookEdit") == [str(launchers / "rule-reminder.sh")]
-    assert str(launchers / "post-tool-use.sh") in commands("PostToolUse", "")
-    assert str(launchers / "post-tool-use.sh") in commands("PostToolUseFailure", "")
+    matcher = "Edit|Write|MultiEdit|NotebookEdit|Bash"
+    assert str(launchers / "post-tool-use.sh") in commands("PostToolUse", matcher)
+    assert str(launchers / "post-tool-use.sh") in commands("PostToolUseFailure", matcher)
+    assert not commands("PostToolUse", "")
     for name in ("user-prompt-submit.sh", "rule-reminder.sh", "post-tool-use.sh", "codex-notify.sh"):
-        text = (launchers / name).read_text()
+        text = (launchers / name).read_text(encoding="utf-8")
         assert "export TAM_DOCKER=1" in text and f'exec "{root / "hooks" / name}"' in text
     assert "codex-notify.sh" in proc.stdout.decode()
 

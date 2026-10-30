@@ -77,13 +77,13 @@ def _acquire_lock(lock_path: Path) -> bool:
     try:
         if lock_path.exists():
             try:
-                old_pid = int(lock_path.read_text().strip())
+                old_pid = int(lock_path.read_text(encoding="utf-8").strip())
                 os.kill(old_pid, 0)  # throws if pid not alive
                 return False
             except (ValueError, ProcessLookupError, PermissionError):
                 # stale lock — overwrite
                 pass
-        lock_path.write_text(str(os.getpid()))
+        lock_path.write_text(str(os.getpid()), encoding="utf-8")
         return True
     except Exception:
         return True  # fail open — better to run than deadlock
@@ -91,7 +91,7 @@ def _acquire_lock(lock_path: Path) -> bool:
 
 def _release_lock(lock_path: Path) -> None:
     try:
-        if lock_path.exists() and lock_path.read_text().strip() == str(os.getpid()):
+        if lock_path.exists() and lock_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
             lock_path.unlink()
     except Exception:
         pass

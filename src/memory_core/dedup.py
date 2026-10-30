@@ -104,24 +104,43 @@ def tokens_update_value(a: list[str], b: list[str]) -> bool:
     )
 
 
+# FTS5 unicode61 keeps "ё" and "е" apart while `repeats` treats them as one
+# letter, so a word with "е" is searched as its spelling variants: all "е",
+# one "ё" at a time, all "ё". Real Russian words carry at most one "ё".
+MAX_YO_VARIANTS = 12
+
+
+def _spellings(token: str) -> list[str]:
+    """The folded token plus the spellings an index may hold for it."""
+    if "е" not in token:
+        return [token]
+    variants = [token]
+    variants += [token[:i] + "ё" + token[i + 1:] for i, char in enumerate(token) if char == "е"]
+    variants.append(token.replace("е", "ё"))
+    return list(dict.fromkeys(variants))[:MAX_YO_VARIANTS]
+
+
+def _term(token: str) -> str:
+    quoted = ['"' + variant.replace('"', '""') + '"' for variant in _spellings(token)]
+    return quoted[0] if len(quoted) == 1 else "(" + " OR ".join(quoted) + ")"
+
+
 def prefix_match_query(text: str, words: int = MIN_SHARED_PREFIX) -> str:
     """FTS5 MATCH expression for records that start like `text` (candidates only)."""
-    terms = [token for token in _tokens(text)[:words] if "е" not in token]
-    return " ".join('"' + term.replace('"', '""') + '"' for term in terms)
+    return " AND ".join(_term(token) for token in _tokens(text)[:words])
 
 
 def candidate_match_query(text: str) -> str:
     """FTS5 MATCH expression that finds records containing the words of `text`.
 
-    Words with "е" are left out: `repeats` treats "ё" and "е" as one letter,
-    the FTS5 index does not. Short words are left out when longer ones
-    remain. Empty when no word is usable.
+    Words with "е" match their "ё" spellings too (see `_spellings`). Short
+    words are left out when longer ones remain. Empty when no word is usable.
     """
-    words = [token for token in _tokens(text) if "е" not in token]
+    words = _tokens(text)
     # Short words ("на", "7") are in most records and only slow the match.
     selective = [word for word in words if len(word) >= MIN_CANDIDATE_TERM_LEN] or words
     terms = list(dict.fromkeys(selective))[:MAX_CANDIDATE_TERMS]
-    return " ".join('"' + term.replace('"', '""') + '"' for term in terms)
+    return " AND ".join(_term(term) for term in terms)
 
 
 def repeats(new: str, stored: str) -> bool:

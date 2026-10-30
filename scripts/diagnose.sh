@@ -6,7 +6,9 @@
 #
 # Env:
 #   DIAG_TEST_MODE=1     Skip real checks, emit mock OK report (for tests).
-#   CLAUDE_MEMORY_DIR    Override memory/state dir (default ~/.claude-memory).
+#   TAM_MEMORY_DIR       Override memory/state dir. Resolution order: TAM_MEMORY_DIR,
+#                        legacy CLAUDE_MEMORY_DIR, ~/.tam, ~/.claude-memory (if it
+#                        exists), else ~/.tam.
 #   DASHBOARD_PORT       Override dashboard port (default 37737).
 #
 # Exit code:
@@ -17,7 +19,16 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-MEMORY_DIR="${CLAUDE_MEMORY_DIR:-$HOME/.claude-memory}"
+# Same order as src/paths.py memory_dir().
+if [ -n "${TAM_MEMORY_DIR:-}" ]; then
+    MEMORY_DIR="$TAM_MEMORY_DIR"
+elif [ -n "${CLAUDE_MEMORY_DIR:-}" ]; then
+    MEMORY_DIR="$CLAUDE_MEMORY_DIR"
+elif [ -d "$HOME/.tam" ] || [ ! -d "$HOME/.claude-memory" ]; then
+    MEMORY_DIR="$HOME/.tam"
+else
+    MEMORY_DIR="$HOME/.claude-memory"
+fi
 DASHBOARD_PORT="${DASHBOARD_PORT:-37737}"
 
 FAILED=0
@@ -143,7 +154,12 @@ check_ollama() {
 check_db() {
     local db="$MEMORY_DIR/memory.db"
     if [ ! -f "$db" ]; then
-        print_fail "DB missing: $db"
+        # install.sh creates the directory; the MCP server creates the database on its first start.
+        if [ -d "$MEMORY_DIR" ]; then
+            print_warn "DB not created yet: $db (the MCP server creates it on its first start)"
+        else
+            print_fail "DB missing: $db (no memory dir; run install.sh)"
+        fi
         return
     fi
     local venv_py="$INSTALL_DIR/.venv/bin/python"

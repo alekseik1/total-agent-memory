@@ -34,7 +34,7 @@ def _add_fake_systemctl(env: dict[str, str], home: Path) -> None:
         'if [ "$1" = "--user" ] && [ "$2" = "show-environment" ]; then\n'
         "  exit 1\n"
         "fi\n"
-        "exit 1\n"
+        "exit 1\n", encoding="utf-8"
     )
     systemctl.chmod(0o755)
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
@@ -79,11 +79,11 @@ def test_no_flag_defaults_to_claude_code(sandbox_home: Path):
     assert result.returncode == 0, f"stderr={result.stderr}\nstdout={result.stdout}"
 
     # Claude Code reads MCP servers from ~/.claude.json; hooks live in ~/.claude/settings.json.
-    registered = json.loads((sandbox_home / ".claude.json").read_text())
+    registered = json.loads((sandbox_home / ".claude.json").read_text(encoding="utf-8"))
     assert registered["mcpServers"]["memory"]["args"][0].endswith("server.py")
     settings = sandbox_home / ".claude" / "settings.json"
     assert settings.exists(), "claude-code settings.json must be created by default"
-    data = json.loads(settings.read_text())
+    data = json.loads(settings.read_text(encoding="utf-8"))
     assert "mcpServers" not in data
     # Hooks registered only for claude-code
     assert "hooks" in data
@@ -95,7 +95,7 @@ def test_explicit_ide_claude_code(sandbox_home: Path):
     result = _run_install(sandbox_home, "--ide", "claude-code")
     assert result.returncode == 0, result.stderr
 
-    data = json.loads((sandbox_home / ".claude.json").read_text())
+    data = json.loads((sandbox_home / ".claude.json").read_text(encoding="utf-8"))
     assert "memory" in data["mcpServers"]
 
 
@@ -108,7 +108,7 @@ def test_ide_cursor_writes_cursor_mcp_json(sandbox_home: Path):
     cfg = sandbox_home / ".cursor" / "mcp.json"
     assert cfg.exists(), "cursor mcp.json must be created"
 
-    data = json.loads(cfg.read_text())
+    data = json.loads(cfg.read_text(encoding="utf-8"))
     assert "mcpServers" in data
     assert "memory" in data["mcpServers"]
     entry = data["mcpServers"]["memory"]
@@ -138,7 +138,7 @@ def test_ide_gemini_cli_writes_gemini_settings(sandbox_home: Path):
     cfg = sandbox_home / ".gemini" / "settings.json"
     assert cfg.exists()
 
-    data = json.loads(cfg.read_text())
+    data = json.loads(cfg.read_text(encoding="utf-8"))
     assert "mcpServers" in data
     assert "memory" in data["mcpServers"]
 
@@ -152,7 +152,7 @@ def test_ide_opencode_writes_opencode_config(sandbox_home: Path):
     # OpenCode reads $XDG_CONFIG_HOME/opencode/opencode.json, with `mcp` entries of type local.
     cfg = sandbox_home / ".config" / "opencode" / "opencode.json"
     assert cfg.exists()
-    entry = json.loads(cfg.read_text())["mcp"]["memory"]
+    entry = json.loads(cfg.read_text(encoding="utf-8"))["mcp"]["memory"]
     assert entry["type"] == "local" and entry["enabled"] is True
     assert entry["command"][1].endswith("server.py")
     assert not (sandbox_home / ".opencode" / "config.json").exists()
@@ -167,7 +167,7 @@ def test_ide_codex_writes_codex_toml_with_env_overrides(sandbox_home: Path):
     cfg = sandbox_home / ".codex" / "config.toml"
     assert cfg.exists()
 
-    content = cfg.read_text()
+    content = cfg.read_text(encoding="utf-8")
     assert "[mcp_servers.memory]" in content
     assert "[mcp_servers.memory.env]" in content
     # PR #5 env overrides must be present
@@ -206,7 +206,7 @@ def test_install_codex_shim_still_works(sandbox_home: Path):
 
     cfg = sandbox_home / ".codex" / "config.toml"
     assert cfg.exists(), "shim must still produce codex config.toml"
-    assert 'MEMORY_TRIPLE_TIMEOUT_SEC = "120"' in cfg.read_text()
+    assert 'MEMORY_TRIPLE_TIMEOUT_SEC = "120"' in cfg.read_text(encoding="utf-8")
 
 
 # ---------- unknown / error paths ----------
@@ -235,12 +235,12 @@ def test_cursor_install_is_idempotent(sandbox_home: Path):
     cfg.write_text(json.dumps({
         "mcpServers": {"github": {"command": "github-mcp"}},
         "unrelated_key": {"foo": "bar"},
-    }))
+    }), encoding="utf-8")
 
     result = _run_install(sandbox_home, "--ide", "cursor")
     assert result.returncode == 0, result.stderr
 
-    data = json.loads(cfg.read_text())
+    data = json.loads(cfg.read_text(encoding="utf-8"))
     # memory added
     assert "memory" in data["mcpServers"]
     # existing github server untouched
@@ -254,19 +254,19 @@ def test_codex_install_is_idempotent(sandbox_home: Path):
     codex_dir = sandbox_home / ".codex"
     codex_dir.mkdir()
     cfg = codex_dir / "config.toml"
-    cfg.write_text('[other_section]\nfoo = "bar"\n')
+    cfg.write_text('[other_section]\nfoo = "bar"\n', encoding="utf-8")
 
     # First run
     result1 = _run_install(sandbox_home, "--ide", "codex")
     assert result1.returncode == 0, result1.stderr
-    content1 = cfg.read_text()
+    content1 = cfg.read_text(encoding="utf-8")
     assert "[other_section]" in content1
     assert "[mcp_servers.memory]" in content1
 
     # Second run - must not duplicate the memory block
     result2 = _run_install(sandbox_home, "--ide", "codex")
     assert result2.returncode == 0, result2.stderr
-    content2 = cfg.read_text()
+    content2 = cfg.read_text(encoding="utf-8")
     assert content2.count("[mcp_servers.memory]") == 1
     assert content2.count("# --- total-agent-memory MCP Server ---") == 1
     # Other section still there

@@ -9,7 +9,7 @@ from itertools import pairwise
 
 import numpy as np
 
-from memory_core.query_terms import lexical_terms
+from memory_core.query_terms import fts_match_query, lexical_terms
 from memory_core.retrieval import MemoryHit
 from memory_core.telemetry import counters, op_timer
 from tam_db.contracts import Backend
@@ -112,11 +112,15 @@ class PassageIndex:
             return []
         with op_timer('passage_search_ms'):
             marks = ','.join('?' for _ in source_ids)
-            rows = self.db.execute(f'SELECT * FROM evidence_passages WHERE knowledge_id IN ({marks}) ORDER BY knowledge_id,ordinal', source_ids).fetchall()
+            # Only passages embedded by this index's model: vectors of another
+            # model with the same width would be compared as if comparable.
+            rows = self.db.execute(
+                f'SELECT p.* FROM evidence_passages p JOIN passage_sources s ON s.knowledge_id=p.knowledge_id '
+                f'WHERE p.knowledge_id IN ({marks}) AND s.model=? ORDER BY p.knowledge_id,p.ordinal',
+                [*source_ids, self.model]).fetchall()
             if not rows:
                 return []
-            terms = lexical_terms(query)
-            match = ' OR '.join('"' + term.replace('"', '""') + '"' for term in terms)
+            match = fts_match_query(query) if lexical_terms(query) else ''
             if match and getattr(self.db, 'backend', None) is Backend.POSTGRES:
                 from memory_core.pg_fts import match_source
 

@@ -82,8 +82,9 @@ def test_mixed_ratings_stay_active_and_rate_uses_rated_outcomes(server_store):
 
 def test_rate_unknown_rule_keeps_old_shape(server_store):
     _, store = server_store
-    assert store.manage_rule(SESSION, "rate", id=12345, success=True) == {
-        "rated": True, "id": 12345, "success_rate": None}
+    result = store.manage_rule(SESSION, "rate", id=12345, success=True)
+    assert result["rated"] is True and result["id"] == 12345 and result["success_rate"] is None
+    assert result["error"] == "Rule 12345 not found"
 
 
 def test_explicit_fire_still_counts(server_store):

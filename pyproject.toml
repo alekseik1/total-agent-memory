@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "total-agent-memory"
-version = "14.9.0"
+version = "14.10.0"
 description = "Persistent local memory MCP server for Claude Code, Codex CLI, Cursor and any MCP client: 79 tools — temporal knowledge graph, procedural memory, episodic memory, AST codebase ingest, pre-edit guard, auto-consolidating error capture"
 readme = "README.md"
 license = "MIT"
@@ -45,7 +45,7 @@ dependencies = [
     # the multilingual MiniLM-L12 and the fallback is the small English
     # MiniLM-L6. The ~1.5 GB users reported came from torch being imported
     # eagerly on top of the fastembed model, which is fixed separately.
-    "fastembed",
+    "fastembed>=0.6,<0.9",
     # HTTP transport (MCP_TRANSPORT=http) — a documented feature, so a declared
     # dependency rather than something inherited from mcp[cli] by luck.
     "starlette>=0.37",
@@ -202,6 +202,10 @@ src = [
 ]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
+# pytest-timeout: a hung test fails with its name and stack instead of stalling a CI job until the job timeout.
+timeout = 600
+norecursedirs = ["backups", ".git", ".venv", "node_modules"]
 markers = [
     "slow: heavy tests (network/model download); set RUN_RERANKER_SLOW=1 to enable",
     "postgres: needs a PostgreSQL server (--backend=postgres|both or TAM_TEST_PG_URL)",

@@ -38,7 +38,6 @@ Safety:
 from __future__ import annotations
 
 import argparse
-import os
 import sqlite3
 import struct
 import sys
@@ -50,6 +49,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import choose_embed  # noqa: E402
+from paths import memory_db  # noqa: E402
 import embed_provider as _ep  # noqa: E402
 
 
@@ -78,9 +78,7 @@ _OPENAI_DIM: dict[str, int] = {
 _CHARS_PER_TOKEN_HEURISTIC: float = 4.0
 
 
-DEFAULT_DB = Path(
-    os.environ.get("CLAUDE_MEMORY_DIR", os.path.expanduser("~/.claude-memory"))
-) / "memory.db"
+DEFAULT_DB = memory_db()
 
 
 # ──────────────────────────────────────────────

@@ -326,7 +326,7 @@ def test_cli_prints_writes_and_fails_cleanly(database, tmp_path, capsys):
     assert capsys.readouterr().out.startswith("# Activity report: billing-api")
     out = tmp_path / "out" / "report.json"
     assert cli.main(["--memory-dir", str(memory), "--period", "month", "--format", "json", "--out", str(out)]) == 0
-    assert json.loads(out.read_text())["report"]["window"]["kind"] == "month"
+    assert json.loads(out.read_text(encoding="utf-8"))["report"]["window"]["kind"] == "month"
     assert cli.main(["--memory-dir", str(tmp_path / "missing"), "--period", "day"]) == 1
     assert "no memory database" in capsys.readouterr().err
     assert cli.main(["--memory-dir", str(memory), "--period", "custom"]) == 2
@@ -412,3 +412,15 @@ def test_postgres_workspace_gives_the_same_report(db, tmp_path, pg_database):
                 assert render_markdown(build(reader, **fields)) == render_markdown(build(db, **fields)), fields
     finally:
         plane.close()
+
+
+def test_cli_out_file_is_owner_only_and_leaves_no_fixed_temp_name(database, tmp_path):
+    import os
+    import stat
+
+    out = tmp_path / "out" / "report.md"
+    assert cli.main(["--memory-dir", str(database.parent), "--period", "month", "--out", str(out)]) == 0
+    if os.name == "posix":  # Windows protects the profile with ACLs, not mode bits
+        assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
+    assert not (out.parent / f".{out.name}.tmp").exists()
+    assert [p.name for p in out.parent.iterdir()] == ["report.md"]

@@ -39,12 +39,12 @@ SEARCH_LIMIT = 50
 def questions(bench: str, split: str) -> list[dict]:
     if bench == "locomo":
         conversations = {"dev": range(3), "test": range(3, 10), "all": range(10)}[split]
-        data = json.loads(LOCOMO.read_text())
+        data = json.loads(LOCOMO.read_text(encoding="utf-8"))
         return [{"question": qa["question"], "project": f"locomo_{index}", "kind": LOCOMO_CATEGORIES[qa["category"]],
                  "gold": {e.lower() for e in qa.get("evidence", []) if e}}
                 for index in conversations for qa in data[index]["qa"]
                 if qa.get("category") in LOCOMO_CATEGORIES and "answer" in qa]
-    data = json.loads(LONGMEMEVAL.read_text())
+    data = json.loads(LONGMEMEVAL.read_text(encoding="utf-8"))
     ranked = sorted(data, key=lambda entry: hashlib.sha256(entry["question_id"].encode()).hexdigest())
     chosen = {"dev": ranked[:LONGMEMEVAL_DEV_SIZE], "test": ranked[LONGMEMEVAL_DEV_SIZE:], "all": ranked}[split]
     return [{"question": entry["question"], "project": f"lme_{entry['question_id']}", "kind": entry["question_type"],
@@ -123,7 +123,7 @@ def main() -> int:
     summary["seconds"] = round(time.perf_counter() - started, 1)
     print(json.dumps(summary, indent=1))
     if args.out:
-        args.out.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        args.out.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     return 0
 
 

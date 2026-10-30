@@ -96,7 +96,7 @@ def configured_backend(root: Path, environ=None) -> Backend:
 
 def is_postgres_snapshot(snapshot: Path) -> bool:
     try:
-        raw = json.loads((snapshot / MANIFEST_FILE).read_text())
+        raw = json.loads((snapshot / MANIFEST_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
     return isinstance(raw, dict) and raw.get('backend') == POSTGRES_MANIFEST_BACKEND
@@ -141,7 +141,7 @@ def backup_sqlite(root: Path, destination: Path) -> Snapshot:
             verify_database(target)
             entries.append(DatabaseSnapshot(path=relative.as_posix(), sha256=digest(target)))
         manifest = Snapshot(package_version=VERSION, created_at=datetime.now(UTC).isoformat(), databases=entries)
-        (destination / MANIFEST_FILE).write_text(manifest.model_dump_json(indent=2))
+        (destination / MANIFEST_FILE).write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
         return manifest
 
 
@@ -199,7 +199,7 @@ def restore_sqlite(snapshot: Path, destination: Path) -> None:
     import shutil
 
     snapshot, destination = snapshot.resolve(), destination.resolve()
-    manifest = Snapshot.model_validate_json((snapshot / MANIFEST_FILE).read_text())
+    manifest = Snapshot.model_validate_json((snapshot / MANIFEST_FILE).read_text(encoding="utf-8"))
     if manifest.format_version != 1:
         raise Conflict('Unsupported snapshot format')
     paths = [entry.path for entry in manifest.databases]
@@ -226,7 +226,7 @@ def restore_sqlite(snapshot: Path, destination: Path) -> None:
             if digest(target) != entry.sha256:
                 raise Conflict('Snapshot changed during restore')
             verify_database(target)
-        (staging / 'restored-from.json').write_text(json.dumps({'snapshot': manifest.created_at, 'version': manifest.package_version}))
+        (staging / 'restored-from.json').write_text(json.dumps({'snapshot': manifest.created_at, 'version': manifest.package_version}), encoding="utf-8")
         if destination.exists():
             raise FileExistsError(destination)
         staging.rename(destination)

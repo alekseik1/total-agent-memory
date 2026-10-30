@@ -396,7 +396,9 @@ class CognitiveEngine:
         # Fallback: FTS search if no activation results
         if not bundle["knowledge"] and concepts:
             try:
-                fts_query = " OR ".join(concepts[:5])
+                from memory_core.query_terms import fts_match_query
+
+                fts_query = fts_match_query(" ".join(concepts[:5]))
                 rows = self.db.execute(
                     """SELECT k.id, k.type, k.content, k.project, k.tags, k.confidence,
                               k.session_id, k.source, k.created_at

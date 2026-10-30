@@ -163,7 +163,7 @@ def test_registry_purge_journal(tmp_path):
     entry = registry.delete(user, "retention")
     assert not user_dir.exists() and registry.lookup("eval:run:conv-0") is None
     assert entry["bytes"] == 10 and entry["reason"] == "retention"
-    journal = [json.loads(line) for line in registry.journal_path.read_text().splitlines()]
+    journal = [json.loads(line) for line in registry.journal_path.read_text(encoding="utf-8").splitlines()]
     assert journal == [entry]
     assert set(entry) >= {"user_ns", "user_id", "deleted_at", "last_write_at", "fragments", "requests"}
     registry.close()
@@ -239,7 +239,7 @@ def test_metrics_render_counter_and_histogram(tmp_path):
     assert 'aml_request_duration_seconds_count{operation="add"} 2' in text
     assert 'aml_items_total{kind="fragments_stored"} 4' in text
     metrics.write_textfile(tmp_path / "metrics.prom")
-    assert (tmp_path / "metrics.prom").read_text() == text
+    assert (tmp_path / "metrics.prom").read_text(encoding="utf-8") == text
 
 
 # ── offline purge CLI ───────────────────────────────────────────────
@@ -263,6 +263,6 @@ def test_offline_purge_cli(tmp_path, monkeypatch, capsys):
     assert (data_dir / "users" / ns).exists()
     assert main(["purge", "--all", "--yes"]) == 0
     assert not (data_dir / "users" / ns).exists()
-    [entry] = [json.loads(line) for line in (data_dir / "deletion-journal.jsonl").read_text().splitlines()]
+    [entry] = [json.loads(line) for line in (data_dir / "deletion-journal.jsonl").read_text(encoding="utf-8").splitlines()]
     assert entry["reason"] == "manual" and entry["user_id"] == "eval:run:conv-9"
     assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["deleted_users"] == 1

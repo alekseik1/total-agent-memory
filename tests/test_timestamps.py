@@ -82,7 +82,7 @@ def test_migration_canonicalizes_knowledge_without_rebuilding_atomic_facts(tmp_p
                      (ids[1], "fact 1"))
     store.db.commit()
 
-    store.db.executescript(MIGRATION.read_text())
+    store.db.executescript(MIGRATION.read_text(encoding="utf-8"))
 
     rows = {row[0]: row[1:] for row in store.db.execute(
         f"SELECT id, created_at, last_confirmed FROM knowledge WHERE id IN ({','.join('?' * len(ids))})", ids)}

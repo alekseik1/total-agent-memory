@@ -30,8 +30,8 @@ class Clock:
 @pytest.fixture
 def db():
     conn = sqlite3.connect(":memory:")
-    conn.executescript((MIGRATIONS / "017_outbox.sql").read_text())
-    conn.executescript((MIGRATIONS / "039_write_path_reliability.sql").read_text())
+    conn.executescript((MIGRATIONS / "017_outbox.sql").read_text(encoding="utf-8"))
+    conn.executescript((MIGRATIONS / "039_write_path_reliability.sql").read_text(encoding="utf-8"))
     yield conn
     conn.close()
 

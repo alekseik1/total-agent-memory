@@ -170,7 +170,7 @@ def test_reduced_catalogues_are_much_smaller():
     spec.loader.exec_module(module)
     sizes = module.measure()
     full, lean, minimal = (sizes[name][1] for name in ("full", "lean", "minimal"))
-    assert sizes["full"][0] == len(json.loads((ROOT / "tests" / "fixtures" / "tool_contract.json").read_text()))
+    assert sizes["full"][0] == len(json.loads((ROOT / "tests" / "fixtures" / "tool_contract.json").read_text(encoding="utf-8")))
     assert lean <= full * MAX_LEAN_SHARE_OF_FULL, sizes
     assert minimal <= full * MAX_MINIMAL_SHARE_OF_FULL, sizes
 

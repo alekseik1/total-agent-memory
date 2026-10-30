@@ -1,5 +1,5 @@
 # ===========================================
-# PostToolUse Hook (PowerShell) — observation capture + memory_save nudges
+# PostToolUse Hook (PowerShell) - observation capture + memory_save nudges
 #
 # Twin of hooks/post-tool-use.sh:
 #  0. (default on, TAM_ACTION_LOG) log the call in agent_actions
@@ -11,10 +11,10 @@
 #     through a detached worker (tam_hook.py capture-observation).
 #
 # Env:
-#   MEMORY_POST_TOOL_CAPTURE  — "1" to enable observation capture
-#   MEMORY_NUDGE_DISABLE      — "1" to disable nudges entirely
-#   MEMORY_NUDGE_SOFT/HARD/STEP — tune thresholds (defaults: 3/7/3)
-#   TAM_MEMORY_DIR / CLAUDE_MEMORY_INSTALL_DIR — resolved by lib/common.ps1
+#   MEMORY_POST_TOOL_CAPTURE  - "1" to enable observation capture
+#   MEMORY_NUDGE_DISABLE      - "1" to disable nudges entirely
+#   MEMORY_NUDGE_SOFT/HARD/STEP - tune thresholds (defaults: 3/7/3)
+#   TAM_MEMORY_DIR / CLAUDE_MEMORY_INSTALL_DIR - resolved by lib/common.ps1
 #
 # Hook: PostToolUse (matcher: "*"), PostToolUseFailure (matcher: "*")
 # ===========================================

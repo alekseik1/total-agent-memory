@@ -20,7 +20,6 @@ Options:
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import sys
 import time
@@ -106,8 +105,10 @@ def main() -> int:
             print(__doc__)
             return 0
 
-    memory_dir = Path(os.environ.get("CLAUDE_MEMORY_DIR", Path.home() / ".claude-memory"))
-    db_path = memory_dir / "memory.db"
+    from paths import memory_dir
+
+    root = memory_dir()
+    db_path = root / "memory.db"
     if not db_path.exists():
         _log(f"db not found at {db_path}")
         return 1
@@ -145,7 +146,7 @@ def main() -> int:
     _log(f"enqueued {added} new items into triple_extraction_queue")
 
     if trigger_now:
-        trigger_path = memory_dir / ".reflect-pending"
+        trigger_path = root / ".reflect-pending"
         trigger_path.touch()
         _log(f"touched {trigger_path} — LaunchAgent should drain within ~6s")
     else:

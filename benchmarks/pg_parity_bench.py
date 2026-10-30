@@ -80,7 +80,7 @@ def corpus(seed: int, facts_limit: int | None = None) -> dict:
     from orgbench import data as dataset
 
     with tempfile.TemporaryDirectory(prefix="pg-parity-data-") as scratch:
-        company = json.loads(dataset.write(seed, Path(scratch)).read_text())
+        company = json.loads(dataset.write(seed, Path(scratch)).read_text(encoding="utf-8"))
     facts, questions = [], []
     for department, items in company["departments"].items():
         for fact in items:
@@ -134,7 +134,7 @@ def runtime_for(backend: str, scratch: Path):
 def worker(backend: str, corpus_path: Path, sizes: list[int], save_sample: int, query_sample: int) -> dict:
     from team_memory.contracts import Actor, Save, Scope, Work, Workspace
 
-    spec = json.loads(corpus_path.read_text())
+    spec = json.loads(corpus_path.read_text(encoding="utf-8"))
     actor = Actor(user_id="bench", display_name="Bench", client="pg-parity")
     workspace = Workspace(key=WORKSPACE_KEY, scope=Scope(), writable=True)
     keys: dict[int, str] = {}
@@ -223,7 +223,7 @@ def run_backend(backend: str, corpus_path: Path, args, scratch: Path, extra: dic
                "--sizes", args.sizes, "--save-sample", str(args.save_sample), "--query-sample", str(args.query_sample)]
     log(f"{backend}: starting")
     subprocess.run(command, env=child_env(scratch / backend, extra), check=True, timeout=CHILD_TIMEOUT_SECONDS)
-    return json.loads(out.read_text())
+    return json.loads(out.read_text(encoding="utf-8"))
 
 
 def rank(ranking: list[str], gold: str) -> int | None:
@@ -319,7 +319,7 @@ def parent(args) -> None:
     with tempfile.TemporaryDirectory(prefix="pg-parity-") as scratch_name:
         scratch = Path(scratch_name)
         corpus_path = scratch / "corpus.json"
-        corpus_path.write_text(json.dumps(spec))
+        corpus_path.write_text(json.dumps(spec), encoding="utf-8")
         sqlite = run_backend("sqlite", corpus_path, args, scratch, {})
         with fresh_database(admin_url) as url:
             postgres = run_backend("postgres", corpus_path, args, scratch, {WORKER_URL_ENV: url})
@@ -332,8 +332,8 @@ def parent(args) -> None:
                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     summary["acceptance"] = acceptance(summary)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(summary, indent=1) + "\n")
-    args.out.with_suffix(".md").write_text(markdown(summary))
+    args.out.write_text(json.dumps(summary, indent=1) + "\n", encoding="utf-8")
+    args.out.with_suffix(".md").write_text(markdown(summary), encoding="utf-8")
     sys.stdout.write(markdown(summary))
 
 
@@ -355,7 +355,7 @@ def main() -> None:
     if args.worker:
         sizes = [int(size) for size in args.sizes.split(",") if size]
         result = worker(args.worker, args.corpus, sizes, args.save_sample, args.query_sample)
-        args.result.write_text(json.dumps(result))
+        args.result.write_text(json.dumps(result), encoding="utf-8")
         return
     parent(args)
 

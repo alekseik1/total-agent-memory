@@ -22,12 +22,12 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     faiss.omp_set_num_threads(1)
-    rows = json.loads((root / f"docs/benchmarks/context-v14/{args.kind}-contexts.json").read_text())
+    rows = json.loads((root / f"docs/benchmarks/context-v14/{args.kind}-contexts.json").read_text(encoding="utf-8"))
     rows = [rows[i] for i in np.linspace(0, len(rows) - 1, args.count, dtype=int)]
     raw_questions = {}
     if args.kind == "longmemeval":
         raw_questions = {row["question_id"]: row["question"] for row in json.loads(
-            (root / "benchmarks/data/longmemeval_s.json").read_text()
+            (root / "benchmarks/data/longmemeval_s.json").read_text(encoding="utf-8")
         )}
     with tempfile.TemporaryDirectory() as temporary:
         os.environ.update(TAM_MEMORY_DIR=temporary, CLAUDE_MEMORY_DIR=temporary, MEMORY_MODE="fast",
@@ -93,7 +93,7 @@ def main() -> None:
               "hnsw_build_ms": None, "hnsw_status": "building", "faiss_version": faiss.__version__,
               "threads": 1, "results": results,
               "scope": "unscoped vector algorithm comparison against exact top10; not source recall or QA; excludes DB and embedding latency"}
-    args.output.write_text(json.dumps(report, indent=2))
+    args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     started = time.perf_counter()
     sys.stderr.write(json.dumps({"building_hnsw_records": len(matrix)}) + "\n")
     hnsw = faiss.IndexHNSWFlat(matrix.shape[1], 32, faiss.METRIC_INNER_PRODUCT)
@@ -104,7 +104,7 @@ def main() -> None:
         hnsw.hnsw.efSearch = effort
         measure(f"hnsw_{effort}", lambda q: hnsw.search(q.reshape(1, -1), 10)[1][0])
     report.update(hnsw_build_ms=build_ms, hnsw_status="complete")
-    args.output.write_text(json.dumps(report, indent=2))
+    args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     sys.stdout.write(json.dumps(report) + "\n")
 
 

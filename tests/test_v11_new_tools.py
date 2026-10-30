@@ -368,6 +368,9 @@ def test_memory_search_fast_returns_results(wired_server):
 
 def test_memory_perf_report_has_counters(wired_server):
     server = wired_server
+    # Process-wide counters: earlier tests may have probed a provider; start this one clean.
+    from memory_core.telemetry import counters
+    counters.reset()
     # Run something so counters move.
     server.store.save_knowledge(
         sid="s1", content="sample content", ktype="fact", project="demo",

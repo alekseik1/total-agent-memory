@@ -90,7 +90,7 @@ class Variant:
 
 
 def load_questions(split: str, limit: int) -> list[dict]:
-    data = json.loads(DATASET.read_text())
+    data = json.loads(DATASET.read_text(encoding="utf-8"))
     ranked = sorted(data, key=lambda entry: hashlib.sha256(entry["question_id"].encode()).hexdigest())
     chosen = {"dev": ranked[:DEV_SIZE], "test": ranked[DEV_SIZE:], "all": ranked}[split]
     questions = [{"question_id": entry["question_id"], "type": entry["question_type"],
@@ -116,7 +116,7 @@ def rounds(session: list[dict]) -> list[str]:
 def ingest_rounds(srv, question_ids: set[str]) -> int:
     """Store every haystack round of the chosen questions; skip projects already loaded."""
     saved = 0
-    for entry in json.loads(DATASET.read_text()):
+    for entry in json.loads(DATASET.read_text(encoding="utf-8")):
         qid = entry["question_id"]
         if qid not in question_ids:
             continue
@@ -280,10 +280,10 @@ def main() -> int:
         rows = list(pool.map(evaluate, prepared))
 
     (args.out / f"{variant.name}-{args.split}.jsonl").write_text(
-        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
     summary = {"variant": variant.__dict__, "split": args.split, "answer_model": answer_model,
                "judge_model": JUDGE_MODEL, "spent_usd_this_run": round(client.spent, 4), **summarize(rows)}
-    (args.out / f"{variant.name}-{args.split}.summary.json").write_text(json.dumps(summary, indent=2))
+    (args.out / f"{variant.name}-{args.split}.summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
     return 0
 

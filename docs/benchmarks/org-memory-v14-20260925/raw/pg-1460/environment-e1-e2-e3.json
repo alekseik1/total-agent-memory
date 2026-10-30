@@ -15,7 +15,7 @@
  "memory_mode": "fast",
  "llm": "disabled (MEMORY_LLM_ENABLED=false)",
  "tam_team_max_workers_default": 3,
- "src_path": "/Users/vitalii-macpro/PROJECT/claude-memory/src",
+ "src_path": "~/PROJECT/claude-memory/src",
  "team_memory_sha256": "0b402260985a48f6c39b38cd7939e500dae33dbd0c50d6b0458f9dd184c7bb6b",
  "worktree_src_diff_stat": "src/server.py                | 358 ++++++++++++++++++++++++++++--------\n src/team_memory/app.py       | 110 ++++++++++--\n src/team_memory/audit.py     | 154 ++++++++++++++++\n src/team_memory/cli.py       | 322 ++++++++++++++++++++++++++++++---\n src/team_memory/contracts.py | 134 ++++++++++++++\n src/team_memory/lifecycle.py | 109 ++++++++++-\n src/team_memory/registry.py  | 420 ++++++++++++++++++++++++++++++++++++++-----\n src/team_memory/service.py   | 106 ++++++++---\n src/team_memory/ui.py        |   4 +-\n src/team_memory/worker.py    | 112 ++++++++++--\n 10 files changed, 1628 insertions(+), 201 deletions(-)",
  "seed": 20260925,

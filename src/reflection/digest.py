@@ -17,7 +17,21 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from text_equivalence import TOKEN_RE, same_values
+
 LOG = lambda msg: sys.stderr.write(f"[memory-reflection] {msg}\n")
+
+# Candidate generation: a pair can only reach the SequenceMatcher check when
+# its token sets overlap at least this much (prefix filtering is exact for it).
+MIN_TOKEN_JACCARD = 0.6
+# Tokens present in more rows than this cannot tell records apart and are not indexed
+# (rows made only of such tokens are still caught when their text is identical).
+MAX_POSTING_LENGTH = 100
+# Texts longer than this are compared on their head; keeps SequenceMatcher bounded.
+MAX_COMPARE_CHARS = 2000
+MIN_LENGTH_RATIO = 0.5
+
+_TOKEN_RE = TOKEN_RE
 
 
 def _now() -> str:
@@ -44,6 +58,40 @@ def _parse_json(val: str | None, default: list | dict | None = None) -> list | d
         return json.loads(val)
     except (json.JSONDecodeError, TypeError):
         return default if default is not None else []
+
+
+def _blocked_candidates(indices: list[int], tokens: dict[int, frozenset[str]]) -> dict[int, set[int]]:
+    """Map each index to the indices it may duplicate, via a prefix-filter inverted index."""
+    doc_freq: dict[str, int] = {}
+    for idx in indices:
+        for tok in tokens[idx]:
+            doc_freq[tok] = doc_freq.get(tok, 0) + 1
+    postings: dict[str, list[int]] = {}
+    for idx in indices:
+        ordered = sorted(tokens[idx], key=lambda t: (doc_freq[t], t))
+        prefix_len = len(ordered) - math.ceil(MIN_TOKEN_JACCARD * len(ordered)) + 1
+        for tok in ordered[:prefix_len]:
+            if doc_freq[tok] <= MAX_POSTING_LENGTH:
+                postings.setdefault(tok, []).append(idx)
+    candidates: dict[int, set[int]] = {}
+    for members in postings.values():
+        for pos, first in enumerate(members):
+            for second in members[pos + 1:]:
+                candidates.setdefault(first, set()).add(second)
+                candidates.setdefault(second, set()).add(first)
+    return candidates
+
+
+def _is_duplicate(content_a: str, content_b: str, threshold: float) -> bool:
+    """True when two texts say the same thing: similar wording, identical values and polarity."""
+    len_a, len_b = len(content_a), len(content_b)
+    if len_a == 0 or len_b == 0 or min(len_a, len_b) / max(len_a, len_b) < MIN_LENGTH_RATIO:
+        return False
+    if not same_values(content_a, content_b):
+        return False
+    return SequenceMatcher(
+        None, content_a[:MAX_COMPARE_CHARS], content_b[:MAX_COMPARE_CHARS]
+    ).ratio() >= threshold
 
 
 class DigestPhase:
@@ -107,128 +155,106 @@ class DigestPhase:
         return stats
 
     def merge_duplicates(self, threshold: float = 0.85) -> int:
-        """
-        Find and merge semantic duplicates in knowledge table.
-        Uses content similarity (SequenceMatcher).
-        Returns number of merged records.
+        """Supersede near-duplicate active records; the newest record always survives.
 
-        Before paying for the O(len_a * len_b) SequenceMatcher.ratio() call,
-        each pair is screened with real_quick_ratio()/quick_ratio(). Both are
-        documented, mathematically proven upper bounds on ratio() (ratio() <=
-        quick_ratio() <= real_quick_ratio()), and unlike ratio() itself they
-        are symmetric in argument order (verified empirically: swapping a/b
-        never changes their value, while it CAN change ratio() itself). That
-        means the cheap bounds can safely be computed in whatever order is
-        fastest to cache, while the actual ratio() call below is kept in the
-        exact original argument order (content_a, content_b) so its numeric
-        result -- and therefore which pairs cross `threshold` -- is unchanged.
-
-        The cheap-bound matcher fixes group_rows[i]'s content as seq2 (`b`)
-        for the whole inner loop and only swaps seq1 (`a`) per candidate j,
-        per the stdlib's own guidance for comparing one sequence against
-        many: this reuses the cached per-b state (fullbcount/b2j) instead of
-        rebuilding it on every pair.
+        Candidates come from token blocking (exact-text buckets plus a prefix-filter
+        inverted index), not an all-pairs scan. A candidate pair is merged only when
+        the character similarity reaches `threshold` AND the two texts carry the same
+        values (numbers, versions, ids) and the same polarity ("100 rpm" and "500 rpm"
+        are different facts). The older record is superseded by the newer one; recall
+        counts move to the survivor, and records that already pointed at the
+        superseded one are re-pointed so no chain ends in a dead record.
+        Returns the number of superseded records.
         """
         rows = self.db.execute(
             """SELECT id, type, content, project, tags, confidence,
                       recall_count, created_at
                FROM knowledge
                WHERE status = 'active'
-               ORDER BY project, type, created_at DESC"""
+               ORDER BY project, type, created_at DESC, id DESC"""
         ).fetchall()
 
         if len(rows) < 2:
             return 0
 
-        merged = 0
-        merged_ids: set[int] = set()
-
-        # Group by (project, type) for efficient comparison
         groups: dict[tuple[str, str], list[dict]] = {}
         for row in rows:
             key = (row["project"] or "general", row["type"])
-            entry = dict(row)
-            groups.setdefault(key, []).append(entry)
+            groups.setdefault(key, []).append(dict(row))
 
-        for group_key, group_rows in groups.items():
-            for i in range(len(group_rows)):
-                if group_rows[i]["id"] in merged_ids:
-                    continue
-
-                content_a = group_rows[i]["content"]
-                len_a = len(content_a)
-                if len_a == 0:
-                    continue
-
-                # Cheap-bound matcher: content_a fixed as seq2 for the whole
-                # inner loop so fullbcount/b2j are cached once per i, not
-                # rebuilt per pair. See docstring above for why this is safe.
-                quick_sm = SequenceMatcher(None, "", content_a)
-
-                for j in range(i + 1, len(group_rows)):
-                    if group_rows[j]["id"] in merged_ids:
-                        continue
-
-                    content_b = group_rows[j]["content"]
-
-                    # Quick length check to skip obviously different records
-                    len_b = len(content_b)
-                    if len_b == 0:
-                        continue
-                    ratio = min(len_a, len_b) / max(len_a, len_b)
-                    if ratio < 0.5:
-                        continue
-
-                    quick_sm.set_seq1(content_b)
-                    if quick_sm.real_quick_ratio() < threshold:
-                        continue
-                    if quick_sm.quick_ratio() < threshold:
-                        continue
-
-                    similarity = SequenceMatcher(
-                        None, content_a, content_b
-                    ).ratio()
-
-                    if similarity >= threshold:
-                        # Keep the record with higher recall_count,
-                        # or the newer one if equal
-                        keep = group_rows[i]
-                        remove = group_rows[j]
-                        if (remove["recall_count"] or 0) > (keep["recall_count"] or 0):
-                            keep, remove = remove, keep
-
-                        # Merge: supersede the duplicate
-                        self.db.execute(
-                            """UPDATE knowledge
-                               SET status = 'superseded',
-                                   superseded_by = ?
-                               WHERE id = ?""",
-                            (keep["id"], remove["id"]),
-                        )
-
-                        # Transfer recall count
-                        total_recalls = (keep["recall_count"] or 0) + (remove["recall_count"] or 0)
-                        self.db.execute(
-                            "UPDATE knowledge SET recall_count = ? WHERE id = ?",
-                            (total_recalls, keep["id"]),
-                        )
-
-                        # Transfer knowledge_nodes links
-                        self.db.execute(
-                            """INSERT OR IGNORE INTO knowledge_nodes (knowledge_id, node_id, role, strength)
-                               SELECT ?, node_id, role, strength
-                               FROM knowledge_nodes WHERE knowledge_id = ?""",
-                            (keep["id"], remove["id"]),
-                        )
-
-                        merged_ids.add(remove["id"])
-                        merged += 1
+        merged = 0
+        for group_rows in groups.values():
+            for keep_idx, remove_idx in self._duplicate_pairs(group_rows, threshold):
+                self._supersede_duplicate(group_rows[keep_idx], group_rows[remove_idx])
+                merged += 1
 
         if merged > 0:
             self.db.commit()
             LOG(f"Merged {merged} duplicate knowledge records")
 
         return merged
+
+    @staticmethod
+    def _duplicate_pairs(group_rows: list[dict], threshold: float) -> list[tuple[int, int]]:
+        """Return (keep_index, remove_index) pairs; `group_rows` is ordered newest first.
+
+        A row is removed at most once and a removed row never acts as a survivor, so
+        every pair points at a record that stays active.
+        """
+        removed: set[int] = set()
+        pairs: list[tuple[int, int]] = []
+
+        # Exact duplicates (after whitespace/case normalisation) collapse in O(n).
+        seen: dict[str, int] = {}
+        distinct: list[int] = []
+        for idx, row in enumerate(group_rows):
+            norm = " ".join((row["content"] or "").lower().split())
+            if not norm:
+                continue
+            if norm in seen:
+                pairs.append((seen[norm], idx))
+                removed.add(idx)
+            else:
+                seen[norm] = idx
+                distinct.append(idx)
+
+        tokens = {idx: frozenset(_TOKEN_RE.findall(group_rows[idx]["content"].lower())) for idx in distinct}
+        candidates = _blocked_candidates([i for i in distinct if tokens[i]], tokens)
+        for idx in sorted(candidates):
+            if idx in removed:
+                continue
+            for other in sorted(candidates[idx]):
+                if other in removed or other <= idx:
+                    continue
+                if _is_duplicate(group_rows[idx]["content"], group_rows[other]["content"], threshold):
+                    pairs.append((idx, other))
+                    removed.add(other)
+        return pairs
+
+    def _supersede_duplicate(self, keep: dict, remove: dict) -> None:
+        self.db.execute(
+            """UPDATE knowledge
+               SET status = 'superseded',
+                   superseded_by = ?
+               WHERE id = ?""",
+            (keep["id"], remove["id"]),
+        )
+        # Records the removed one had superseded now point at the live survivor.
+        self.db.execute(
+            "UPDATE knowledge SET superseded_by = ? WHERE superseded_by = ? AND status = 'superseded'",
+            (keep["id"], remove["id"]),
+        )
+        keep["recall_count"] = (keep["recall_count"] or 0) + (remove["recall_count"] or 0)
+        self.db.execute(
+            "UPDATE knowledge SET recall_count = ? WHERE id = ?",
+            (keep["recall_count"], keep["id"]),
+        )
+        self.db.execute(
+            """INSERT OR IGNORE INTO knowledge_nodes (knowledge_id, node_id, role, strength)
+               SELECT ?, node_id, role, strength
+               FROM knowledge_nodes WHERE knowledge_id = ?""",
+            (keep["id"], remove["id"]),
+        )
 
     def apply_intelligent_decay(self) -> dict:
         """

@@ -16,6 +16,8 @@ from typing import Any
 
 LOG = lambda msg: sys.stderr.write(f"[memory-graph] {msg}\n")
 
+LIKE_ESCAPE = "\\"
+
 
 def _now() -> str:
     """Return current UTC timestamp in ISO 8601 format."""
@@ -604,8 +606,9 @@ class GraphStore:
         self, query: str, type: str | None = None, limit: int = 20
     ) -> list[dict[str, Any]]:
         """Simple LIKE search on name and content fields."""
-        pattern = f"%{query}%"
-        conditions = ["(name LIKE ? OR content LIKE ?)"]
+        escaped = query.replace(LIKE_ESCAPE, LIKE_ESCAPE * 2).replace("%", LIKE_ESCAPE + "%").replace("_", LIKE_ESCAPE + "_")
+        pattern = f"%{escaped}%"
+        conditions = [f"(name LIKE ? ESCAPE '{LIKE_ESCAPE}' OR content LIKE ? ESCAPE '{LIKE_ESCAPE}')"]
         params: list[Any] = [pattern, pattern]
 
         if type:

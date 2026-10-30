@@ -23,6 +23,7 @@ import re
 import secrets
 import socket
 import sqlite3
+import ssl
 import subprocess
 import sys
 import time
@@ -34,7 +35,10 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import dashboard_login
 import dashboard_settings
+import http_auth
+import settings_catalog
 from paths import memory_dir
 from tam_brand import FAVICON_LINK, MARK_SVG_DARK
 from version import RELEASE_DATE, VERSION
@@ -52,12 +56,29 @@ HEADER_MARK_SVG = MARK_SVG_DARK.replace(' xmlns="http://www.w3.org/2000/svg"', "
 # are sent, so other sites cannot read responses.
 LOOPBACK_HOSTS = frozenset(("127.0.0.1", "localhost", "::1"))
 WILDCARD_BINDS = frozenset(("0.0.0.0", "::", ""))
+CONTENT_LENGTH_FORMAT = re.compile(r"[0-9]{1,12}", re.ASCII)
+TRUSTED_PROXIES_ENV = "DASHBOARD_TRUSTED_PROXIES"
 MISDIRECTED_STATUS = 421
 # Every write needs this per-process token (served only inside the settings page) and a
 # same-origin Origin header, so another site or a plain form post cannot change settings.
 CSRF_TOKEN = secrets.token_urlsafe(32)
 CSRF_HEADER = "X-TAM-CSRF"
 POST_ROUTES = ("/api/settings", "/api/privacy/redact")
+# A dashboard bound beyond loopback (a container's 0.0.0.0) is reachable by clients that choose their
+# own Host header, so it also requires an access token: `Authorization: Bearer`, or the opaque session cookie
+# that POST /login (or /login#token=...) hands to browsers. Set by main(); None means loopback-only (no token).
+ACCESS_TOKEN: str | None = None
+LOGIN_PATH = "/login"
+LOGOUT_PATH = "/logout"
+TOKEN_QUERY = "token"
+SESSIONS = dashboard_login.DashboardSessions()
+UNAUTHORIZED_STATUS = http_auth.UNAUTHORIZED_STATUS
+CONFLICT_STATUS = 409
+# Settings holding an endpoint that receives the stored API key and memory text on the next LLM or
+# embedding call; changing one needs an explicit confirmation from the person at the keyboard.
+ENDPOINT_SETTING_KEYS = frozenset(
+    spec.key for spec in settings_catalog.LOCAL_CATALOG if spec.kind == "url")
+CONFIRM_FIELD = "confirm_endpoint"
 FORBIDDEN_STATUS = 403
 
 
@@ -88,6 +109,16 @@ def allowed_hosts(environ: Mapping[str, str]) -> frozenset[str]:
 
 
 ALLOWED_HOSTS = allowed_hosts(os.environ)
+
+
+def endpoint_changes_needing_confirmation(body: object) -> list[str]:
+    """Endpoint settings in a settings write that the user has not explicitly confirmed."""
+    if not isinstance(body, dict) or body.get(CONFIRM_FIELD) is True:
+        return []
+    values = body.get("values")
+    if not isinstance(values, dict):
+        return []
+    return sorted(key for key in values if key in ENDPOINT_SETTING_KEYS)
 
 
 def request_rejection(host: str | None, origin: str | None,
@@ -913,7 +944,7 @@ def api_system_status() -> dict:
     try:
         result = subprocess.run(
             ["launchctl", "list"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         for line in result.stdout.splitlines():
             if "claude.memory" in line or "claude-memory" in line:
@@ -1976,11 +2007,17 @@ async function api(path) {
     return resp.json();
 }
 
+// Escapes quotes too, so the result is safe in element text AND in double- or single-quoted attributes.
+const HTML_ESCAPES = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'};
 function escapeHtml(str) {
     if (!str) return '';
-    const d = document.createElement('div');
-    d.textContent = str;
-    return d.innerHTML;
+    return String(str).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+}
+
+// A value used inside a class name: only [a-z0-9_-], anything else falls back.
+function cssToken(value, fallback) {
+    const token = String(value || '').toLowerCase();
+    return /^[a-z0-9_-]+$/.test(token) ? token : fallback;
 }
 
 function truncate(s, n) {
@@ -1998,7 +2035,7 @@ function formatDate(iso) {
 }
 
 function badgeClass(type) {
-    return 'badge badge-' + (type || 'fact');
+    return 'badge badge-' + cssToken(type, 'fact');
 }
 
 // ============================================================
@@ -2195,7 +2232,7 @@ let siLoaded = false;
 
 function severityBadge(severity) {
     const s = (severity || 'low').toLowerCase();
-    return '<span class="badge badge-' + s + '">' + escapeHtml(s) + '</span>';
+    return '<span class="badge badge-' + cssToken(s, 'low') + '">' + escapeHtml(s) + '</span>';
 }
 
 function statusBadge(status) {
@@ -3528,7 +3565,7 @@ async function loadV5Graph() {
         const nodesDiv = document.getElementById('v5-nodes-by-type');
         nodesDiv.innerHTML = Object.entries(data.nodes_by_type || {}).map(([type, count]) =>
             '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">' +
-            '<span class="badge badge-' + type + '">' + escapeHtml(type) + '</span>' +
+            '<span class="badge badge-' + cssToken(type, 'fact') + '">' + escapeHtml(type) + '</span>' +
             '<span style="font-weight:600;color:var(--accent)">' + count + '</span></div>'
         ).join('') || '<div style="color:var(--text-dim)">No graph nodes yet</div>';
 
@@ -3545,7 +3582,7 @@ async function loadV5Graph() {
         tbody.innerHTML = (data.top_nodes || []).map(n =>
             '<tr>' +
             '<td>' + escapeHtml(n.name) + '</td>' +
-            '<td><span class="badge badge-' + (n.type || 'fact') + '">' + escapeHtml(n.type) + '</span></td>' +
+            '<td><span class="badge badge-' + cssToken(n.type, 'fact') + '">' + escapeHtml(n.type) + '</span></td>' +
             '<td style="font-weight:600;color:var(--accent)">' + (n.importance || 0).toFixed(1) + '</td>' +
             '<td>' + (n.mention_count || 0) + '</td>' +
             '</tr>'
@@ -4450,12 +4487,100 @@ class DashboardHandler(BaseHTTPRequestHandler):
             db.close()
 
     def _refused(self) -> bool:
-        """Answer and return True when Host/Origin checks reject the request."""
+        """Answer and return True when Host/Origin/access-token checks reject the request."""
         rejection = request_rejection(self.headers.get("Host"), self.headers.get("Origin"), ALLOWED_HOSTS)
+        if rejection is None:
+            rejection = self._auth_rejection()
         if rejection is None:
             return False
         self._refuse(*rejection)
         return True
+
+    def _session_cookie(self) -> str:
+        return dashboard_login.cookie_value(self.headers.get("Cookie"), dashboard_login.SESSION_COOKIE)
+
+    def _auth_rejection(self) -> tuple[int, str] | None:
+        """(status, reason) when an access token is required and the request does not carry it."""
+        if ACCESS_TOKEN is None:
+            return None
+        path = urlparse(self.path).path.rstrip("/")
+        if path in ("/healthz", LOGIN_PATH):
+            return None
+        if http_auth.bearer_matches(self.headers.get("Authorization"), ACCESS_TOKEN):
+            return None
+        if SESSIONS.valid(self._session_cookie(), ACCESS_TOKEN):
+            return None
+        return UNAUTHORIZED_STATUS, (
+            f"Access token required: send 'Authorization: Bearer <token>' or sign in at {LOGIN_PATH} "
+            f"(token file: {http_auth.token_file(DB_PATH.parent)})")
+
+    def _declared_length(self) -> int | None:
+        """The Content-Length as a number; None when absent or not plain ASCII digits (str.isdigit accepts "²")."""
+        raw = self.headers.get("Content-Length", "")
+        return int(raw) if CONTENT_LENGTH_FORMAT.fullmatch(raw) else None
+
+    def _is_https(self) -> bool:
+        """TLS terminated here, or by a proxy listed in DASHBOARD_TRUSTED_PROXIES that says so."""
+        if isinstance(self.connection, ssl.SSLSocket):
+            return True
+        trusted = {item.strip() for item in os.environ.get(TRUSTED_PROXIES_ENV, "").split(",") if item.strip()}
+        forwarded = self.headers.get("X-Forwarded-Proto", "").split(",")[-1].strip().lower()
+        return self.client_address[0] in trusted and forwarded == "https"
+
+    def _cookie_header(self, value: str, max_age: int) -> str:
+        secure = "; Secure" if self._is_https() else ""
+        return f"{dashboard_login.SESSION_COOKIE}={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age}{secure}"
+
+    def _redirect_home(self, cookies: list[str]) -> None:
+        """303 to a clean URL; the token never stays in the address bar, history or Referer."""
+        self.send_response(303)
+        self.send_header("Location", "/")
+        for cookie in cookies:
+            self.send_header("Set-Cookie", cookie)
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _start_session(self, supplied: str) -> None:
+        """Exchange a valid access token for an opaque session cookie (the old raw-token cookie is expired)."""
+        if ACCESS_TOKEN is None or not hmac.compare_digest(supplied.encode(), ACCESS_TOKEN.encode()):
+            self.send_response(UNAUTHORIZED_STATUS)
+            body = json.dumps({"error": "Invalid access token"}).encode("utf-8")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        session_id = SESSIONS.open(ACCESS_TOKEN)
+        self._redirect_home([self._cookie_header(session_id, dashboard_login.SESSION_TTL_SECONDS),
+                             f"{dashboard_login.LEGACY_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"])
+
+    def _login_get(self, params: dict[str, list[str]]) -> None:
+        """GET /login shows the sign-in page. ``?token=`` is the pre-14.10 form: it is exchanged at once and
+        redirected to a clean URL; ``#token=`` fragments are read by the page's own script and POSTed."""
+        if TOKEN_QUERY in params:
+            self._start_session(params[TOKEN_QUERY][0])
+            return
+        self._send_html(dashboard_login.LOGIN_PAGE)
+
+    def _login_post(self) -> None:
+        length = self._declared_length()
+        if length is None or length > dashboard_login.LOGIN_BODY_MAX_BYTES:
+            self._refuse(*self._length_rejection(length))
+            return
+        self._start_session(dashboard_login.token_from_body(self.rfile.read(length)))
+
+    def _length_rejection(self, length: int | None) -> tuple[int, str]:
+        if length is None and self.headers.get("Content-Length") is not None:
+            return 400, "Invalid Content-Length"
+        return 413, "Request body missing or too large"
+
+    def _logout(self) -> None:
+        SESSIONS.close(self._session_cookie())
+        self._redirect_home([self._cookie_header("", 0)])
 
     def _refuse(self, status: int, message: str) -> None:
         """Refuse a request whose body was not read yet.
@@ -4464,9 +4589,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         connection, and the client then gets WinError 10053 instead of this
         answer; a small body is read and dropped first.
         """
-        length = self.headers.get("Content-Length", "")
-        if length.isdigit() and int(length) <= dashboard_settings.MAX_BODY_BYTES:
-            self.rfile.read(int(length))
+        length = self._declared_length()
+        if length is not None and length <= dashboard_settings.MAX_BODY_BYTES:
+            self.rfile.read(length)
         self._send_error(status, message)
 
     def _reject_method(self) -> None:
@@ -4484,9 +4609,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return FORBIDDEN_STATUS, "Missing or stale CSRF token; reload the settings page"
         if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
             return 415, "Content-Type must be application/json"
-        length = self.headers.get("Content-Length", "")
-        if not length.isdigit() or int(length) > dashboard_settings.MAX_BODY_BYTES:
-            return 413, "Request body missing or too large"
+        length = self._declared_length()
+        if length is None or length > dashboard_settings.MAX_BODY_BYTES:
+            return self._length_rejection(length)
         return None
 
     def do_POST(self) -> None:
@@ -4494,6 +4619,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self._refused():
             return
         path = urlparse(self.path).path.rstrip("/")
+        if path == LOGIN_PATH:
+            self._login_post()
+            return
+        if path == LOGOUT_PATH:
+            self._logout()
+            return
         if path not in POST_ROUTES:
             self._refuse(405, "Method not allowed")
             return
@@ -4502,10 +4633,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._refuse(*rejection)
             return
         try:
-            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
+            body = json.loads(self.rfile.read(self._declared_length() or 0) or b"{}")
         except ValueError:
             self._send_error(400, "Body is not valid JSON")
             return
+        if path == "/api/settings":
+            unconfirmed = endpoint_changes_needing_confirmation(body)
+            if unconfirmed:
+                self._send_json({"error": "Changing " + ", ".join(unconfirmed) + " redirects the stored API key "
+                                 "and memory text to the new address. Confirm the change to continue.",
+                                 "confirm_required": unconfirmed}, CONFLICT_STATUS)
+                return
         root = DB_PATH.parent
         try:
             if path == "/api/settings":
@@ -4525,6 +4663,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
         params = parse_qs(parsed.query)
+
+        if path == LOGIN_PATH:
+            self._login_get(params)
+            return
 
         if path == "/api/release":
             self._send_json({"name": "total-agent-memory", "version": VERSION, "release_date": RELEASE_DATE})
@@ -4829,6 +4971,11 @@ def main() -> None:
     # Bind to loopback by default; opt-in LAN via DASHBOARD_BIND.
     # Never expose DB / graph / filter contents to any non-127.0.0.1 host.
     bind_addr = os.environ.get("DASHBOARD_BIND", "127.0.0.1").strip() or "127.0.0.1"
+    global ACCESS_TOKEN
+    ACCESS_TOKEN = http_auth.required_token(bind_addr, DB_PATH.parent)
+    if ACCESS_TOKEN is not None:
+        print(f"Bound to {bind_addr}: access token required; open /login#token=<token> "
+              f"(token file: {http_auth.token_file(DB_PATH.parent)})")
     server = DashboardHTTPServer((bind_addr, DASHBOARD_PORT), DashboardHandler)
     print(f"Dashboard at http://{bind_addr}:{DASHBOARD_PORT}  "
           f"(DASHBOARD_BIND to override)")

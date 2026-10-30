@@ -33,7 +33,7 @@ def test_the_skill_pack_is_actually_there():
 @pytest.mark.parametrize("doc", DOCS, ids=lambda p: str(p.relative_to(SKILLS)))
 def test_no_reference_to_the_nonexistent_cli_module(doc: Path):
     """`claude_total_memory.cli` is not importable and never was."""
-    assert "claude_total_memory.cli" not in doc.read_text(), (
+    assert "claude_total_memory.cli" not in doc.read_text(encoding="utf-8"), (
         "use the `total-agent-memory` console script instead"
     )
 
@@ -41,21 +41,21 @@ def test_no_reference_to_the_nonexistent_cli_module(doc: Path):
 @pytest.mark.parametrize("doc", DOCS, ids=lambda p: str(p.relative_to(SKILLS)))
 def test_no_reference_to_the_pre_rebrand_install_path(doc: Path):
     """The documented checkout is ~/total-agent-memory."""
-    text = doc.read_text()
+    text = doc.read_text(encoding="utf-8")
     assert "claude-memory-server" not in text
     assert "claude_memory_server" not in text
 
 
 def test_the_entry_point_the_templates_name_is_declared():
     """`total-agent-memory` must exist as a console script."""
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     scripts = pyproject["project"]["scripts"]
     assert "total-agent-memory" in scripts
     assert "lookup-memory" in scripts
 
 
 def test_claude_code_template_is_valid_and_points_at_the_entry_point():
-    cfg = json.loads((SKILLS / "templates" / "claude-code-settings.json").read_text())
+    cfg = json.loads((SKILLS / "templates" / "claude-code-settings.json").read_text(encoding="utf-8"))
     assert cfg["mcpServers"]["memory"]["command"] == "total-agent-memory"
     for event, blocks in cfg["hooks"].items():
         for block in blocks:
@@ -65,12 +65,12 @@ def test_claude_code_template_is_valid_and_points_at_the_entry_point():
 
 
 def test_codex_template_is_valid_toml_and_points_at_the_entry_point():
-    cfg = tomllib.loads((SKILLS / "templates" / "codex-config.toml").read_text())
+    cfg = tomllib.loads((SKILLS / "templates" / "codex-config.toml").read_text(encoding="utf-8"))
     assert cfg["mcp"]["servers"]["memory"]["command"] == "total-agent-memory"
     assert cfg["mcp"]["servers"]["memory"]["args"] == []
 
 
 def test_lookup_helper_is_referenced_by_its_installed_name():
     """Sub-agents are told to call `lookup-memory`, not a path into a checkout."""
-    text = (SKILLS / "references" / "subagent-protocol.md").read_text()
+    text = (SKILLS / "references" / "subagent-protocol.md").read_text(encoding="utf-8")
     assert "lookup-memory" in text

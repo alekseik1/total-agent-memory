@@ -10,7 +10,7 @@ Fit a calibrator and write JSON::
 
     python scripts/calibrate.py \
         --train tests/fixtures/calibration_validation.json \
-        --output ~/.claude-memory/calibration.json
+        --output <memory dir>/calibration.json
 
 Reports
 -------
@@ -105,12 +105,12 @@ def _generate_fixture(out_path: Path, *, n_examples: int = 200, seed: int = 42) 
         "examples": examples,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, indent=2))
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _load_fixture(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Read fixture JSON into (scores, labels, categories) arrays."""
-    raw = json.loads(path.read_text())
+    raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or "examples" not in raw:
         raise ValueError(f"fixture {path} missing top-level 'examples'")
     examples = raw["examples"]

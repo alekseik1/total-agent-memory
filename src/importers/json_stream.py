@@ -74,6 +74,8 @@ class _Cursor:
                     self._chunk *= 2
                     continue
                 raise ImportFormatError(f"malformed JSON: {error.msg} at offset {error.pos}") from error
+            except RecursionError as error:
+                raise ImportFormatError("malformed JSON: nested too deeply") from error
             # A number or literal ending exactly at the buffer edge may continue in the next chunk.
             if end == len(self.buffer) and not self.eof and self._fill():
                 continue

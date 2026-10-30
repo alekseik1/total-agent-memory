@@ -389,7 +389,7 @@ def main() -> int:
             "limit_chats": args.limit_chats,
             "llm_enabled": False,
         },
-    }, indent=2))
+    }, indent=2), encoding="utf-8")
     print(f"[beam] report → {out}")
     return 0
 

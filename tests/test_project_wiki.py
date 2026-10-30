@@ -174,7 +174,7 @@ def test_generate_wiki_writes_markdown_file(wdb, tmp_path):
     res = pw.generate_wiki(wdb, "vito", output_dir=out)
     assert res is not None
     assert Path(res.path).exists()
-    content = Path(res.path).read_text()
+    content = Path(res.path).read_text(encoding="utf-8")
     assert "Migration plan" in content
     assert content.startswith("# Project: vito")
     assert res.chars == len(content)

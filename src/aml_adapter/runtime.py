@@ -23,6 +23,10 @@ from aml_adapter.errors import AdapterError, Conflict, Unavailable
 from aml_adapter.fragments import build_fragments, iso_from_ms
 from aml_adapter.logs import configure_logging
 
+# Semantic diagnostics that do not make a search result incomplete.
+INFORMATIONAL_DIAGNOSTICS = frozenset({"stale_vectors", "provider_fallback"})
+
+
 LOGGER = logging.getLogger("aml_adapter.runtime")
 PROJECT = "aml"
 KNOWLEDGE_TYPE = "fact"
@@ -254,7 +258,8 @@ class Runtime:
             return []
         self.store._semantic_diagnostics = []
         result = self.recall.search(query, project=PROJECT, limit=limit, record_usage=False)
-        if result.get("semantic_diagnostics"):
+        # Only a real failure makes the answer incomplete; stale_vectors and provider_fallback are informational.
+        if any(item.get("code") not in INFORMATIONAL_DIAGNOSTICS for item in result.get("semantic_diagnostics") or []):
             raise Unavailable("semantic retrieval is unavailable; retry the request")
         hits = flatten_results(result)
         ranked = sorted(enumerate(hits), key=lambda item: (-_score(item[1]), item[0]))

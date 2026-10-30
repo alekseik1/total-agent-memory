@@ -24,7 +24,7 @@ def database():
     )
     script = (
         Path(__file__).parents[1] / "migrations/031_graph_link_integrity.sql"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     MigrationRunner(db).apply(Migration("031", "graph link integrity", script))
     yield db
     db.close()

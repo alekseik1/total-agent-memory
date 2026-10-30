@@ -296,7 +296,7 @@ def process_rss_bytes(pid: int) -> int | None:
     if os.name != "posix":
         return None
     try:
-        out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True,
+        out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, encoding="utf-8", errors="replace",
                              timeout=5, check=False).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return None

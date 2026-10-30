@@ -108,7 +108,7 @@ def test_group_readable_config_is_refused(tmp_path):
 def test_corrupt_config_is_refused(tmp_path):
     store = FileDatabaseConfigStore(tmp_path, {})
     store.save(web_config(store, None, uuid.uuid4()))
-    (tmp_path / DATABASE_CONFIG_FILE).write_text("{not json")
+    (tmp_path / DATABASE_CONFIG_FILE).write_text("{not json", encoding="utf-8")
     assert refusal(store.load) is StartupRefusal.CONFIG_UNREADABLE
 
 
@@ -400,11 +400,11 @@ def test_env_dsn_on_empty_postgres_starts_a_new_installation(tmp_path, pg_databa
 def test_a_forgotten_dsn_is_refused_instead_of_opening_an_empty_sqlite(tmp_path, pg_database):
     plane = open_control_plane(tmp_path, {DATABASE_URL_ENV: pg_database.url})
     plane.close()
-    marker = PostgresMarker.model_validate_json((tmp_path / POSTGRES_MARKER_FILE).read_text())
+    marker = PostgresMarker.model_validate_json((tmp_path / POSTGRES_MARKER_FILE).read_text(encoding="utf-8"))
     assert marker == PostgresMarker(instance_id=plane.current().instance_id,
                                     target=DatabaseDsn.parse(pg_database.url).host_db())
     assert stat.S_IMODE((tmp_path / POSTGRES_MARKER_FILE).stat().st_mode) == 0o600
-    assert PASSWORD not in (tmp_path / POSTGRES_MARKER_FILE).read_text()
+    assert PASSWORD not in (tmp_path / POSTGRES_MARKER_FILE).read_text(encoding="utf-8")
     assert refusal(lambda: open_control_plane(tmp_path, {})) is StartupRefusal.POSTGRES_DSN_MISSING
     assert not (tmp_path / "identity.db").exists()
 
@@ -414,14 +414,14 @@ def test_a_rollback_to_sqlite_starts_and_drops_the_postgres_marker(tmp_path):
     store = FileDatabaseConfigStore(tmp_path, {})
     store.save(web_config(store, None, instance, generation=2))
     (tmp_path / POSTGRES_MARKER_FILE).write_text(
-        PostgresMarker(instance_id=instance, target="db.internal:5432/tam").model_dump_json())
+        PostgresMarker(instance_id=instance, target="db.internal:5432/tam").model_dump_json(), encoding="utf-8")
     plane = open_control_plane(tmp_path, {})
     assert plane.backend is Backend.SQLITE
     assert not (tmp_path / POSTGRES_MARKER_FILE).exists()
 
 
 def test_an_unreadable_postgres_marker_stops_startup(tmp_path):
-    (tmp_path / POSTGRES_MARKER_FILE).write_text("{not json")
+    (tmp_path / POSTGRES_MARKER_FILE).write_text("{not json", encoding="utf-8")
     assert refusal(lambda: open_control_plane(tmp_path, {})) is StartupRefusal.CONFIG_UNREADABLE
     assert not (tmp_path / "identity.db").exists()
 
@@ -572,7 +572,7 @@ def test_repoint_switches_the_live_plane_and_audits(tmp_path, pg_database):
         assert (view.source, view.generation, recycled) == (ConfigSource.WEB, 1, [1])
         assert registry.list_users()[0]["id"] == "root"
         assert events(plane, DATABASE_REPOINTED)
-        stored = json.loads((tmp_path / DATABASE_CONFIG_FILE).read_text())
+        stored = json.loads((tmp_path / DATABASE_CONFIG_FILE).read_text(encoding="utf-8"))
         assert (stored["generation"], stored["origin"]) == (1, "web")
         options = dict(plane.current().connect_options)
         assert options["passfile"] == str(tmp_path / ".empty-pgpass") and options["sslcertmode"] == "disable"
@@ -733,8 +733,8 @@ def test_web_origin_plane_applies_the_overrides_to_every_connection(tmp_path, pg
 
     home = tmp_path / "home"
     (home / ".postgresql").mkdir(parents=True)
-    (home / ".postgresql" / "postgresql.crt").write_text("not a certificate")
-    (home / ".pgpass").write_text("*:*:*:*:not-the-password\n")
+    (home / ".postgresql" / "postgresql.crt").write_text("not a certificate", encoding="utf-8")
+    (home / ".pgpass").write_text("*:*:*:*:not-the-password\n", encoding="utf-8")
     (home / ".pgpass").chmod(0o600)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("PGSSLCERT", str(home / ".postgresql" / "postgresql.crt"))

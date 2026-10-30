@@ -28,12 +28,12 @@ def main() -> None:
         'server.py', 'memory_core/vector_search.py', 'memory_core/retrieval.py', 'memory_core/vector_math.py',
     )]
     source_hashes = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths if path.exists()}
-    inputs = json.loads((root / f"docs/benchmarks/context-v14/{args.kind}-contexts.json").read_text())
+    inputs = json.loads((root / f"docs/benchmarks/context-v14/{args.kind}-contexts.json").read_text(encoding="utf-8"))
     indexes = np.linspace(0, len(inputs) - 1, min(args.count, len(inputs)), dtype=int)
     questions = [inputs[index] for index in indexes]
     raw_questions = {}
     if args.kind == "longmemeval":
-        raw_questions = {r["question_id"]: r["question"] for r in json.loads((root / "benchmarks/data/longmemeval_s.json").read_text())}
+        raw_questions = {r["question_id"]: r["question"] for r in json.loads((root / "benchmarks/data/longmemeval_s.json").read_text(encoding="utf-8"))}
     with tempfile.TemporaryDirectory(prefix="search-optimization-") as temporary:
         location = Path(temporary)
         with (
@@ -100,7 +100,7 @@ def main() -> None:
                     "single_record_selects": sum(row["single_record_selects"] for row in selected),
                     "vector_loads": sum(row["vector_loads"] for row in selected),
                 }
-            args.output.write_text(json.dumps(report, indent=2))
+            args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
             sys.stdout.write(json.dumps(report["summary"]) + "\n")
         finally:
             store.db.close()

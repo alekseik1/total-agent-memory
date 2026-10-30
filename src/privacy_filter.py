@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 PRIVATE_TAG = re.compile(r"<\s*(/?)private\s*>", re.IGNORECASE)
 
 
-def redact_private_sections(content: str) -> tuple[str, int]:
+def redact_private_sections(content: str, placeholder: str = "") -> tuple[str, int]:
+    """Remove every outermost private section (tags are case- and space-tolerant, nesting-safe).
+
+    An unterminated section hides everything after it. `placeholder` replaces each removed section.
+    """
     if not content:
         return content, 0
     public: list[str] = []
@@ -22,8 +27,21 @@ def redact_private_sections(content: str) -> tuple[str, int]:
         else:
             if depth == 0:
                 redactions += 1
+                public.append(placeholder)
             depth += 1
         cursor = tag.end()
     if depth == 0:
         public.append(content[cursor:])
     return "".join(public), redactions
+
+
+def redact_private_value(value: Any) -> Any:
+    """`redact_private_sections` applied to every string inside a JSON-like value."""
+    if isinstance(value, str):
+        return redact_private_sections(value)[0]
+    if isinstance(value, dict):
+        return {key: redact_private_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        items = [redact_private_value(item) for item in value]
+        return tuple(items) if isinstance(value, tuple) else items
+    return value

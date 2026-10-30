@@ -8,12 +8,14 @@ normal knowledge so we don't accidentally mangle user text.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 # Minimum content length before we bother sniffing — short text never wins.
 MIN_LEN = 100
 
-# Must exceed this density of matches (matches/lines) to classify.
-_MIN_SIGNAL_RATIO = 0.15
+# A line with at least this many alphabetic words and no CLI fingerprint is prose.
+_PROSE_MIN_WORDS = 4
+_WORD_RE = re.compile(r"[^\W\d_]{2,}")
 
 
 # ────────────────────────────────────────────────────────────
@@ -189,3 +191,46 @@ def detect_filter(text: str) -> str | None:
             return name
 
     return None
+
+
+def _is_prose_line(line: str) -> bool:
+    """A sentence written by the user: unindented, several words, no CLI fingerprint."""
+    if not line.strip() or line[0].isspace():
+        return False
+    if len(_WORD_RE.findall(line)) < _PROSE_MIN_WORDS:
+        return False
+    return not any(p.search(line) for _, patterns, _ in _SIGNATURES for p in patterns)
+
+
+def _split_runs(text: str) -> list[tuple[bool, str]]:
+    """Maximal runs of consecutive prose / non-prose lines as `(is_prose, text)`."""
+    runs: list[tuple[bool, list[str]]] = []
+    for line in text.splitlines():
+        prose = _is_prose_line(line)
+        if runs and runs[-1][0] == prose:
+            runs[-1][1].append(line)
+        else:
+            runs.append((prose, [line]))
+    return [(prose, "\n".join(lines)) for prose, lines in runs]
+
+
+def filter_preserving_prose(text: str, apply: Callable[[str], str]) -> str:
+    """Run `apply` over the CLI output in `text` and keep every prose line verbatim.
+
+    A record that mixes an explanation with a pasted traceback or test run keeps the
+    explanation; only the runs of non-prose lines go through the filter. A run the
+    filter would empty is kept as it was (callers must not let `apply` substitute a
+    placeholder). Text with no prose line is filtered whole.
+    """
+    runs = _split_runs(text)
+    if not any(prose for prose, _ in runs):
+        filtered = apply(text)
+        return filtered if filtered.strip() else text
+    kept: list[str] = []
+    for prose, run in runs:
+        if prose or not run.strip():
+            kept.append(run)
+            continue
+        filtered = apply(run)
+        kept.append(filtered if filtered.strip() else run)
+    return "\n".join(kept)

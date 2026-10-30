@@ -161,7 +161,7 @@ def test_contract_modules_do_not_import_the_driver():
 
 
 def test_postgres_extra_is_declared_outside_the_base_install():
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     extra = project["optional-dependencies"]["postgres"]
     assert "psycopg[binary,pool]>=3.2,<4" in extra and "pgvector>=0.3,<1" in extra
     assert not any(dep.startswith(("psycopg", "pgvector")) for dep in project["dependencies"])

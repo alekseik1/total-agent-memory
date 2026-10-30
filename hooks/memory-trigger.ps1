@@ -1,7 +1,7 @@
 # ===========================================
-# Memory Trigger Hook (PowerShell) — twin of hooks/memory-trigger.sh
+# Memory Trigger Hook (PowerShell) - twin of hooks/memory-trigger.sh
 #
-# PostToolUse / PostToolUseFailure:Bash — error capture (self_error_log +
+# PostToolUse / PostToolUseFailure:Bash - error capture (self_error_log +
 # auto_self_improve.py), error->fix pairs, significant commands and
 # test/build/lint success reminders. The decision table is shared with the
 # bash hook in lib/tam_hook.py; output is one

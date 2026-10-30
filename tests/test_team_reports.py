@@ -244,7 +244,7 @@ def test_service_llm_summary_and_missing_workspaces(tmp_path):
 
 
 def test_report_skill_is_well_formed():
-    text = (ROOT / "skills" / "report" / "SKILL.md").read_text()
+    text = (ROOT / "skills" / "report" / "SKILL.md").read_text(encoding="utf-8")
     front = text.split("---")[1]
     assert "name: report" in front and "description:" in front and "argument-hint:" in front
     referenced = set(re.findall(r"`((?:memory)_[a-z_]+)", text))

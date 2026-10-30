@@ -40,7 +40,7 @@ def log(msg: str):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] {msg}\n"
     try:
-        with open(LOG_FILE, "a") as f:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line)
     except Exception:
         pass
@@ -86,7 +86,7 @@ def mark_processed(transcript: Path):
     """Update marker timestamp for processed transcript."""
     MARKER_DIR.mkdir(parents=True, exist_ok=True)
     marker = MARKER_DIR / f"{transcript.stem}.marker"
-    marker.write_text(datetime.now(tz=timezone.utc).isoformat())
+    marker.write_text(datetime.now(tz=timezone.utc).isoformat(), encoding="utf-8")
 
 
 def process_transcript(transcript: Path):
@@ -191,7 +191,7 @@ def capture_tool_observation(
     }
 
     try:
-        fpath.write_text(json.dumps(payload, ensure_ascii=False))
+        fpath.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         return fpath
     except OSError:
         return None

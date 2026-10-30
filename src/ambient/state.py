@@ -105,11 +105,36 @@ class SessionState:
         os.replace(tmp, self.path)
 
 
+CLAIM_PREFIX: Final = "ambient-tooluse-"
+CLAIM_SUFFIX: Final = ".claim"
+MAX_CLAIM_ID_CHARS: Final = 120
+
+
+def claim_tool_use(memory_dir: Path, session_id: str, tool_use_id: str) -> bool:
+    """True for the first hook process that claims this tool call, False for every later one.
+
+    A plugin and a settings.json install both fire for the same call, in parallel; the exclusive create
+    makes exactly one of them record it. A claim that cannot be made (read-only state dir) counts as won,
+    so a broken state directory never silences the action log.
+    """
+    name = f"{CLAIM_PREFIX}{safe_name(session_id)}-{safe_name(tool_use_id)[:MAX_CLAIM_ID_CHARS]}{CLAIM_SUFFIX}"
+    path = Path(memory_dir) / STATE_SUBDIR / name
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
+        return False
+    except OSError as exc:
+        LOGGER.warning(json.dumps({"event": "ambient_claim_failed", "path": str(path), "error": str(exc)}))
+    return True
+
+
 def prune_states(memory_dir: Path, max_age_days: int = STATE_MAX_AGE_DAYS, now: float | None = None) -> int:
     """Remove ambient state files untouched for ``max_age_days``; returns how many."""
     cutoff = (time.time() if now is None else now) - max_age_days * SECONDS_PER_DAY
     removed = 0
-    for path in (Path(memory_dir) / STATE_SUBDIR).glob(f"{STATE_PREFIX}*.json"):
+    state_dir = Path(memory_dir) / STATE_SUBDIR
+    for path in [*state_dir.glob(f"{STATE_PREFIX}*.json"), *state_dir.glob(f"{CLAIM_PREFIX}*{CLAIM_SUFFIX}")]:
         try:
             if path.stat().st_mtime < cutoff:
                 path.unlink()

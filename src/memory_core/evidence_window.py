@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from memory_core.retrieval import MemoryHit, SearchScope
 from memory_core.telemetry import counters, op_timer
+
+NOT_TAGGED_SQL = "instr(lower(COALESCE(k.tags, '')), ?) = 0"
+
+
+def quoted_tag(tag: str) -> str:
+    """JSON-quoted lowercase tag, so only a whole element of the tags array matches. Tags are stored with
+    json.dumps' default escaping (a Cyrillic tag is kept as \\uXXXX), so the pattern is escaped the same way."""
+    return json.dumps(tag.strip().lower(), ensure_ascii=True)
+
 
 MAX_WINDOW_RADIUS = 3
 MAX_WINDOW_RECORDS = 100
@@ -120,8 +130,8 @@ class EvidenceWindow:
     def _predicates(self, scope: SearchScope) -> tuple[list[str], list[str]]:
         predicates, params = scope.sql()
         for tag in self.excluded_tags:
-            predicates.append("instr(lower(COALESCE(k.tags, '')), lower(?)) = 0")
-            params.append(tag)
+            predicates.append(NOT_TAGGED_SQL)
+            params.append(quoted_tag(tag))
         return predicates, params
 
     def _batch_neighbors(

@@ -69,7 +69,7 @@ def _make_dataset(tmp_path: Path) -> Path:
         },
     ]
     p = tmp_path / "loco.json"
-    p.write_text(json.dumps(payload))
+    p.write_text(json.dumps(payload), encoding="utf-8")
     return p
 
 
@@ -133,7 +133,7 @@ def test_write_meta_records_train_ids(tmp_path):
     out_dir = tmp_path / "model"
     out_dir.mkdir()
     triplets = tmp_path / "triplets.jsonl"
-    triplets.write_text('{"anchor":"q","positive":"p","negative":"n"}\n')
+    triplets.write_text('{"anchor":"q","positive":"p","negative":"n"}\n', encoding="utf-8")
     fte.write_meta(
         output_dir=out_dir,
         base_model_name="some-model",
@@ -142,7 +142,7 @@ def test_write_meta_records_train_ids(tmp_path):
         n_triplets=1,
         hard_neg_per_pos=4,
     )
-    meta = json.loads((out_dir / "locomo_meta.json").read_text())
+    meta = json.loads((out_dir / "locomo_meta.json").read_text(encoding="utf-8"))
     assert meta["base_model"] == "some-model"
     assert meta["train_conv_ids"] == [0, 1, 2]
     assert meta["n_triplets"] == 1

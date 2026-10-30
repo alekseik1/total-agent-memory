@@ -1,6 +1,6 @@
 {
   "date": "2026-04-27",
-  "dataset": "/Users/vitalii-macpro/claude-memory-server/benchmarks/data/longmemeval_s_cleaned.json",
+  "dataset": "~/claude-memory-server/benchmarks/data/longmemeval_s_cleaned.json",
   "sample": 30,
   "stratified": false,
   "k": [
