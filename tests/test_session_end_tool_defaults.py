@@ -42,7 +42,7 @@ def test_the_handler_falls_back_to_the_live_sid():
     carries the same `or SID` idiom, and a bare match on it passes while this
     handler is broken.
     """
-    src = inspect.getsource(server._do)
+    src = inspect.getsource(server._dispatch_tool)
     assert 'a.get("session_id") or SID, a.get("summary")' in src
 
 
@@ -50,4 +50,4 @@ def test_branch_reaches_session_end():
     """The row's branch came out empty because the tool never forwarded one."""
     schema = _schema(_session_end_tool())
     assert "branch" in schema["properties"]
-    assert 'branch=a.get("branch", BRANCH)' in inspect.getsource(server._do)
+    assert 'branch=a.get("branch", BRANCH)' in inspect.getsource(server._dispatch_tool)

@@ -58,8 +58,8 @@ class TestCognitiveEngine:
 
     def test_build_context_fts_fallback_survives_hyphenated_words(self, db, engine):
         db.execute(
-            "INSERT INTO knowledge (type, content, project, status, created_at) "
-            "VALUES ('fact', 'api-gateway timeout is 30 seconds', 'myproject', 'active', '2026-01-01')"
+            "INSERT INTO knowledge (session_id, type, content, project, status, created_at) "
+            "VALUES ('s1', 'fact', 'api-gateway timeout is 30 seconds', 'myproject', 'active', '2026-01-01')"
         )
         ctx = engine.build_context("api-gateway timeout", project="myproject")
         assert [item["content"] for item in ctx["knowledge"]] == ["api-gateway timeout is 30 seconds"]

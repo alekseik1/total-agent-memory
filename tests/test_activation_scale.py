@@ -65,9 +65,9 @@ def test_spread_skips_hub_nodes(activation, graph_store, monkeypatch):
     assert behind_busy not in activated
 
 
-def test_activated_memories_accept_more_nodes_than_sqlite_binds(db, activation):
+def test_activated_memories_accept_more_nodes_than_sqlite_binds(db, activation, graph_store):
     insert_knowledge(db, 1)
-    node = "n0"
+    node = graph_store.add_node("concept", "n0")
     db.execute("INSERT INTO knowledge_nodes (knowledge_id, node_id, role, strength) VALUES (1, ?, 'mentions', 1.0)", (node,))
     db.commit()
     huge = {f"n{i}": 0.5 for i in range(20000)}

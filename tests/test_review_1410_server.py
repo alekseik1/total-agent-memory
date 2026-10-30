@@ -577,8 +577,8 @@ def test_ingest_codebase_sample_is_redacted(live, monkeypatch, tmp_path_factory)
 def test_cognitive_additional_solutions_skip_excluded_tags(live, monkeypatch):
     server, _, _ = live
     solutions = [
-        {"id": 9001, "content": "noise", "tags": '["recovery"]'},
-        {"id": 9002, "content": "kept", "tags": '["disaster-recovery"]'},
+        {"id": 9001, "project": "p", "content": "noise", "tags": '["recovery"]'},
+        {"id": 9002, "project": "p", "content": "kept", "tags": '["disaster-recovery"]'},
     ]
 
     class FakeEngine:
