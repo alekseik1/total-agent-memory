@@ -32,7 +32,7 @@ import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from background_writes import sanitize_text
+from background_writes import PRIVATE_PLACEHOLDER, sanitize_text
 from paths import memory_dir
 from session_continuity import SessionContinuity
 from stdio_utf8 import use_utf8_stdio
@@ -50,9 +50,10 @@ def _llm_available() -> bool:
         return False
 
 
-def build_summary(reason: str, assistant_context: str) -> str:
+def build_summary(reason: str, assistant: str) -> str:
+    """``assistant`` is already sanitized."""
     reason = sanitize_text(reason)
-    assistant = sanitize_text((assistant_context or "").strip())[:800]
+    assistant = assistant[:800]
     parts = [f"Session ended: {reason}." if reason else "Session ended."]
     if assistant:
         parts.append(f"Assistant context: {assistant}")
@@ -75,7 +76,7 @@ def main() -> int:
         context = {}
     if not isinstance(context, dict):
         context = {}
-    assistant_context = str(context.get("assistant") or "")
+    assistant = sanitize_text(str(context.get("assistant") or "")).strip()
 
     if not os.path.exists(DB_PATH):
         print(f"Memory DB not found at {DB_PATH}", file=sys.stderr)
@@ -85,19 +86,19 @@ def main() -> int:
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA busy_timeout=15000")
     try:
-        # No assistant text means nothing worth resuming from (user prompts are
-        # never stored) - a summary saying only "session ended" costs a row
-        # and tells the next session nothing. The `sessions` row must still
-        # close, though: this cannot early-return before that, or every such
-        # session keeps ended_at NULL forever.
-        if not assistant_context.strip():
+        # No assistant text left after redaction means nothing worth resuming
+        # from (user prompts are never stored) - a summary saying only
+        # "session ended" costs a row and tells the next session nothing. The
+        # `sessions` row must still close, though: this cannot early-return
+        # before that, or every such session keeps ended_at NULL forever.
+        if not assistant.replace(PRIVATE_PLACEHOLDER, "").strip():
             SessionContinuity(db).close_session_row(
                 a.session_id, project=a.project, branch=a.branch or None
             )
             db.commit()
             return 0
 
-        fallback = build_summary(a.reason, assistant_context)
+        fallback = build_summary(a.reason, assistant)
         # With an LLM reachable, let it write the summary from the session's
         # own artifacts - the handful of messages the hook could extract is a
         # thin thing to resume from. `session_end` only asks the LLM when

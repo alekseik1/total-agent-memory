@@ -107,6 +107,17 @@ def test_the_stored_assistant_context_is_capped_at_800_chars(memory_dir):
     assert "x" * 801 not in summary
 
 
+def test_an_all_private_assistant_message_writes_nothing(memory_dir):
+    r = _run(memory_dir, session_id="private_sess", project="p",
+             reason="User exited", assistant_context="<private>secret</private>")
+
+    assert r.returncode == 0, r.stderr
+    assert _rows(memory_dir, "SELECT * FROM session_summaries") == []
+    sessions = _rows(memory_dir, "SELECT * FROM sessions WHERE id='private_sess'")
+    assert len(sessions) == 1
+    assert sessions[0]["ended_at"] is not None
+
+
 def test_a_session_with_nothing_extracted_writes_nothing(memory_dir):
     """A summary saying only "session ended" tells the next session nothing,
     but the `sessions` row must still close - S4: an early return before
