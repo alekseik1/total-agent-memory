@@ -160,7 +160,7 @@ class RepresentationsQueue:
                     # Validator guard: compressed MUST preserve URLs/paths/code.
                     # Reject silently if LLM dropped anything critical — raw stays.
                     if name == "compressed":
-                        v = self.validator.validate(raw_content, text, strict_paths=True)
+                        v = self.validator.validate(raw_content, text)
                         if not v.ok:
                             LOG(
                                 f"compressed rejected for kid={kid}: "

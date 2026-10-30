@@ -300,7 +300,7 @@ class FactMerger:
 
         # Validate: merged must preserve critical elements from combined source
         combined = "\n\n".join(contents)
-        v = self.validator.validate(combined, merged_text, strict_paths=True)
+        v = self.validator.validate(combined, merged_text)
         if not v.ok:
             LOG(f"validator rejected merge: {v.errors}")
             return {

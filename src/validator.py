@@ -31,14 +31,16 @@ _CODE_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _URL_RE = re.compile(r"https?://[^\s<>`'\"()]+")
 _URL_TRAILING_PUNCT = ".,;:!?"
 
-# Absolute paths (/Users/..., /etc/...) and tilde paths (~/...).
+# Absolute paths (/Users/..., /etc/...), tilde paths (~/...), and relative
+# paths that carry a recognized code/doc extension (alembic/versions/x.py).
 # A slash may only start a path at the beginning of the text/line or after
 # whitespace/quote/bracket/`=`/`:`/`,`/`|`/`<`/`>`/`;`/backtick/`*`, so prose
 # like "EU/Russia" is ignored while "db=/var/x", "|/etc/hosts|" and
 # "**/etc/hosts**" are still matched.
 _PATH_BOUNDARY = r"""(?:(?<=^)|(?<=[\s'"(\[{=:,|<>;`*]))"""
 
-# Extensions that make a single-segment absolute path (/README.md) count.
+# Extensions that make a single-segment absolute path (/README.md) or a
+# relative path (a/b.py) count.
 _CODE_EXT = r"(?:py|sql|md|json|ya?ml|toml|sh|ts|js|txt|ini|cfg|go|rs|tsx|jsx)"
 
 _SEG = r"[A-Za-z0-9_.\-]+"
@@ -53,8 +55,12 @@ _ABS_BODY = rf"(?:{_ABS_MULTI_OR_TRAILING}|{_ABS_EXT_SINGLE})"
 # Tilde paths count from one segment (~/.bashrc).
 _TILDE_BODY = rf"{_SEG}(?:/{_SEG})*/?"
 
+# Relative body: >=2 segments, final one gated on _CODE_EXT (not "any
+# extension") so numeric/version tuples don't qualify as extensions.
+_REL_BODY = rf"{_SEG}(?:/{_SEG})+\.{_CODE_EXT}\b"
+
 _PATH_RE = re.compile(
-    _PATH_BOUNDARY + rf"(?:~/{_TILDE_BODY}|/{_ABS_BODY})",
+    _PATH_BOUNDARY + rf"(?:~/{_TILDE_BODY}|/{_ABS_BODY}|{_REL_BODY})",
     re.MULTILINE,
 )
 

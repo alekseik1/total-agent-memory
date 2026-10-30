@@ -143,6 +143,7 @@ def test_tilde_path_preserved():
         pytest.param("| file |/etc/hosts| x |", "/etc/hosts", id="table-cell"),
         pytest.param("See </etc/hosts> here.", "/etc/hosts", id="autolink"),
         pytest.param("set a;/etc/hosts here", "/etc/hosts", id="semicolon"),
+        pytest.param("See alembic/versions/485866bf9d39_update_checkin.py here.", "alembic/versions/485866bf9d39_update_checkin.py", id="relative-ext"),
     ],
 )
 def test_path_detected_when_lost(orig, lost):
