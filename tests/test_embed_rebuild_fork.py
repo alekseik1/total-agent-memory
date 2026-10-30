@@ -22,7 +22,7 @@ class _Embedder:
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
+def store(monkeypatch):
     """A Store with no real backends - each test wires the ones it needs."""
     s = server.Store.__new__(server.Store)
     s.db = sqlite3.connect(":memory:")
@@ -35,7 +35,9 @@ def store(tmp_path, monkeypatch):
     s._embed_mode = "fastembed"
     s._binary_search_ready = None
     s._chroma_client = None
-    return s
+    monkeypatch.setattr(server, "store", s)  # the tool handler reads the module global
+    yield s
+    s.db.close()
 
 
 def _seed(store, kid, model, dim, provider):
@@ -51,13 +53,27 @@ def _rebuild(store, **args):
     """Drive the real tool handler, not a copy of its query."""
     import asyncio
 
-    server.store = store
     # _do returns a JSON string (server.J), not an MCP content object.
     return json.loads(asyncio.run(server._do("memory_rebuild_embeddings", args)))
 
 
 class _L2:
     enabled = True
+
+
+class _PartialCache:
+    """L2 holding only 'alpha'; records what gets re-cached."""
+
+    l2 = _L2()
+
+    def __init__(self):
+        self.sets: list[tuple[str, int, str]] = []
+
+    def embed_get(self, text, expected_model=None):
+        return [0.5] * 768 if text == "alpha" else None
+
+    def embed_set(self, text, vector, model):
+        self.sets.append((text, len(vector), model))
 
 
 # ──────────────────────────────────────────────
@@ -222,19 +238,6 @@ def test_a_batch_with_a_partial_cache_hit_does_not_mix_backends(store, monkeypat
     store._embedder = _Embedder(384)
     monkeypatch.setattr(store, "_ollama_embed", lambda batch: None)
     active = store._active_embed_model_name()
-
-    class _PartialCache:
-        l2 = _L2()
-
-        def __init__(self):
-            self.sets: list[tuple[str, int, str]] = []
-
-        def embed_get(self, text, expected_model=None):
-            return [0.5] * 768 if text == "alpha" else None
-
-        def embed_set(self, text, vector, model):
-            self.sets.append((text, len(vector), model))
-
     store.v9_cache = _PartialCache()
 
     vectors, identity = store.embed_identified(["alpha", "beta"])
@@ -262,16 +265,6 @@ def test_a_flapping_backend_does_not_mix_backends_in_one_batch(store, monkeypatc
         return [[0.9] * 768 for _ in batch]  # recovered for the redo
 
     monkeypatch.setattr(store, "_ollama_embed", _flapping_ollama)
-
-    class _PartialCache:
-        l2 = _L2()
-
-        def embed_get(self, text, expected_model=None):
-            return [0.5] * 768 if text == "alpha" else None
-
-        def embed_set(self, text, vector, model):
-            pass
-
     store.v9_cache = _PartialCache()
 
     vectors, identity = store.embed_identified(["alpha", "beta"])
