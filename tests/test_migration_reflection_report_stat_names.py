@@ -98,7 +98,7 @@ def test_migration_is_a_no_op_before_reflection_reports_exists():
 
 def _sql_only(path: Path) -> str:
     lines = []
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if stripped and not stripped.startswith("--"):
             lines.append(stripped)

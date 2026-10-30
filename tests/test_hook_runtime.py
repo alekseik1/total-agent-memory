@@ -260,7 +260,7 @@ class TestQuietHooks:
         saved = run_hook(bash, "post-tool-use.sh", {**base, "tool_name": "mcp__memory__memory_save", **SUBAGENT}, env)
         outputs = [run_hook(bash, "post-tool-use.sh", {**base, "tool_name": "Edit"}, env) for _ in range(3)]
         assert saved.stdout == b"" and all(proc.stdout == b"" for proc in outputs)
-        state = json.loads((world["mem"] / "state" / "nudge-sd.json").read_text())
+        state = json.loads((world["mem"] / "state" / "nudge-sd.json").read_text(encoding="utf-8"))
         assert state["memory_saves"] == 1 and state["edits"] == 3
 
     def test_override_restores_nudge_in_subagents(self, bash, world):
@@ -445,7 +445,7 @@ class TestSessionEnd:
         project_dir = world["home"] / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
         project_dir.mkdir(parents=True)
         (project_dir / "other-session.jsonl").write_text(
-            "\n".join(json.dumps(e) for e in NESTED_TRANSCRIPT) + "\n")
+            "\n".join(json.dumps(e) for e in NESTED_TRANSCRIPT) + "\n", encoding="utf-8")
         calls: list[tuple[str, list[str]]] = []
         tam_hook.session_end(
             {"session_id": "live-session", "cwd": str(cwd)},

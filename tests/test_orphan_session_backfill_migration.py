@@ -38,7 +38,7 @@ def _summary(db, sid, *, project="core-monorepo", branch="dev", ended_at="2026-0
 
 
 def _apply(db):
-    db.executescript(MIGRATION.read_text())
+    db.executescript(MIGRATION.read_text(encoding="utf-8"))
     db.commit()
 
 

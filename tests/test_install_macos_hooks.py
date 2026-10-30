@@ -65,7 +65,8 @@ def _write_launchctl_stub(bin_dir: Path, log_path: Path) -> Path:
     stub.write_text(
         "#!/usr/bin/env bash\n"
         f'printf "%s\\n" "$*" >> "{log_path}"\n'
-        "exit 0\n"
+        "exit 0\n",
+        encoding="utf-8",
     )
     stub.chmod(0o755)
     return stub
@@ -117,13 +118,13 @@ def test_install_preserves_existing_hooks_by_default(sandbox_home: Path):
     hooks_dir = sandbox_home / ".claude" / "hooks"
     hooks_dir.mkdir(parents=True)
     custom_content = "#!/usr/bin/env bash\n# USER-CUSTOMIZED\nexit 0\n"
-    (hooks_dir / "session-start.sh").write_text(custom_content)
+    (hooks_dir / "session-start.sh").write_text(custom_content, encoding="utf-8")
 
     result = _run_install(sandbox_home, "--ide", "claude-code")
     assert result.returncode == 0, result.stderr
 
     # Still the user's version
-    assert (hooks_dir / "session-start.sh").read_text() == custom_content
+    assert (hooks_dir / "session-start.sh").read_text(encoding="utf-8") == custom_content
     # But new v8 hooks that weren't there before DID get installed
     assert (hooks_dir / "user-prompt-submit.sh").is_file()
 
@@ -131,7 +132,7 @@ def test_install_preserves_existing_hooks_by_default(sandbox_home: Path):
 def test_install_overwrite_hooks_env_forces_replace(sandbox_home: Path):
     hooks_dir = sandbox_home / ".claude" / "hooks"
     hooks_dir.mkdir(parents=True)
-    (hooks_dir / "session-start.sh").write_text("#!/bin/sh\nexit 99\n")
+    (hooks_dir / "session-start.sh").write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
 
     result = _run_install(
         sandbox_home,
@@ -140,7 +141,7 @@ def test_install_overwrite_hooks_env_forces_replace(sandbox_home: Path):
     )
     assert result.returncode == 0, result.stderr
 
-    content = (hooks_dir / "session-start.sh").read_text()
+    content = (hooks_dir / "session-start.sh").read_text(encoding="utf-8")
     assert "exit 99" not in content, "INSTALL_OVERWRITE_HOOKS=1 must replace the file"
 
 
@@ -159,7 +160,7 @@ def test_non_claude_code_ide_does_not_install_hooks(sandbox_home: Path):
 def _load_settings(home: Path) -> dict:
     path = home / ".claude" / "settings.json"
     assert path.exists(), "settings.json must exist after claude-code install"
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _all_commands(hooks_block) -> list[str]:
@@ -284,7 +285,7 @@ def test_uninstall_removes_launchagents(sandbox_home: Path, tmp_path: Path):
         "com.claude.memory.orphan-backfill.plist",
         "com.claude.memory.check-updates.plist",
     ]:
-        (la_dir / name).write_text("<plist/>")
+        (la_dir / name).write_text("<plist/>", encoding="utf-8")
 
     result = _run_install(sandbox_home, "--uninstall", fake_launchctl=stub)
     assert result.returncode == 0, result.stderr
@@ -293,7 +294,7 @@ def test_uninstall_removes_launchagents(sandbox_home: Path, tmp_path: Path):
     assert not remaining, f"plists must be removed, found: {remaining}"
 
     # launchctl bootout must have been invoked for each label.
-    log = launchctl_log.read_text() if launchctl_log.exists() else ""
+    log = launchctl_log.read_text(encoding="utf-8") if launchctl_log.exists() else ""
     assert "bootout" in log
     assert "com.claude.memory.reflection" in log
     assert "com.claude.memory.orphan-backfill" in log
@@ -310,14 +311,14 @@ def test_uninstall_preserves_memory_db(sandbox_home: Path, tmp_path: Path):
     db = mem_dir / "memory.db"
     db.write_bytes(b"PRECIOUS USER DATA")
     (mem_dir / "raw").mkdir()
-    (mem_dir / "raw" / "note.txt").write_text("user note")
+    (mem_dir / "raw" / "note.txt").write_text("user note", encoding="utf-8")
 
     result = _run_install(sandbox_home, "--uninstall", fake_launchctl=stub)
     assert result.returncode == 0, result.stderr
 
     assert db.exists(), "memory.db must NOT be deleted by --uninstall"
     assert db.read_bytes() == b"PRECIOUS USER DATA"
-    assert (mem_dir / "raw" / "note.txt").read_text() == "user note"
+    assert (mem_dir / "raw" / "note.txt").read_text(encoding="utf-8") == "user note"
 
 
 # ---------- LaunchAgent plist installation (real run, not test mode) ----------
@@ -398,8 +399,8 @@ def test_launchagents_substitute_install_dir_and_memory_dir(
     }
 
     for plist in plists:
-        body = plist.read_text()
-        template = (ROOT / "launchagents" / plist.name).read_text()
+        body = plist.read_text(encoding="utf-8")
+        template = (ROOT / "launchagents" / plist.name).read_text(encoding="utf-8")
         checked_placeholders = []
         for placeholder, value in placeholder_values.items():
             assert placeholder not in body, (
@@ -430,12 +431,12 @@ def test_uninstall_preserves_settings_json(sandbox_home: Path, tmp_path: Path):
     settings.write_text(json.dumps({
         "mcpServers": {"memory": {"command": "python3"}, "other": {"command": "x"}},
         "hooks": {"SessionStart": []},
-    }))
+    }), encoding="utf-8")
 
     result = _run_install(sandbox_home, "--uninstall", fake_launchctl=stub)
     assert result.returncode == 0, result.stderr
 
     assert settings.exists()
-    data = json.loads(settings.read_text())
+    data = json.loads(settings.read_text(encoding="utf-8"))
     # Both entries still there (uninstall is informational re: MCP config).
     assert "other" in data["mcpServers"]

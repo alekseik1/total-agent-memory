@@ -229,7 +229,7 @@ def test_repair_lets_upstream_035_and_the_900s_reapply(runner):
         "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'vector_revision_%'"
     ).fetchall():
         runner.db.execute(f"DROP TRIGGER {name}")
-    runner.db.executescript((ROOT / "migrations" / "032_vector_index_revision.sql").read_text())
+    runner.db.executescript((ROOT / "migrations" / "032_vector_index_revision.sql").read_text(encoding="utf-8"))
     runner.db.execute("DROP INDEX idx_graph_nodes_matchable")
     # That database predates upstream's real 038/039 too: undo their
     # non-idempotent ALTERs (and 038's table) so they genuinely re-apply.

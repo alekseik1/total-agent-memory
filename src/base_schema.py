@@ -23,7 +23,7 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 def base_schema_sql() -> str:
     """Return the base schema DDL as an executescript-ready string."""
-    return BASE_SCHEMA_PATH.read_text()
+    return BASE_SCHEMA_PATH.read_text(encoding="utf-8")
 
 
 def apply_full_schema(db: sqlite3.Connection) -> None:
@@ -41,7 +41,7 @@ def apply_full_schema(db: sqlite3.Connection) -> None:
     apply_core_column_migrations(db)
     apply_self_improvement_tables(db)
     for sql_path in sorted(MIGRATIONS_DIR.glob("*.sql")):
-        db.executescript(sql_path.read_text())
+        db.executescript(sql_path.read_text(encoding="utf-8"))
     apply_reflection_report_column_migrations(db)
 
 

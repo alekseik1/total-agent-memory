@@ -529,13 +529,13 @@ def test_a_skipped_hook_call_does_not_repaint_the_live_document(sc, sc_db, monke
     sc.session_end("sess_md", "the real summary", project="p", producer="tool")
 
     doc_path = active_context_path("p", vault_root=get_active_context_vault())
-    before = doc_path.read_text()
+    before = doc_path.read_text(encoding="utf-8")
 
     _at(monkeypatch, "2026-09-21T10:00:30Z")  # inside the window
     r = sc.session_end("sess_md", "hook floor text", project="p", producer="hook")
 
     assert r.get("deduped") is True
-    assert doc_path.read_text() == before
+    assert doc_path.read_text(encoding="utf-8") == before
 
 
 def test_a_skipped_call_returns_the_id_of_the_row_left_alone(sc, sc_db, monkeypatch):

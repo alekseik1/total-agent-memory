@@ -30,7 +30,7 @@ def git_worktree(tmp_path: Path) -> tuple[Path, Path]:
     subprocess.run(["git", "init", "-q"], cwd=main, check=True)
     subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=main, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=main, check=True)
-    (main / "f.txt").write_text("x")
+    (main / "f.txt").write_text("x", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=main, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=main, check=True)
     worktree = tmp_path / "wt-unrelated-dirname"
@@ -70,14 +70,14 @@ def test_session_end_hook_logs_the_main_repo_from_a_worktree(git_worktree, tmp_p
     for path in world.values():
         path.mkdir()
     transcript = tmp_path / "abc-123.jsonl"
-    transcript.write_text("\n".join(json.dumps(e) for e in NESTED_TRANSCRIPT) + "\n")
+    transcript.write_text("\n".join(json.dumps(e) for e in NESTED_TRANSCRIPT) + "\n", encoding="utf-8")
 
     proc = run_hook(shutil.which("bash"), "session-end.sh", {
         "hook_event_name": "SessionEnd", "session_id": "end-wt", "cwd": str(worktree),
         "reason": "prompt_input_exit", "transcript_path": str(transcript)}, hook_env(world, REPO_ROOT))
 
     assert proc.returncode == 0, proc.stderr
-    log = (world["mem"] / "hooks.log").read_text()
+    log = (world["mem"] / "hooks.log").read_text(encoding="utf-8")
     assert f"SESSION_END {main.name.lower()}:" in log
     assert f"SESSION_END {worktree.name}" not in log
 
