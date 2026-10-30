@@ -112,11 +112,24 @@ def test_a_session_with_nothing_extracted_writes_nothing(memory_dir):
     assert sessions[0]["project"] == "p"
 
 
+def test_a_user_only_session_writes_nothing(memory_dir):
+    """User prompts are never stored, so a summary built from them alone
+    would only say "session ended"."""
+    r = _run(memory_dir, session_id="user_only_sess", project="p",
+             reason="User exited", user_context="fix the wearables CSV")
+
+    assert r.returncode == 0, r.stderr
+    assert _rows(memory_dir, "SELECT * FROM session_summaries") == []
+    sessions = _rows(memory_dir, "SELECT * FROM sessions WHERE id='user_only_sess'")
+    assert len(sessions) == 1
+    assert sessions[0]["ended_at"] is not None
+
+
 def test_a_second_end_seconds_later_is_not_written_twice(memory_dir):
     """/clear and /compact fire the hook too, and can land seconds apart."""
     for _ in range(2):
         r = _run(memory_dir, session_id="dup_sess", project="p",
-                 reason="User ran /clear", user_context="same work")
+                 reason="User ran /clear", assistant_context="same work")
         assert r.returncode == 0, r.stderr
 
     assert len(_rows(memory_dir, "SELECT * FROM session_summaries")) == 1
@@ -156,7 +169,7 @@ def test_the_hook_producer_argument_is_actually_wired(memory_dir):
     proves the literal actually reaches session_end rather than the
     default."""
     r = _run(memory_dir, session_id="pin_sess", project="p", reason="User exited",
-              user_context="first work")
+              assistant_context="first work")
     assert r.returncode == 0, r.stderr
 
     db = sqlite3.connect(memory_dir / "memory.db")
@@ -165,7 +178,7 @@ def test_the_hook_producer_argument_is_actually_wired(memory_dir):
     db.close()
 
     r2 = _run(memory_dir, session_id="pin_sess", project="p", reason="User ran /clear",
-               user_context="second work")
+               assistant_context="second work")
     assert r2.returncode == 0, r2.stderr
 
     # producer="hook" always skips within the window, regardless of

@@ -69,7 +69,6 @@ def main() -> int:
     a = p.parse_args()
     use_utf8_stdio()
     context = json.loads(sys.stdin.read() or "{}")
-    user_context = str(context.get("user") or "")
     assistant_context = str(context.get("assistant") or "")
 
     if not os.path.exists(DB_PATH):
@@ -80,12 +79,12 @@ def main() -> int:
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA busy_timeout=15000")
     try:
-        # Nothing extracted means nothing worth resuming from - a summary
-        # saying only "session ended" costs a row and tells the next session
-        # nothing. The `sessions` row must still close, though: this cannot
-        # early-return before that, or every session where the hook extracted
-        # nothing at all keeps ended_at NULL forever.
-        if not user_context.strip() and not assistant_context.strip():
+        # No assistant text means nothing worth resuming from (user prompts are
+        # never stored) - a summary saying only "session ended" costs a row
+        # and tells the next session nothing. The `sessions` row must still
+        # close, though: this cannot early-return before that, or every such
+        # session keeps ended_at NULL forever.
+        if not assistant_context.strip():
             SessionContinuity(db).close_session_row(
                 a.session_id, project=a.project, branch=a.branch or None
             )
