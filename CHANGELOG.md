@@ -10,7 +10,15 @@ and versions use [Semantic Versioning](https://semver.org/).
 - The SessionEnd hook hands `auto_session_end.py` its context on stdin, as
   upstream 14.10.0 does for its own child; argv carries only ids. The
   session summary no longer stores the user's prompt; the assistant context
-  it keeps is stripped of `<private>` blocks and secrets first.
+  it keeps is stripped of `<private>` blocks and secrets first. A session
+  with no assistant text writes no summary row, and unreadable stdin still
+  closes the session.
+
+### Changed - reflection dedup follows upstream 14.10.0
+- The fork's `real_quick_ratio`/`quick_ratio` pre-screen in
+  `merge_duplicates` is replaced by upstream's token blocking. Pairs whose
+  token Jaccard is below 0.6 are no longer compared, so typo-heavy
+  near-duplicates the fork used to merge now stay active.
 
 ### Changed - hint hooks stay out of subagents
 - Rule reminders and `MEMORY_NUDGE` are skipped for calls whose payload

@@ -296,7 +296,7 @@ filtered by current project + phase. The `phase` filter uses
 `phase:X` tags (zero-migration mechanic). `limit` caps the number of
 rules returned (default: unset - no cap; also settable via the
 `MEMORY_RULES_LIMIT` env var). Only rules actually returned get their
-`fire_count`/`last_fired` bumped, which feeds the `self_patterns`
+`shown_count`/`last_fired` bumped, which feeds the `self_patterns`
 `rule_effectiveness` report - narrowing `limit` also narrows that
 telemetry.
 
