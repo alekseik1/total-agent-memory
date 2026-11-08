@@ -31,10 +31,12 @@ def _count_lines(text: str) -> int:
 
 
 def save_session_context(project: str, cwd: str, reason: str,
-                         user_context: str, assistant_context: str) -> None:
+                         user_context: str, assistant_context: str,
+                         db_path: str | os.PathLike | None = None) -> None:
     """Save session context to memory.db as a fact."""
-    if not os.path.exists(DB_PATH):
-        print(f"Memory DB not found at {DB_PATH}", file=sys.stderr)
+    db_file = os.fspath(db_path) if db_path is not None else DB_PATH
+    if not os.path.exists(db_file):
+        print(f"Memory DB not found at {db_file}", file=sys.stderr)
         return
 
     user_text = redact_secrets(user_context.strip())[0] if user_context else ""
@@ -56,7 +58,7 @@ def save_session_context(project: str, cwd: str, reason: str,
     tags = json.dumps(["session-autosave", "context-recovery", project])
 
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
 
         # Check for recent duplicate (same project, within 5 minutes)

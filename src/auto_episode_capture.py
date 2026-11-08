@@ -275,8 +275,13 @@ def capture_episode(
     db_path: str,
     project: str = "general",
     transcript_path_arg: str | None = None,
+    messages: list[dict] | None = None,
 ) -> None:
-    """Main entry point: capture episode from session transcript."""
+    """Main entry point: capture episode from session transcript.
+
+    ``messages`` is the pre-extracted message list (remote transport sends it
+    instead of a transcript path); when given, no file is read.
+    """
     LOG(f"Capturing episode for session {session_id} (project: {project})")
 
     db = sqlite3.connect(db_path)
@@ -297,16 +302,17 @@ def capture_episode(
         return
 
     # Find transcript
-    transcript_path = find_transcript(session_id, transcript_path_arg)
-    if transcript_path is None:
-        LOG(f"No transcript found for session {session_id}")
-        db.close()
-        return
+    if messages is None:
+        transcript_path = find_transcript(session_id, transcript_path_arg)
+        if transcript_path is None:
+            LOG(f"No transcript found for session {session_id}")
+            db.close()
+            return
 
-    LOG(f"Found transcript: {transcript_path}")
+        LOG(f"Found transcript: {transcript_path}")
 
-    # Extract messages
-    messages = extract_messages_from_transcript(transcript_path)
+        # Extract messages
+        messages = extract_messages_from_transcript(transcript_path)
     if len(messages) < 3:
         LOG(f"Too few messages ({len(messages)}), skipping episode capture")
         db.close()

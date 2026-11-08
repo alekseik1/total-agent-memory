@@ -15,12 +15,13 @@ import json
 import os
 import sqlite3
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from ambient.actions import ActionLog, build_action, log_event, parse_exit_code, status_for, table_exists
+from ambient.actions import (ActionLog, build_action, build_remote_action, log_event, parse_exit_code,
+                             status_for, table_exists)
 from ambient.settings import AmbientSettings
 from ambient.state import claim_tool_use
 
@@ -102,6 +103,34 @@ def record_action(call: HookCall, memory_dir: Path) -> str:
             log_event("action_not_logged", reason="agent_actions missing; start the TAM server once to migrate")
             return ""
         ActionLog(db).record(action, retention_days=settings.action_log_retention_days)
+    finally:
+        db.close()
+    return ""
+
+
+def record_actions(call: HookCall, actions: Sequence[Mapping[str, Any]], memory_dir: Path) -> str:
+    """Batch variant of record_action: the client already summarised each call.
+
+    Rows are inserted in payload order - the Stop hook's turn boundary depends
+    on it when several tool calls flush at once.
+    """
+    settings = AmbientSettings.load(memory_dir)
+    db_path = memory_dir / MEMORY_DB_NAME
+    if not settings.action_log or not db_path.is_file():
+        return ""
+    db = sqlite3.connect(str(db_path), timeout=SQLITE_TIMEOUT_SEC)
+    try:
+        if not table_exists(db, "agent_actions"):
+            log_event("action_not_logged", reason="agent_actions missing; start the TAM server once to migrate")
+            return ""
+        log = ActionLog(db)
+        for item in actions:
+            action = build_remote_action(
+                ts=str(item.get("ts") or ""), tool=str(item.get("tool") or ""),
+                summary=str(item.get("summary") or ""), status=str(item.get("status") or ""),
+                exit_code=item.get("exit_code"), session_id=call.session_id, project=call.project)
+            if action is not None:
+                log.record(action, retention_days=settings.action_log_retention_days)
     finally:
         db.close()
     return ""

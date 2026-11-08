@@ -156,6 +156,37 @@ def build_action(*, tool: str, tool_input: Mapping[str, Any] | None, session_id:
     )
 
 
+def build_remote_action(*, ts: str, tool: str, summary: str, status: str, exit_code: Any,
+                        session_id: str, project: str, client: str = CLIENT_CLAUDE,
+                        now: datetime | None = None) -> AgentAction | None:
+    """An action whose summary the caller already extracted (remote hook transport).
+
+    Same bounds and redaction as :func:`build_action`, but the text arrives
+    ready-made instead of being derived from a tool input. None without a tool
+    name or for a read-only lookup tool, exactly like ``build_action``.
+    """
+    name = _one_line(tool)[:MAX_TOOL_CHARS]
+    if not name or name in UNLOGGED_TOOLS:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(ts))
+    except (TypeError, ValueError):
+        moment = now or datetime.now(UTC)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    clean_status: Status = status if status in (STATUS_OK, STATUS_FAILED, STATUS_INTERRUPTED) else STATUS_OK
+    return AgentAction(
+        ts=format_utc(moment),
+        client=client,
+        session_id=(session_id or "")[:MAX_ID_CHARS],
+        project=(project or "general")[:MAX_ID_CHARS],
+        tool=name,
+        summary=_clip(redact_secrets(_one_line(summary))[0], SUMMARY_MAX_CHARS),
+        status=clean_status,
+        exit_code=parse_exit_code(exit_code),
+    )
+
+
 def _row_action(row: Sequence[Any]) -> AgentAction:
     status = str(row[6]) if row[6] in (STATUS_OK, STATUS_FAILED, STATUS_INTERRUPTED) else STATUS_OK
     return AgentAction(str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]), str(row[5] or ""),

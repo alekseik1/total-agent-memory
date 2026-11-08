@@ -60,6 +60,80 @@ def build_summary(reason: str, assistant: str) -> str:
     return "\n".join(parts)
 
 
+def run_session_end(*, session_id: str, project: str, assistant_text: str = "",
+                    cwd: str = "", branch: str = "", reason: str = "",
+                    db_path: str | None = None, compress: bool | None = None) -> dict:
+    """Write the session_summaries row for a finished session and close its sessions row.
+
+    ``assistant_text`` is already-extracted assistant context (the hook side
+    reads it from the transcript; the remote transport sends it in the request).
+    ``compress`` forces the LLM summary path on or off; None uses the LLM gate.
+    Returns a result dict; never raises for a missing DB or a failed write.
+    """
+    path = db_path or DB_PATH
+    assistant = sanitize_text(assistant_text).strip()
+
+    if not os.path.exists(path):
+        return {"ok": False, "error": f"Memory DB not found at {path}"}
+
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA busy_timeout=15000")
+    try:
+        # No assistant text left after redaction means nothing worth resuming
+        # from (user prompts are never stored) - a summary saying only
+        # "session ended" costs a row and tells the next session nothing. The
+        # `sessions` row must still close, though: this cannot early-return
+        # before that, or every such session keeps ended_at NULL forever.
+        if not assistant.replace(PRIVATE_PLACEHOLDER, "").strip():
+            SessionContinuity(db).close_session_row(
+                session_id, project=project, branch=branch or None
+            )
+            db.commit()
+            return {"ok": True, "closed_only": True}
+
+        fallback = build_summary(reason, assistant)
+        # With an LLM reachable, let it write the summary from the session's
+        # own artifacts - the handful of messages the hook could extract is a
+        # thin thing to resume from. `session_end` only asks the LLM when
+        # `summary` is None (an explicit one always wins), so the deterministic
+        # text cannot be passed as a safety net: it would suppress the
+        # compression it is meant to back up. It is written afterwards instead,
+        # whenever compression did not actually produce anything.
+        use_compress = _llm_available() if compress is None else compress
+        # Always call session_end, even for a session that already has a
+        # recent summary: it decides for itself whether the write is a
+        # duplicate, but it must still close the `sessions` row every time -
+        # returning early here would leave that row open forever whenever a
+        # duplicate was detected. producer="hook" on both branches, compressed
+        # or not: even an LLM-written summary here only compresses what this
+        # script itself extracted, so within the 300s dedup window it must
+        # never displace a real session_end call's summary (see
+        # _dedup_action in session_continuity.py).
+        result = SessionContinuity(db).session_end(
+            session_id,
+            None if use_compress else fallback,
+            project=project,
+            branch=branch or None,
+            producer="hook",
+            auto_compress=use_compress,
+        )
+        if result.get("deduped"):
+            return {"ok": True, "deduped": True}
+        if use_compress and not result.get("compressed_used"):
+            db.execute(
+                "UPDATE session_summaries SET summary = ? WHERE id = ?",
+                (fallback, result["id"]),
+            )
+            db.commit()
+        return {"ok": True, "id": result["id"],
+                "compressed_used": bool(result.get("compressed_used"))}
+    except Exception as e:  # noqa: BLE001 - a hook must not fail the session end
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    finally:
+        db.close()
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Write a session summary on session end")
     p.add_argument("--session-id", required=True)
@@ -76,70 +150,20 @@ def main() -> int:
         context = {}
     if not isinstance(context, dict):
         context = {}
-    assistant = sanitize_text(str(context.get("assistant") or "")).strip()
 
-    if not os.path.exists(DB_PATH):
-        print(f"Memory DB not found at {DB_PATH}", file=sys.stderr)
+    result = run_session_end(
+        session_id=a.session_id, project=a.project,
+        assistant_text=str(context.get("assistant") or ""),
+        cwd=a.cwd, branch=a.branch, reason=a.reason,
+    )
+    if not result["ok"]:
+        print(f"auto_session_end failed: {result['error']}", file=sys.stderr)
         return 1
-
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA busy_timeout=15000")
-    try:
-        # No assistant text left after redaction means nothing worth resuming
-        # from (user prompts are never stored) - a summary saying only
-        # "session ended" costs a row and tells the next session nothing. The
-        # `sessions` row must still close, though: this cannot early-return
-        # before that, or every such session keeps ended_at NULL forever.
-        if not assistant.replace(PRIVATE_PLACEHOLDER, "").strip():
-            SessionContinuity(db).close_session_row(
-                a.session_id, project=a.project, branch=a.branch or None
-            )
-            db.commit()
-            return 0
-
-        fallback = build_summary(a.reason, assistant)
-        # With an LLM reachable, let it write the summary from the session's
-        # own artifacts - the handful of messages the hook could extract is a
-        # thin thing to resume from. `session_end` only asks the LLM when
-        # `summary` is None (an explicit one always wins), so the deterministic
-        # text cannot be passed as a safety net: it would suppress the
-        # compression it is meant to back up. It is written afterwards instead,
-        # whenever compression did not actually produce anything.
-        compress = _llm_available()
-        # Always call session_end, even for a session that already has a
-        # recent summary: it decides for itself whether the write is a
-        # duplicate, but it must still close the `sessions` row every time -
-        # returning early here would leave that row open forever whenever a
-        # duplicate was detected. producer="hook" on both branches, compressed
-        # or not: even an LLM-written summary here only compresses what this
-        # script itself extracted, so within the 300s dedup window it must
-        # never displace a real session_end call's summary (see
-        # _dedup_action in session_continuity.py).
-        result = SessionContinuity(db).session_end(
-            a.session_id,
-            None if compress else fallback,
-            project=a.project,
-            branch=a.branch or None,
-            producer="hook",
-            auto_compress=compress,
-        )
-        if result.get("deduped"):
-            print(f"session summary deduped for {a.project} ({a.session_id})")
-            return 0
-        if compress and not result.get("compressed_used"):
-            db.execute(
-                "UPDATE session_summaries SET summary = ? WHERE id = ?",
-                (fallback, result["id"]),
-            )
-            db.commit()
+    if result.get("deduped"):
+        print(f"session summary deduped for {a.project} ({a.session_id})")
+    elif not result.get("closed_only"):
         print(f"session summary {result['id']} for {a.project} ({a.session_id})")
-        return 0
-    except Exception as e:  # noqa: BLE001 - a hook must not fail the session end
-        print(f"auto_session_end failed: {e}", file=sys.stderr)
-        return 1
-    finally:
-        db.close()
+    return 0
 
 
 if __name__ == "__main__":
