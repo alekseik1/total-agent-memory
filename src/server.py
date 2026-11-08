@@ -3432,7 +3432,7 @@ class Store:
         if query is not None and str(query).strip():
             # surface_rules clamps a limit of 0 up to 1.
             surfaces = [] if limit == 0 else RuleSurfacer(self.db).surface_rules(
-                str(query), project, session_id or SID or "", "self_rules_context",
+                str(query), project, session_id or _current_sid() or "", "self_rules_context",
                 DEFAULT_SURFACE_LIMIT if limit is None else limit,
                 categories=categories, phase=phase)
             if surfaces:
@@ -5441,6 +5441,13 @@ recall: Recall = None
 SID: str = None
 BRANCH: str = ""
 
+# Per-request session override for the HTTP transport: the ASGI wrapper in
+# _run_streamable_http sets it from the X-TAM-Session header, so hook-side and
+# MCP-side records of one client session share an id. Contextvars propagate
+# into asyncio.to_thread, so sync tool handlers see it too. Unset on stdio.
+_REQUEST_SESSION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "tam_request_session", default=None)
+
 # mcp SDK 1.x exposed @Server.list_tools() / @Server.call_tool() decorators.
 # The 2.x line (protocol revision 2026-07-28) dropped them for
 # add_request_handler(method, params_model, handler). We support both so the
@@ -6888,7 +6895,7 @@ def _note_written_record(record_id: int | None) -> None:
 
 def _log_written_records(call_id: str, record_ids: list[int] | None) -> None:
     if store is not None and record_ids:
-        store.raw_append(SID, {"type": RAW_RESULT_TYPE, "call_id": call_id, "knowledge_ids": list(record_ids)})
+        store.raw_append(_current_sid(), {"type": RAW_RESULT_TYPE, "call_id": call_id, "knowledge_ids": list(record_ids)})
 
 
 async def _call_tool_impl(name, args, request_meta=None) -> tuple[list[TextContent], bool]:
@@ -6914,7 +6921,7 @@ async def _call_tool_impl(name, args, request_meta=None) -> tuple[list[TextConte
         written_ids = _WRITTEN_RECORD_IDS.set([])
         if store is not None:
             # <private> sections never reach disk, so the log gets the arguments without them.
-            store.raw_append(SID, {"type": RAW_CALL_TYPE, "tool": name, "call_id": call_id,
+            store.raw_append(_current_sid(), {"type": RAW_CALL_TYPE, "tool": name, "call_id": call_id,
                                    "args": redact_private_value(args)})
         try:
             r = await _do(name, args)
@@ -7598,7 +7605,7 @@ async def _dispatch_tool(name, a):
 
     elif name == "memory_save":
         rid, was_dedup, was_redacted, private_sections, quality_meta = store.save_knowledge(
-            SID, _required_text(a, "content"), a["type"],
+            _current_sid(), _required_text(a, "content"), a["type"],
             a.get("project", "general"), a.get("tags", []), a.get("context", ""),
             branch=a.get("branch", BRANCH), filter_name=a.get("filter"),
             source_format=a.get("source_format", "auto"),
@@ -7683,7 +7690,7 @@ async def _dispatch_tool(name, a):
         if not old_rec:
             return J({"error": "Record not found in DB"})
         new_id, _, _, _, _ = store.save_knowledge(
-            SID, new_content, old_rec["type"], old_rec["project"],
+            _current_sid(), new_content, old_rec["type"], old_rec["project"],
             json.loads(old_rec.get("tags", "[]")),
             f"Updated: {a.get('reason', '')}. Was: {old_rec['content'][:200]}",
             branch=old_rec.get("branch", ""), skip_dedup=True, skip_quality=True,
@@ -7729,7 +7736,7 @@ async def _dispatch_tool(name, a):
         else:
             results = []
             for g in groups:
-                r = store.consolidate_group(SID, g)
+                r = store.consolidate_group(_current_sid(), g)
                 results.append(r)
             return J({"consolidated": True, "groups_merged": len(results),
                        "total_removed": sum(len(r["merged"]) for r in results), "details": results})
@@ -8011,7 +8018,7 @@ async def _dispatch_tool(name, a):
 
     elif name == "self_error_log":
         error_id, pattern = store.log_error(
-            SID, a["description"], a["category"],
+            _current_sid(), a["description"], a["category"],
             a.get("severity", "medium"), a.get("fix", ""),
             a.get("context", ""), a.get("project", "general"),
             a.get("tags", []))
@@ -8021,11 +8028,11 @@ async def _dispatch_tool(name, a):
         return J(result)
 
     elif name == "self_insight":
-        return J(store.manage_insight(SID, a["action"], **{
+        return J(store.manage_insight(_current_sid(), a["action"], **{
             k: v for k, v in a.items() if k != "action"}))
 
     elif name == "self_rules":
-        return J(store.manage_rule(SID, a["action"], **{
+        return J(store.manage_rule(_current_sid(), a["action"], **{
             k: v for k, v in a.items() if k != "action"}))
 
     elif name == "self_patterns":
@@ -8034,7 +8041,7 @@ async def _dispatch_tool(name, a):
 
     elif name == "self_reflect":
         rid, _, _, _, _ = store.save_knowledge(
-            SID, a["reflection"], "reflection",
+            _current_sid(), a["reflection"], "reflection",
             a.get("project", "general"),
             (a.get("tags") or []) + ["self-reflection", a.get("outcome", "success")],
             f"Task: {a['task_summary']}. Outcome: {a.get('outcome', 'success')}",
@@ -8052,7 +8059,7 @@ async def _dispatch_tool(name, a):
 
     elif name == "memory_observe":
         obs_id = store.save_observation(
-            SID, a["tool_name"], a["summary"],
+            _current_sid(), a["tool_name"], a["summary"],
             a.get("observation_type", "change"),
             a.get("files_affected", []),
             a.get("project", "general"),
@@ -8103,7 +8110,7 @@ async def _dispatch_tool(name, a):
     elif name == "memory_episode_save":
         es = _get_v5("episodes", store.db)
         eid = es.save(
-            session_id=SID,
+            session_id=_current_sid(),
             narrative=a["narrative"],
             outcome=a["outcome"],
             project=a.get("project", "general"),
@@ -8276,7 +8283,7 @@ async def _dispatch_tool(name, a):
             duration_ms=a.get("duration_ms"),
             error_details=a.get("error_details"),
             notes=a.get("notes"),
-            session_id=SID,
+            session_id=_current_sid(),
         )
         return J({"run_id": run_id})
 
@@ -8298,7 +8305,7 @@ async def _dispatch_tool(name, a):
             severity=a.get("severity", "medium"),
             category=a.get("category", "bug"),
             project=a.get("project", "general"),
-            session_id=SID,
+            session_id=_current_sid(),
         ))
 
     elif name == "session_init":
@@ -8318,7 +8325,7 @@ async def _dispatch_tool(name, a):
         # that never existed. Defaulting to this process's own session is the
         # only value a caller could not have known to pass.
         ended = sc.session_end(
-            a.get("session_id") or SID, a.get("summary"),
+            a.get("session_id") or _current_sid(), a.get("summary"),
             highlights=a.get("highlights"),
             pitfalls=a.get("pitfalls"),
             next_steps=a.get("next_steps"),
@@ -8331,7 +8338,7 @@ async def _dispatch_tool(name, a):
         note = _session_note_text(a, ended)
         if note:
             note_id, *_ = store.save_knowledge(
-                a.get("session_id") or SID, note, "note", project=a.get("project", "general"),
+                a.get("session_id") or _current_sid(), note, "note", project=a.get("project", "general"),
                 tags=["session-note"], skip_quality=True, repeat="replace")
             ended["note_id"] = note_id
         return J(ended)
@@ -8403,7 +8410,7 @@ async def _dispatch_tool(name, a):
         rid = _save_intent(
             db_path,
             a.get("prompt", ""),
-            a.get("session_id") or SID,
+            a.get("session_id") or _current_sid(),
             a.get("project"),
         )
         return J({"saved": bool(rid), "id": rid})
@@ -8455,7 +8462,7 @@ async def _dispatch_tool(name, a):
         except (KeyError, TypeError, ValueError) as exc:
             return J({"saved": False, "error": f"invalid decision: {exc}"})
 
-        rid = save_decision(store, decision, session_id=SID)
+        rid = save_decision(store, decision, session_id=_current_sid())
         if store.cache is not None:
             store.cache.invalidate(project=decision.project)
         return J({"saved": True, "id": rid, "structured": True})
@@ -8463,7 +8470,7 @@ async def _dispatch_tool(name, a):
     # ── v11.0 Phase 6 — fast-path & introspection tool dispatch ──────
     elif name == "memory_save_fast":
         rid, was_dedup, was_redacted, private_sections, quality_meta = store.save_knowledge(
-            SID, _required_text(a, "content"), a["type"],
+            _current_sid(), _required_text(a, "content"), a["type"],
             a.get("project", "general"), a.get("tags", []), a.get("context", ""),
             branch=a.get("branch", BRANCH), filter_name=a.get("filter"),
             source_format=a.get("source_format", "auto"),
@@ -8776,7 +8783,7 @@ async def _dispatch_tool(name, a):
             for content, ktype, _q in seed_pairs:
                 try:
                     store.save_knowledge(
-                        sid=SID or "eval-session",
+                        sid=_current_sid() or "eval-session",
                         content=content, ktype=ktype, project="memory_eval_recall",
                     )
                 except Exception as error:  # noqa: BLE001 — a missing seed shows up as a failed scenario
@@ -9121,7 +9128,7 @@ async def _dispatch_tool(name, a):
             for i in range(n_records):
                 try:
                     store.save_knowledge(
-                        sid=SID or "eval-session",
+                        sid=_current_sid() or "eval-session",
                         content=f"long-context filler {i} — generic noise about caches and queues",
                         ktype="fact", project=project,
                     )
@@ -9130,7 +9137,7 @@ async def _dispatch_tool(name, a):
             needle_phrase = "tachyon-aluminium hyperspecific marker"
             try:
                 store.save_knowledge(
-                    sid=SID or "eval-session",
+                    sid=_current_sid() or "eval-session",
                     content=f"NEEDLE — {needle_phrase}",
                     ktype="fact", project=project,
                 )
@@ -9320,11 +9327,24 @@ def _session_id():
 
     Falls back to the minted form for hosts that publish nothing (Codex,
     Cursor, the Docker image), which is also what every existing row uses.
+
+    A request-scoped id (X-TAM-Session on the HTTP transport, remote hooks
+    mode) wins over the environment: each request names the client session
+    it serves rather than inheriting the process's own.
     """
+    request_session = _REQUEST_SESSION.get()
+    if request_session:
+        return request_session
     host_session = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
     if host_session:
         return host_session
     return f"mcp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+
+
+def _current_sid():
+    """Session id for the call being served: the request's X-TAM-Session when
+    the HTTP transport set one, else this process's bootstrap ``SID``."""
+    return _REQUEST_SESSION.get() or SID
 
 
 async def _bootstrap_session():
@@ -9404,10 +9424,11 @@ async def _run_streamable_http(host: str, port: int, sock: socket.socket | None 
 
     # mcp releases without TransportSecuritySettings get the same checks here.
     handle_mcp = serve_mcp if security else _RebindingGuard(serve_mcp, hosts, origins)
-    handle_mcp = http_auth.guard_asgi(handle_mcp, bind=host, root=MEMORY_DIR)
 
     async def healthz(request: Request) -> Response:
         return JSONResponse({"status": "ok", "version": _SERVER_VERSION})
+
+    from hook_endpoint import handle as handle_hook
 
     @asynccontextmanager
     async def lifespan(starlette_app):
@@ -9420,13 +9441,22 @@ async def _run_streamable_http(host: str, port: int, sock: socket.socket | None 
         debug=False,
         routes=[
             Route("/healthz", healthz, methods=["GET"]),
+            Route("/internal/hook/{cmd}", handle_hook, methods=["POST"]),
             Mount("/mcp", app=handle_mcp),
         ],
         lifespan=lifespan,
     )
 
+    # X-TAM-Session -> _REQUEST_SESSION for the request's whole lifetime
+    # (contextvars reach asyncio.to_thread). Inside the guard: only requests
+    # that passed auth get a session scope. The bearer guard moved from the
+    # /mcp mount to the whole app so /internal/hook/* shares the same rule —
+    # a token is required exactly when /mcp requires one.
+    served_app = _RequestSessionScope(starlette_app)
+    served_app = http_auth.guard_asgi(served_app, bind=host, root=MEMORY_DIR)
+
     config = uvicorn.Config(
-        starlette_app,
+        served_app,
         host=host,
         port=port,
         log_level="warning",
@@ -9506,6 +9536,36 @@ def _transport_security_kwargs(hosts: list[str], origins: list[str]) -> dict[str
     from mcp.server.transport_security import TransportSecuritySettings
     return {"security_settings": TransportSecuritySettings(
         enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins)}
+
+
+class _RequestSessionScope:
+    """ASGI wrapper: the ``X-TAM-Session`` header becomes ``_REQUEST_SESSION``
+    for the request, so every tool call and hook command it triggers records
+    under the client session's id instead of the process-wide ``SID``."""
+
+    HEADER = b"x-tam-session"
+    MAX_LEN = 200
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.inner(scope, receive, send)
+            return
+        session = ""
+        for key, value in scope.get("headers") or []:
+            if key.lower() == self.HEADER:
+                session = value.decode("latin-1").strip()
+                break
+        if not session:
+            await self.inner(scope, receive, send)
+            return
+        token = _REQUEST_SESSION.set(session[: self.MAX_LEN])
+        try:
+            await self.inner(scope, receive, send)
+        finally:
+            _REQUEST_SESSION.reset(token)
 
 
 class _RebindingGuard:
