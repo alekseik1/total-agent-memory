@@ -156,7 +156,7 @@ def build_action(*, tool: str, tool_input: Mapping[str, Any] | None, session_id:
     )
 
 
-def build_remote_action(*, ts: str, tool: str, summary: str, status: str, exit_code: Any,
+def build_remote_action(*, tool: str, summary: str, status: str, exit_code: Any,
                         session_id: str, project: str, client: str = CLIENT_CLAUDE,
                         now: datetime | None = None) -> AgentAction | None:
     """An action whose summary the caller already extracted (remote hook transport).
@@ -164,16 +164,13 @@ def build_remote_action(*, ts: str, tool: str, summary: str, status: str, exit_c
     Same bounds and redaction as :func:`build_action`, but the text arrives
     ready-made instead of being derived from a tool input. None without a tool
     name or for a read-only lookup tool, exactly like ``build_action``.
+    The ts is server clock, never the laptop's: the turn boundary it is
+    compared with (``last_stop``) is stamped by the server.
     """
     name = _one_line(tool)[:MAX_TOOL_CHARS]
     if not name or name in UNLOGGED_TOOLS:
         return None
-    try:
-        moment = datetime.fromisoformat(str(ts))
-    except (TypeError, ValueError):
-        moment = now or datetime.now(UTC)
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
+    moment = now or datetime.now(UTC)
     clean_status: Status = status if status in (STATUS_OK, STATUS_FAILED, STATUS_INTERRUPTED) else STATUS_OK
     return AgentAction(
         ts=format_utc(moment),
@@ -210,6 +207,16 @@ class ActionLog:
         self.prune(retention_days, max_rows=max_rows, now=now, commit=False)
         self._db.commit()
         return row_id
+
+    def record_many(self, actions: Sequence[AgentAction], *, retention_days: int, max_rows: int = MAX_ROWS,
+                    now: datetime | None = None) -> None:
+        """Insert ``actions`` in order, prune once, commit once: a failed batch leaves no rows."""
+        self._db.executemany(
+            f"INSERT INTO agent_actions ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [(a.ts, a.client, a.session_id, a.project, a.tool, a.summary, a.status, a.exit_code)
+             for a in actions])
+        self.prune(retention_days, max_rows=max_rows, now=now, commit=False)
+        self._db.commit()
 
     def prune(self, retention_days: int, *, max_rows: int = MAX_ROWS, now: datetime | None = None,
               commit: bool = True) -> int:

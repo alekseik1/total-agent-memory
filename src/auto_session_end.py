@@ -61,13 +61,11 @@ def build_summary(reason: str, assistant: str) -> str:
 
 
 def run_session_end(*, session_id: str, project: str, assistant_text: str = "",
-                    cwd: str = "", branch: str = "", reason: str = "",
-                    db_path: str | None = None, compress: bool | None = None) -> dict:
+                    branch: str = "", reason: str = "", db_path: str | None = None) -> dict:
     """Write the session_summaries row for a finished session and close its sessions row.
 
     ``assistant_text`` is already-extracted assistant context (the hook side
     reads it from the transcript; the remote transport sends it in the request).
-    ``compress`` forces the LLM summary path on or off; None uses the LLM gate.
     Returns a result dict; never raises for a missing DB or a failed write.
     """
     path = db_path or DB_PATH
@@ -100,7 +98,7 @@ def run_session_end(*, session_id: str, project: str, assistant_text: str = "",
         # text cannot be passed as a safety net: it would suppress the
         # compression it is meant to back up. It is written afterwards instead,
         # whenever compression did not actually produce anything.
-        use_compress = _llm_available() if compress is None else compress
+        compress = _llm_available()
         # Always call session_end, even for a session that already has a
         # recent summary: it decides for itself whether the write is a
         # duplicate, but it must still close the `sessions` row every time -
@@ -112,15 +110,15 @@ def run_session_end(*, session_id: str, project: str, assistant_text: str = "",
         # _dedup_action in session_continuity.py).
         result = SessionContinuity(db).session_end(
             session_id,
-            None if use_compress else fallback,
+            None if compress else fallback,
             project=project,
             branch=branch or None,
             producer="hook",
-            auto_compress=use_compress,
+            auto_compress=compress,
         )
         if result.get("deduped"):
             return {"ok": True, "deduped": True}
-        if use_compress and not result.get("compressed_used"):
+        if compress and not result.get("compressed_used"):
             db.execute(
                 "UPDATE session_summaries SET summary = ? WHERE id = ?",
                 (fallback, result["id"]),
@@ -154,7 +152,7 @@ def main() -> int:
     result = run_session_end(
         session_id=a.session_id, project=a.project,
         assistant_text=str(context.get("assistant") or ""),
-        cwd=a.cwd, branch=a.branch, reason=a.reason,
+        branch=a.branch, reason=a.reason,
     )
     if not result["ok"]:
         print(f"auto_session_end failed: {result['error']}", file=sys.stderr)

@@ -3,8 +3,8 @@
 With ``TAM_REMOTE_URL`` set, hooks on the laptop stop opening ``memory.db``
 and POST each hook command here instead (docs/remote-hooks-plan.md, slice S1).
 The body is ``{"call": <HookCall JSON>, "payload": {...cmd-specific fields}}``;
-the response is ``{"ok": true, "output": <text the local hook prints>}`` —
-"" for the writers — or ``{"ok": false, "error": "<class>: <msg>"}``.
+the response is ``{"ok": true, "output": <text the local hook prints>}``
+("" for the writers) or ``{"ok": false, "error": "<class>: <msg>"}``.
 
 The server never reads laptop paths: ``session-end`` receives pre-extracted
 text and message lists, and its LLM work runs on a background thread after
@@ -48,7 +48,11 @@ EPISODE_MESSAGES_MAX_BYTES = 64 * 1024
 EPISODE_ROLES = frozenset({"user", "assistant", "tool"})
 
 SESSION_START = "session-start"
+PROMPT_CONTEXT = "prompt-context"
 SESSION_END = "session-end"
+# Only these get the server-side timeout. A worker thread cannot be cancelled,
+# so a timed-out writer would still land its rows after a 500 the client retries.
+TIMED_COMMANDS = frozenset({SESSION_START, PROMPT_CONTEXT})
 
 _BACKGROUND_LOCK = threading.Lock()
 _BACKGROUND_THREADS: set[threading.Thread] = set()
@@ -157,12 +161,15 @@ def _user_texts(payload: Mapping[str, Any]) -> list[str]:
 
 
 def _episode_messages(raw: Any) -> list[dict[str, str]]:
-    """The pre-extracted {role, text} list, re-clamped to the 64 KB budget."""
+    """The pre-extracted {role, text} list, re-clamped to the 64 KB budget.
+
+    The newest messages are kept: capture_episode reads the tail of the session.
+    """
     if not isinstance(raw, list):
         return []
     messages: list[dict[str, str]] = []
     size = 0
-    for item in raw:
+    for item in reversed(raw):
         if not isinstance(item, Mapping):
             continue
         role = str(item.get("role") or "")
@@ -175,6 +182,7 @@ def _episode_messages(raw: Any) -> list[dict[str, str]]:
             break
         size += cost
         messages.append(entry)
+    messages.reverse()
     return messages
 
 
@@ -185,16 +193,18 @@ def _session_end_background(session_id: str, db_path: str, project: str, assista
         import auto_episode_capture
 
         auto_episode_capture.capture_episode(session_id, db_path, project, messages=messages)
-    except Exception as exc:  # noqa: BLE001 — background hook work; the 202 is already sent
+    except Exception as exc:  # noqa: BLE001 - background hook work; the 202 is already sent
         LOGGER.warning("session-end episode capture failed for %s: %s: %s",
                        session_id, type(exc).__name__, exc)
     try:
         import auto_session_end
 
-        auto_session_end.run_session_end(
+        result = auto_session_end.run_session_end(
             session_id=session_id, project=project, assistant_text=assistant_text,
             branch=branch, reason=reason, db_path=db_path)
-    except Exception as exc:  # noqa: BLE001 — same boundary as above
+        if not result["ok"]:
+            LOGGER.warning("session-end summary failed for %s: %s", session_id, result["error"])
+    except Exception as exc:  # noqa: BLE001 - same boundary as above
         LOGGER.warning("session-end summary failed for %s: %s: %s",
                        session_id, type(exc).__name__, exc)
     finally:
@@ -215,10 +225,11 @@ def _session_end(call: HookCall, payload: Mapping[str, Any], memory_dir: Path) -
     messages = _episode_messages(payload.get("episode_messages"))
     db_path = memory_dir / "memory.db"
 
-    auto_session_save.save_session_context(
-        project, call.cwd, reason,
-        user_context=user, assistant_context=assistant_text[:1000],
-        db_path=db_path)
+    if user:
+        auto_session_save.save_session_context(
+            project, call.cwd, reason,
+            user_context=user, assistant_context=assistant_text[:1000],
+            db_path=db_path)
     db = sqlite3.connect(str(db_path), timeout=SQLITE_TIMEOUT_SEC)
     db.row_factory = sqlite3.Row
     try:
@@ -245,14 +256,13 @@ Handler = Callable[[HookCall, Mapping[str, Any], Path], tuple[int, str]]
 
 _HANDLERS: dict[str, Handler] = {
     SESSION_START: _session_start,
-    "prompt-context": _ambient("prompt-context"),
+    PROMPT_CONTEXT: _ambient(PROMPT_CONTEXT),
     "save-intent": _save_intent,
     "actions-batch": _actions_batch,
     "turn-end": _ambient("turn-end"),
     SESSION_END: _session_end,
     "error-capture": _error_capture,
 }
-COMMANDS = frozenset(_HANDLERS)
 
 
 def dispatch(command: str, call: HookCall, payload: Mapping[str, Any], memory_dir: Path) -> tuple[int, str]:
@@ -320,14 +330,15 @@ async def handle(request) -> Any:
         return _respond(400, f"{type(exc).__name__}: {exc}")
 
     timeout = _timeout_seconds()
+    work = asyncio.to_thread(dispatch, cmd, call, payload, resolve_memory_dir())
     try:
-        status, output = await asyncio.wait_for(
-            asyncio.to_thread(dispatch, cmd, call, payload, resolve_memory_dir()),
-            timeout=timeout,
-        )
+        if cmd in TIMED_COMMANDS:
+            status, output = await asyncio.wait_for(work, timeout=timeout)
+        else:
+            status, output = await work
     except TimeoutError:
         return _respond(500, f"TimeoutError: hook command {cmd!r} exceeded {TIMEOUT_ENV}={timeout:g}s")
-    except Exception as exc:  # noqa: BLE001 — a hook failure is a 500, never a crashed server
+    except Exception as exc:  # noqa: BLE001 - a hook failure is a 500, never a crashed server
         LOGGER.warning("hook command %s failed: %s: %s", cmd, type(exc).__name__, exc)
         return _respond(500, f"{type(exc).__name__}: {exc}")
     return JSONResponse({"ok": True, "output": output}, status_code=status)

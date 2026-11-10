@@ -39,11 +39,11 @@ def test_the_handler_falls_back_to_the_live_sid():
     """Pin the wiring: the fallback is the one value a caller could not pass.
 
     Matched together with the `summary` argument that follows it: `save_intent`
-    carries the same `or SID` idiom, and a bare match on it passes while this
-    handler is broken.
+    carries the same `or _current_sid()` idiom, and a bare match on it passes
+    while this handler is broken.
     """
     src = inspect.getsource(server._dispatch_tool)
-    assert 'a.get("session_id") or SID, a.get("summary")' in src
+    assert 'a.get("session_id") or _current_sid(), a.get("summary")' in src
 
 
 def test_branch_reaches_session_end():

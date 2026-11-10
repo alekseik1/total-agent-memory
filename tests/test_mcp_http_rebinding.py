@@ -142,6 +142,25 @@ def test_real_mcp_client_initializes(loopback: int) -> None:
     assert "memory_recall" in tools and "memory_save" in tools
 
 
+def post_hook(port: int, host: str | None = None, token: str | None = None) -> int:
+    headers = {"Host": host} if host else {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return httpx.post(f"http://127.0.0.1:{port}/internal/hook/save-intent",
+                      json={"call": {"payload": {}}, "payload": {}}, headers=headers, timeout=10).status_code
+
+
+def test_hook_route_refuses_foreign_host(loopback: int) -> None:
+    assert post_hook(loopback, f"evil.example:{loopback}") == 421
+    assert post_hook(loopback) == 200
+
+
+def test_wildcard_hook_route_requires_token(wildcard: int) -> None:
+    assert post_hook(wildcard) == 401
+    assert post_hook(wildcard, token=WILDCARD_TOKEN) == 200
+    assert httpx.get(f"http://127.0.0.1:{wildcard}/healthz", timeout=5).status_code == 200
+
+
 def test_wildcard_bind_accepts_listed_host_only(wildcard: int) -> None:
     assert post_initialize(wildcard, f"mem.test:{wildcard}")[0] == 200
     assert post_initialize(wildcard, f"mem.test:{wildcard}", f"http://mem.test:{wildcard}")[0] == 200

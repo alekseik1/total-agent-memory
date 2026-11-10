@@ -7,12 +7,12 @@ Goal: with `TAM_REMOTE_URL` set, hooks and MCP on the laptop never touch `memory
 ## Verified facts
 | Fact | Where |
 |---|---|
-| HTTP app routes: `/healthz` + `Mount("/mcp")`; bearer guard wraps only `/mcp` | `src/server.py:9407,9419-9426` |
+| HTTP app routes: `/healthz`, `POST /internal/hook/{cmd}` (Host/Origin guard on every bind), `Mount("/mcp")`; bearer guard wraps the whole app | `src/server.py:9445-9463` |
 | Serialisation seam exists: Docker mode sends `HookCall` JSON | `hooks/lib/tam_hook.py:1284`, `src/ambient/hooks.py:40,170` |
 | Route to copy: daemon `POST /internal/hook/recall` | `src/tam_daemon/service.py:426-475` |
 | Stop reads `agent_actions`; record-action kept synchronous for ordering | `hooks/post-tool-use.sh:10` |
 | Tool calls block the server event loop | `src/server.py:9573` |
-| Server session id comes from its own env `CLAUDE_CODE_SESSION_ID` | `src/server.py:9324` |
+| Server session id: request header `X-TAM-Session` first, else its own env `CLAUDE_CODE_SESSION_ID` | `src/server.py:9334-9339` |
 | Claude Code exports `CLAUDE_CODE_SESSION_ID` to child processes; `headersHelper` runs per MCP connection | `env`, code.claude.com/docs/en/mcp |
 | Transcripts: median 346 KB, max 9.9 MB; home uplink ~40 KB/s -> extract on laptop | measured; `src/auto_episode_capture.py:82-141` |
 | rules-harvest edits rules with raw `UPDATE rules`; no MCP action | `~/.claude/skills/rules-harvest/SKILL.md:109` |

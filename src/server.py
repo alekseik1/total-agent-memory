@@ -9388,6 +9388,7 @@ async def _run_streamable_http(host: str, port: int, sock: socket.socket | None 
     Exposes:
       POST/GET/DELETE /mcp     — Streamable HTTP MCP frames
       GET             /healthz — DB-independent liveness probe
+      POST /internal/hook/{cmd} - remote hook commands (src/hook_endpoint.py)
 
     Use case: long-lived container deployments (Docker, k8s) where the
     MCP server runs as a daemon and clients (or sidecars) talk to it
@@ -9405,6 +9406,7 @@ async def _run_streamable_http(host: str, port: int, sock: socket.socket | None 
     from starlette.applications import Starlette
     from starlette.requests import Request
     from starlette.responses import JSONResponse, Response
+    from starlette.middleware import Middleware
     from starlette.routing import Mount, Route
 
     hosts, origins = _http_allowed_hosts(host, os.environ)
@@ -9429,6 +9431,7 @@ async def _run_streamable_http(host: str, port: int, sock: socket.socket | None 
         return JSONResponse({"status": "ok", "version": _SERVER_VERSION})
 
     from hook_endpoint import handle as handle_hook
+    from hook_endpoint import join_background_threads
 
     @asynccontextmanager
     async def lifespan(starlette_app):
@@ -9436,12 +9439,16 @@ async def _run_streamable_http(host: str, port: int, sock: socket.socket | None 
         # on SIGTERM — otherwise in-flight SSE streams leak.
         async with manager.run():
             yield
+        # session-end summaries run on daemon threads after the 202.
+        await asyncio.to_thread(join_background_threads, HOOK_SHUTDOWN_JOIN_SEC)
 
     starlette_app = Starlette(
         debug=False,
         routes=[
             Route("/healthz", healthz, methods=["GET"]),
-            Route("/internal/hook/{cmd}", handle_hook, methods=["POST"]),
+            # The hook route never goes through the mcp SDK's host check: guard it here on every bind.
+            Route("/internal/hook/{cmd}", handle_hook, methods=["POST"],
+                  middleware=[Middleware(_RebindingGuard, hosts, origins)]),
             Mount("/mcp", app=handle_mcp),
         ],
         lifespan=lifespan,
@@ -9450,7 +9457,7 @@ async def _run_streamable_http(host: str, port: int, sock: socket.socket | None 
     # X-TAM-Session -> _REQUEST_SESSION for the request's whole lifetime
     # (contextvars reach asyncio.to_thread). Inside the guard: only requests
     # that passed auth get a session scope. The bearer guard moved from the
-    # /mcp mount to the whole app so /internal/hook/* shares the same rule —
+    # /mcp mount to the whole app so /internal/hook/* shares the same rule:
     # a token is required exactly when /mcp requires one.
     served_app = _RequestSessionScope(starlette_app)
     served_app = http_auth.guard_asgi(served_app, bind=host, root=MEMORY_DIR)
@@ -9471,6 +9478,8 @@ async def _run_streamable_http(host: str, port: int, sock: socket.socket | None 
 
 
 HTTP_TRANSPORTS = ("http", "streamable-http", "streamable_http")
+# Matches timeout_graceful_shutdown: how long shutdown waits for session-end summaries.
+HOOK_SHUTDOWN_JOIN_SEC = 5.0
 HTTP_LISTEN_BACKLOG = 2048
 
 

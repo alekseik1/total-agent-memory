@@ -16,12 +16,12 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 import hook_endpoint
 from ambient.hooks import HookCall
@@ -68,23 +68,61 @@ def test_save_intent_writes_prompt_row(mem):
     assert row == (SESSION, "proj", "fix the flaky test")
 
 
-def test_actions_batch_inserts_in_payload_order(mem):
-    actions = [
-        {"ts": "2026-11-08T10:00:00.000000Z", "tool": "Bash", "summary": "pytest -q", "status": "ok"},
-        {"ts": "2026-11-08T10:00:01.000000Z", "tool": "Edit", "summary": "src/x.py :: new", "status": "failed",
-         "exit_code": "2"},
-        {"ts": "2026-11-08T10:00:02.000000Z", "tool": "Read", "summary": "skipped"},  # UNLOGGED_TOOLS
-    ]
-    status, output = dispatch("actions-batch", make_call(), {"actions": actions}, mem)
-    assert (status, output) == (200, "")
+def action_rows(mem: Path) -> list[tuple]:
     db = sqlite3.connect(str(mem / "memory.db"))
     try:
-        rows = db.execute("SELECT tool, summary, status, exit_code FROM agent_actions "
+        return db.execute("SELECT ts, tool, summary, status, exit_code FROM agent_actions "
                           "ORDER BY id").fetchall()
     finally:
         db.close()
-    assert [r[0] for r in rows] == ["Bash", "Edit"]
-    assert rows[1][1].startswith("src/x.py") and rows[1][2] == "failed" and rows[1][3] == 2
+
+
+def test_actions_batch_inserts_in_payload_order_with_server_ts(mem):
+    """The laptop ts is ignored: the turn boundary (last_stop) is server clock."""
+    actions = [
+        {"ts": "2099-01-01T00:00:00.000000Z", "tool": "Bash", "summary": "pytest -q", "status": "ok"},
+        {"ts": "2000-01-01T00:00:00.000000Z", "tool": "Edit", "summary": "src/x.py :: new", "status": "failed",
+         "exit_code": "2"},
+        {"ts": "2026-11-08T10:00:02.000000Z", "tool": "Read", "summary": "skipped"},  # UNLOGGED_TOOLS
+    ]
+    before = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
+    status, output = dispatch("actions-batch", make_call(), {"actions": actions}, mem)
+    after = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.999999Z")
+    assert (status, output) == (200, "")
+    rows = action_rows(mem)
+    assert [r[1] for r in rows] == ["Bash", "Edit"]
+    assert all(before <= r[0] <= after for r in rows), rows
+    assert rows[1][2].startswith("src/x.py") and rows[1][3] == "failed" and rows[1][4] == 2
+
+
+def test_actions_batch_retry_skips_claimed_tool_use_ids(mem):
+    actions = [
+        {"tool": "Bash", "summary": "pytest -q", "tool_use_id": "toolu_1"},
+        {"tool": "Edit", "summary": "src/x.py :: new", "tool_use_id": "toolu_2"},
+    ]
+    dispatch("actions-batch", make_call(), {"actions": actions}, mem)
+    dispatch("actions-batch", make_call(), {"actions": actions}, mem)
+    assert [r[1] for r in action_rows(mem)] == ["Bash", "Edit"]
+
+
+def test_actions_batch_failure_leaves_no_rows(mem, monkeypatch):
+    """One transaction: a batch that fails part-way commits nothing."""
+    import ambient.hooks
+
+    real_build = ambient.hooks.build_remote_action
+    built = []
+
+    def build_then_fail(**kwargs):
+        built.append(kwargs["tool"])
+        if len(built) == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real_build(**kwargs)
+
+    monkeypatch.setattr(ambient.hooks, "build_remote_action", build_then_fail)
+    actions = [{"tool": "Bash", "summary": "a"}, {"tool": "Edit", "summary": "b"}]
+    with pytest.raises(sqlite3.OperationalError):
+        dispatch("actions-batch", make_call(), {"actions": actions}, mem)
+    assert action_rows(mem) == []
 
 
 def test_error_capture_logs_error(mem):
@@ -136,13 +174,47 @@ def test_session_end_uses_messages_and_never_reads_files(mem, monkeypatch):
         episode = db.execute("SELECT session_id FROM episodes WHERE session_id='e2e-sess'").fetchone()
         session = db.execute("SELECT ended_at, branch FROM sessions WHERE id='e2e-sess'").fetchone()
         autosave = db.execute("SELECT COUNT(*) FROM knowledge WHERE tags LIKE '%session-autosave%'").fetchone()
+        summary = db.execute("SELECT session_id, summary FROM session_summaries "
+                             "WHERE session_id='e2e-sess'").fetchone()
     finally:
         db.close()
     # The episode exists only because episode_messages was used: the transcript
     # path does not exist and find_transcript would have found nothing.
     assert episode is not None
     assert session is not None and session[0] is not None and session[1] == "feature/x"
-    assert autosave[0] >= 1
+    assert autosave[0] == 1
+    assert summary == ("e2e-sess", "Session ended: clear.\nAssistant context: fixed it")
+
+
+def test_session_end_without_user_text_writes_no_autosave(mem, monkeypatch):
+    """Local tam_hook.session_end runs auto_session_save only when user text exists."""
+    monkeypatch.setenv("MEMORY_LLM_ENABLED", "false")
+    status, _ = dispatch("session-end", make_call("bot-sess"),
+                         {"assistant_text": "only me", "project": "proj"}, mem)
+    hook_endpoint.join_background_threads(timeout=60)
+    db = sqlite3.connect(str(mem / "memory.db"))
+    try:
+        autosave = db.execute("SELECT COUNT(*) FROM knowledge WHERE tags LIKE '%session-autosave%'").fetchone()
+    finally:
+        db.close()
+    assert status == 202 and autosave[0] == 0
+
+
+def test_session_end_background_logs_failed_summary(tmp_path, caplog):
+    missing = tmp_path / "missing" / "memory.db"
+    with caplog.at_level("WARNING", logger=hook_endpoint.LOGGER.name):
+        hook_endpoint._session_end_background("s", str(missing), "proj", "text", "", "clear", [])
+    assert any("session-end summary failed for s" in r.getMessage() and "Memory DB not found" in r.getMessage()
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+def test_episode_messages_keep_the_newest_within_budget():
+    text = "x" * 1000
+    raw = [{"role": "user", "text": f"{i}:{text}"} for i in range(100)]
+    kept = hook_endpoint._episode_messages(raw)
+    assert 0 < len(kept) < len(raw)
+    assert kept[-1]["text"].startswith("99:")
+    assert [m["text"] for m in kept] == [m["text"] for m in raw[-len(kept):]]
 
 
 # ── HTTP envelope (in-process Starlette) ─────────────────────────────
@@ -181,7 +253,7 @@ def test_missing_call_is_400(client):
 
 
 def test_non_json_content_type_is_415(client):
-    response = post(client, "save-intent", data="{}", headers={"Content-Type": "text/plain"})
+    response = post(client, "save-intent", content="{}", headers={"Content-Type": "text/plain"})
     assert response.status_code == 415
 
 
@@ -203,11 +275,19 @@ def test_handler_error_is_500_json(client, monkeypatch):
     assert response.json() == {"ok": False, "error": "RuntimeError: kaput"}
 
 
-def test_timeout_is_500_json(client, monkeypatch):
-    monkeypatch.setattr(hook_endpoint, "dispatch", lambda *a: time.sleep(30))
+def test_read_command_timeout_is_500_json(client, monkeypatch):
+    monkeypatch.setattr(hook_endpoint, "dispatch", lambda *a: time.sleep(1))
+    monkeypatch.setenv(hook_endpoint.TIMEOUT_ENV, "0.2")
+    response = post(client, "prompt-context", json={"call": {"payload": {}}, "payload": {}})
+    assert response.status_code == 500 and "TimeoutError" in response.json()["error"]
+
+
+def test_write_command_has_no_server_timeout(client, monkeypatch):
+    """A thread cannot be cancelled: a timed-out write still lands, so it must not report 500."""
+    monkeypatch.setattr(hook_endpoint, "dispatch", lambda *a: (time.sleep(0.5), (200, ""))[1])
     monkeypatch.setenv(hook_endpoint.TIMEOUT_ENV, "0.2")
     response = post(client, "save-intent", json={"call": {"payload": {}}, "payload": {}})
-    assert response.status_code == 500 and "TimeoutError" in response.json()["error"]
+    assert response.status_code == 200 and response.json() == {"ok": True, "output": ""}
 
 
 def test_save_intent_roundtrip_over_http(client):
@@ -354,7 +434,7 @@ def test_session_end_over_http_e2e(http_server):
 
     db_path = mem / "memory.db"
     deadline = time.time() + 60
-    episode = session_row = None
+    episode = session_row = summary = None
     while time.time() < deadline:
         db = sqlite3.connect(str(db_path))
         try:
@@ -362,15 +442,18 @@ def test_session_end_over_http_e2e(http_server):
                 "SELECT id FROM episodes WHERE session_id='e2e-sess'").fetchone()
             session_row = db.execute(
                 "SELECT ended_at FROM sessions WHERE id='e2e-sess'").fetchone()
+            summary = db.execute(
+                "SELECT session_id, summary FROM session_summaries WHERE session_id='e2e-sess'").fetchone()
         except sqlite3.OperationalError:
             pass
         finally:
             db.close()
-        if episode and session_row and session_row[0]:
+        if episode and session_row and session_row[0] and summary:
             break
         time.sleep(0.5)
     assert episode is not None, "episode row missing after session-end"
     assert session_row is not None and session_row[0] is not None
+    assert summary == ("e2e-sess", "Session ended: clear.\nAssistant context: done")
 
 
 def test_unknown_hook_command_over_http(http_server):

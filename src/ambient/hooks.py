@@ -17,6 +17,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -111,8 +112,10 @@ def record_action(call: HookCall, memory_dir: Path) -> str:
 def record_actions(call: HookCall, actions: Sequence[Mapping[str, Any]], memory_dir: Path) -> str:
     """Batch variant of record_action: the client already summarised each call.
 
-    Rows are inserted in payload order - the Stop hook's turn boundary depends
-    on it when several tool calls flush at once.
+    Rows are inserted in payload order, in one transaction, all with one server
+    timestamp - the Stop hook's turn boundary depends on that order when several
+    tool calls flush at once. An item whose ``tool_use_id`` is already claimed
+    (a retried flush) is skipped, the same way record_action skips it.
     """
     settings = AmbientSettings.load(memory_dir)
     db_path = memory_dir / MEMORY_DB_NAME
@@ -123,14 +126,23 @@ def record_actions(call: HookCall, actions: Sequence[Mapping[str, Any]], memory_
         if not table_exists(db, "agent_actions"):
             log_event("action_not_logged", reason="agent_actions missing; start the TAM server once to migrate")
             return ""
-        log = ActionLog(db)
+        now = datetime.now(UTC)
+        built = []
         for item in actions:
+            tool = str(item.get("tool") or "")
             action = build_remote_action(
-                ts=str(item.get("ts") or ""), tool=str(item.get("tool") or ""),
-                summary=str(item.get("summary") or ""), status=str(item.get("status") or ""),
-                exit_code=item.get("exit_code"), session_id=call.session_id, project=call.project)
-            if action is not None:
-                log.record(action, retention_days=settings.action_log_retention_days)
+                tool=tool, summary=str(item.get("summary") or ""), status=str(item.get("status") or ""),
+                exit_code=item.get("exit_code"), session_id=call.session_id, project=call.project, now=now)
+            if action is None:
+                continue
+            tool_use_id = item.get("tool_use_id")
+            if isinstance(tool_use_id, str) and tool_use_id and not claim_tool_use(
+                    memory_dir, call.session_id, tool_use_id):
+                log_event("action_duplicate", tool_use_id=tool_use_id, tool=tool)
+                continue
+            built.append(action)
+        if built:
+            ActionLog(db).record_many(built, retention_days=settings.action_log_retention_days)
     finally:
         db.close()
     return ""
