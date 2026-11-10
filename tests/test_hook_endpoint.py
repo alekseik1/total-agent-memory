@@ -125,6 +125,60 @@ def test_actions_batch_failure_leaves_no_rows(mem, monkeypatch):
     assert action_rows(mem) == []
 
 
+def test_actions_batch_in_flight_is_not_lost_by_a_parallel_turn_end(mem, monkeypatch):
+    """Duplicate installs: Stop B's turn-end runs while Stop A's batch has claimed ids but not committed.
+
+    The batch rows must land in B's turn or a later one, never behind B's last_stop.
+    """
+    import threading
+
+    import ambient.hooks
+    from ambient.settings import AmbientSettings
+    from ambient.turn_end import run_turn_end
+
+    claimed, release = threading.Event(), threading.Event()
+    real_claim = ambient.hooks.claim_tool_use
+
+    def claim_then_pause(memory_dir, session_id, tool_use_id):
+        ok = real_claim(memory_dir, session_id, tool_use_id)
+        if tool_use_id == "toolu_y":
+            claimed.set()
+            release.wait(5)
+        return ok
+
+    monkeypatch.setattr(ambient.hooks, "claim_tool_use", claim_then_pause)
+    errors: list[BaseException] = []
+
+    def guarded(fn):
+        def run():
+            try:
+                fn()
+            except BaseException as exc:
+                errors.append(exc)
+        return threading.Thread(target=run)
+
+    actions = [{"tool": "Bash", "summary": "pytest -q", "tool_use_id": "toolu_x"},
+               {"tool": "Edit", "summary": "src/x.py :: new", "tool_use_id": "toolu_y"}]
+    batch = guarded(lambda: dispatch("actions-batch", make_call(), {"actions": actions}, mem))
+    batch.start()
+    assert claimed.wait(5)
+
+    def turn_end():
+        return run_turn_end(db_path=mem / "memory.db", memory_dir=mem, session_id=SESSION, project="proj",
+                            cwd="/work/proj", assistant_message="", settings=AmbientSettings.load(mem))
+
+    seen: list[int] = []
+    stop_b = guarded(lambda: seen.append(turn_end().actions))
+    stop_b.start()
+    stop_b.join(0.5)
+    release.set()
+    batch.join(5)
+    stop_b.join(5)
+    assert errors == []
+    seen.append(turn_end().actions)
+    assert sum(seen) == 2, seen
+
+
 def test_error_capture_logs_error(mem):
     payload = {"action": "error", "description": "boom", "category": "code_error",
                "severity": "high", "project": "proj"}

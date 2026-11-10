@@ -116,6 +116,9 @@ def record_actions(call: HookCall, actions: Sequence[Mapping[str, Any]], memory_
     timestamp - the Stop hook's turn boundary depends on that order when several
     tool calls flush at once. An item whose ``tool_use_id`` is already claimed
     (a retried flush) is skipped, the same way record_action skips it.
+
+    Claims and the timestamp come after the write lock: a turn-end that read
+    before this commit then holds an earlier ``last_stop`` than these rows.
     """
     settings = AmbientSettings.load(memory_dir)
     db_path = memory_dir / MEMORY_DB_NAME
@@ -126,6 +129,7 @@ def record_actions(call: HookCall, actions: Sequence[Mapping[str, Any]], memory_
         if not table_exists(db, "agent_actions"):
             log_event("action_not_logged", reason="agent_actions missing; start the TAM server once to migrate")
             return ""
+        db.execute("BEGIN IMMEDIATE")
         now = datetime.now(UTC)
         built = []
         for item in actions:

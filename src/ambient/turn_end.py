@@ -196,7 +196,6 @@ class TurnEndResult:
 def run_turn_end(*, db_path: Path, memory_dir: Path, session_id: str, project: str, cwd: str,
                  assistant_message: str, settings: AmbientSettings, now: datetime | None = None) -> TurnEndResult:
     """Compliance check + turn summary for the actions since the previous Stop; moves the turn boundary."""
-    moment = now or datetime.now(UTC)
     if not db_path.is_file() or not (settings.rule_compliance or settings.turn_autosave):
         return TurnEndResult(0, None, None, "")
     state = SessionState.load(memory_dir, session_id)
@@ -205,6 +204,9 @@ def run_turn_end(*, db_path: Path, memory_dir: Path, session_id: str, project: s
         if not table_exists(db, "agent_actions"):
             LOGGER.info(json.dumps({"event": "turn_end_skipped", "reason": "agent_actions missing"}))
             return TurnEndResult(0, None, None, "")
+        # Wait out an in-flight actions batch, then stamp: rows committed after this read get a later ts.
+        db.execute("BEGIN IMMEDIATE")
+        moment = now or datetime.now(UTC)
         actions = ActionLog(db).session_actions(session_id, state.last_stop)
         compliance = None
         notice = ""
