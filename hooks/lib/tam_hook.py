@@ -2077,8 +2077,10 @@ def cmd_session_start_context(args: argparse.Namespace) -> int:
             _ok, text = remote_post("session-start", call, {}, remaining)
         remote_sweep_stale(call, deadline)
         # The recovery file is laptop-local: the server never sees it, so the
-        # block is appended here, last like the local session_start_context.
-        recovery = recovery_block(Path(args.recovery_dir), args.cwd, args.session, args.project)
+        # block is appended here, last like the local session_start_context -
+        # under the same source gate, so clear/compact neither show nor consume it.
+        recovery = (recovery_block(Path(args.recovery_dir), args.cwd, args.session, args.project)
+                    if args.source in ("startup", "resume", "") else "")
         parts = [part for part in (text, recovery) if part]
         if parts:
             print("\n\n".join(parts))

@@ -130,6 +130,8 @@ def test_remote_record_action_imports_no_server_modules(tmp_path):
     modules = set(json.loads(out["TAM_MODULES"]))
     loaded = {name.split(".")[0] for name in modules} | modules
     assert not (loaded & FORBIDDEN_MODULES), sorted(loaded & FORBIDDEN_MODULES)
+    # record-action only spools; urllib.request stays lazy inside remote_post.
+    assert "urllib.request" not in modules
 
 
 # ── spool: PostToolUse is local-only ─────────────────────────────────
@@ -592,13 +594,18 @@ def test_remote_session_end_skips_post_and_keeps_spool_on_flush_failure(
 
     monkeypatch.setattr(tam_hook, "remote_post", failing_post)
     tam_hook.spool_append("sess-end", spool_action("tu_se", "end cmd", session="sess-end"))
+    transcript = tmp_path / "t.jsonl"
+    write_transcript(transcript)
+    recovery_dir = tmp_path / "recovery"
     payload = {"session_id": "sess-end", "cwd": str(tmp_path / "workdir"),
-               "hook_event_name": "SessionEnd"}
+               "hook_event_name": "SessionEnd", "transcript_path": str(transcript)}
     ok = tam_hook.remote_session_end(payload, "e2eproj", ROOT / "src",
                                      "test reason", time.monotonic() + 30,
-                                     tmp_path / "recovery")
+                                     recovery_dir)
     assert ok is False
     assert posts == ["actions-batch"], "session-end must not close before its actions land"
+    assert (recovery_dir / "pending-sess-end.md").is_file(), \
+        "the laptop recovery file is written before the flush, even when it fails"
     pending = pending_spool_actions(tmp_path)
     assert [a["tool_use_id"] for a in pending] == ["tu_se"]
 
@@ -1342,3 +1349,36 @@ def test_remote_session_start_context_appends_recovery(monkeypatch, tmp_path, ca
     assert "SERVER TEXT" in out and "RECOVERY:" in out
     assert out.index("SERVER TEXT") < out.index("RECOVERY:")
     assert "user asked X" in out
+
+
+def test_remote_session_start_context_gates_recovery_by_source(monkeypatch, tmp_path, capsys):
+    """Same gate as local session_start_context: only startup/resume sources
+    print the recovery block, and clear/compact must not consume the file."""
+    _remote_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(tam_hook, "remote_post", lambda *a, **k: (True, "SERVER TEXT"))
+    cwd = tmp_path / "workdir"
+    cwd.mkdir(exist_ok=True)
+    recovery_dir = tmp_path / "recovery"
+    recovery = recovery_dir / "pending-old-sess.md"
+
+    def run(source: str, session: str) -> str:
+        tam_hook.write_recovery(recovery_dir, "old-sess", "e2eproj", str(cwd),
+                                "interrupted", "user asked X", "assistant replied Y")
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+            {"session_id": session, "cwd": str(cwd), "hook_event_name": "SessionStart",
+             "source": source})))
+        capsys.readouterr()
+        rc = tam_hook.main(["session-start-context", "--db", str(tmp_path / "mem" / "memory.db"),
+                            "--project", "e2eproj", "--cwd", str(cwd), "--session", session,
+                            "--source", source, "--recovery-dir", str(recovery_dir)])
+        assert rc == 0
+        return capsys.readouterr().out
+
+    for source in ("clear", "compact"):
+        out = run(source, f"s-{source}")
+        assert "SERVER TEXT" in out and "RECOVERY:" not in out
+        assert recovery.is_file(), f"source={source} must not consume the recovery file"
+
+    out = run("startup", "s-start")
+    assert "RECOVERY:" in out and "user asked X" in out
+    assert not recovery.exists(), "startup must deliver (consume) the recovery file"
