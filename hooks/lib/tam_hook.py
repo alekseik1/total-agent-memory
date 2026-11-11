@@ -53,7 +53,6 @@ import sqlite3
 import subprocess
 import sys
 import time
-import urllib.request
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -1382,6 +1381,7 @@ def remote_post(command: str, call: JsonDict, payload: JsonDict, timeout: float)
     ``timeout`` bounds the whole call, token lookup included: callers pass the
     time left before their hook deadline, so a hung server cannot outlive it.
     """
+    import urllib.request  # lazy: ~27 ms of interpreter startup every hook pays otherwise
     if timeout <= 0:
         return False, ""
     body = json.dumps({"call": call, "payload": payload}, ensure_ascii=False).encode("utf-8")
