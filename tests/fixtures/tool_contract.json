@@ -2719,7 +2719,8 @@
             "retire",
             "add_manual",
             "followed",
-            "report"
+            "report",
+            "update"
           ],
           "type": "string"
         },
@@ -2733,7 +2734,7 @@
           "type": "string"
         },
         "content": {
-          "description": "Rule text (for add_manual)",
+          "description": "Rule text (for add_manual, update)",
           "type": "string"
         },
         "followed": {
@@ -2744,7 +2745,7 @@
           ]
         },
         "id": {
-          "description": "Rule ID (for fire/rate/suspend/activate/retire)",
+          "description": "Rule ID (for fire/rate/suspend/activate/retire/update)",
           "type": "integer"
         },
         "ids": {

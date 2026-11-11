@@ -74,7 +74,7 @@ SHORT_DESCRIPTIONS: Final[Mapping[str, str]] = {
     "self_rules_context": "self_rules_context(project=general, categories?, phase?) — active behaviour rules "
                           "learned from past errors. Load at session start.",
     "self_rules": "self_rules(action, id?, content?, category?, project=general) — "
-                  "list/fire/rate/suspend/activate/retire/add_manual a behaviour rule.",
+                  "list/fire/rate/suspend/activate/retire/add_manual/update a behaviour rule.",
     "file_context": "file_context(path, project?, limit=20) — past errors, hot spots and risk score for a file. "
                     "Call before editing it.",
     "learn_error": "learn_error(file, error, root_cause, fix, pattern, project=general, severity=medium) — record "

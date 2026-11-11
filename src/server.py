@@ -3376,6 +3376,21 @@ class Store:
             self.db.commit()
             return {"added": True, "id": cur.lastrowid}
 
+        elif action == "update":
+            rid = kw.get("id")
+            content = kw.get("content")
+            if not isinstance(rid, int) or isinstance(rid, bool):
+                return {"error": "update requires an integer rule id"}
+            if not isinstance(content, str) or not content.strip():
+                return {"error": "update requires non-empty content"}
+            changed = self.db.execute(
+                "UPDATE rules SET content=?, updated_at=? WHERE id=?",
+                (content, now, rid)).rowcount
+            self.db.commit()
+            if not changed:
+                return self._not_found("Rule", rid)
+            return {"updated": True, "id": rid}
+
         return {"error": f"Unknown action: {action}"}
 
     def _mark_rules_shown(self, ids, now, *, bump_shown=True):
@@ -5931,19 +5946,22 @@ async def _tool_catalogue():
                         "For get: pass `ids` (max 50) to retrieve the full rows behind the "
                         "`rules_index` entries self_rules_context returns when its limit truncates; "
                         "returned rules get shown_count/last_fired bumped, ids that are not active "
-                        "rules are skipped and `returned_ids` says which came back.",
+                        "rules are skipped and `returned_ids` says which came back. "
+                        "Update replaces a rule's content and keeps its counters/history.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "action": {"type": "string",
                                "enum": ["list", "get", "fire", "rate", "suspend", "activate",
-                                        "retire", "add_manual", "followed", "report"]},
+                                        "retire", "add_manual", "followed", "report", "update"]},
                     "ids": {"type": "array", "items": {"type": "integer"}, "maxItems": 50,
                             "description": "For get: rule ids to fetch in full (max 50 per call; "
                                            "extras are dropped, unknown/inactive ids are skipped)."},
-                    "id": {"type": "integer", "description": "Rule ID (for fire/rate/suspend/activate/retire)"},
+                    "id": {"type": "integer",
+                           "description": "Rule ID (for fire/rate/suspend/activate/retire/update)"},
                     "success": {"type": "boolean", "description": "For rate: was rule helpful?"},
-                    "content": {"type": "string", "description": "Rule text (for add_manual)"},
+                    "content": {"type": "string",
+                                "description": "Rule text (for add_manual, update)"},
                     "category": {"type": "string", "description": "Category (for add_manual)"},
                     "scope": {"type": "string", "default": "global",
                               "description": "global | project:<name> | category:<name>"},

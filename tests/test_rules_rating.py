@@ -56,6 +56,11 @@ def _add_rule(store, content, project="myproj", scope=None,
     return cur.lastrowid
 
 
+def _rule_row(store, rid):
+    return store.db.execute(
+        "SELECT * FROM rules WHERE id=?", (rid,)).fetchone()
+
+
 def test_first_success_rating_does_not_auto_suspend_high_fire_rule(store):
     """Rule with 700 auto-fires rated success once stays active, rate == 1.0."""
     rid = _add_rule(store, "long-lived good rule")
@@ -70,3 +75,40 @@ def test_first_success_rating_does_not_auto_suspend_high_fire_rule(store):
         "SELECT status, success_rate FROM rules WHERE id=?", (rid,)).fetchone()
     assert row["status"] == "active"
     assert row["success_rate"] == 1.0
+
+
+def test_update_replaces_content_and_keeps_counters(store):
+    """update edits content + updated_at only; rating history survives."""
+    rid = _add_rule(store, "old rule text")
+    store.manage_rule("sess-rating-test", "rate", id=rid, success=True)
+    store.db.execute(
+        "UPDATE rules SET updated_at='2020-01-01T00:00:00Z' WHERE id=?", (rid,))
+    store.db.commit()
+    before = _rule_row(store, rid)
+
+    r = store.manage_rule("sess-rating-test", "update", id=rid,
+                          content="new rule text")
+    assert r == {"updated": True, "id": rid}
+
+    after = _rule_row(store, rid)
+    assert after["content"] == "new rule text"
+    assert after["updated_at"] != before["updated_at"]
+    for col in ("fire_count", "success_count", "fail_count", "shown_count",
+                "success_rate", "status", "priority", "scope", "project"):
+        assert after[col] == before[col]
+
+
+def test_update_unknown_id_returns_not_found(store):
+    r = store.manage_rule("sess-rating-test", "update", id=99999,
+                          content="new text")
+    assert r == {"error": "Rule 99999 not found", "id": 99999}
+
+
+def test_update_requires_id_and_non_empty_content(store):
+    rid = _add_rule(store, "keep me")
+    for kwargs in ({"id": rid}, {"content": "x"},
+                   {"id": rid, "content": ""},
+                   {"id": rid, "content": "   "}):
+        r = store.manage_rule("sess-rating-test", "update", **kwargs)
+        assert "error" in r and "Unknown action" not in r["error"]
+    assert _rule_row(store, rid)["content"] == "keep me"
