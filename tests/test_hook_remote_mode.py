@@ -698,7 +698,8 @@ def test_remote_session_end_own_spool_beats_foreign_backlog(monkeypatch, tmp_pat
                "hook_event_name": "SessionEnd"}
     started = time.monotonic()
     ok = tam_hook.remote_session_end(payload, "e2eproj", ROOT / "src",
-                                     "test reason", started + 1.0)
+                                     "test reason", started + 1.0,
+                                     tmp_path / "recovery")
     elapsed = time.monotonic() - started
     assert ok is True
     assert "session-end" in posts
