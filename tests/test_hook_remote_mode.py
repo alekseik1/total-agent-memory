@@ -733,6 +733,83 @@ def test_remote_sweep_never_takes_a_fresh_foreign_spool(monkeypatch, tmp_path):
     assert [a["tool_use_id"] for a in pending_spool_actions(tmp_path)] == ["tu_live"]
 
 
+def test_remote_flush_batches_per_project_run(http_server, tmp_path):
+    """A session that changed project mid-spool gets one actions-batch call per
+    consecutive (session, project, cwd) run: the server stores every action
+    under the project its own line carried, not the file's first line's."""
+    mem, port = http_server
+    env = client_env(tmp_path, f"http://127.0.0.1:{port}")
+    cwd = tmp_path / "workdir"
+    session = "s2-runs"
+    spool_dir = tmp_path / "cache" / "tam" / "spool"
+    spool_dir.mkdir(parents=True)
+    lines = [spool_action("tu_p1a", "in p1", session=session, project="p1proj", cwd="/p1"),
+             spool_action("tu_p1b", "still p1", session=session, project="p1proj", cwd="/p1"),
+             spool_action("tu_p2a", "cd p2", session=session, project="p2proj", cwd="/p2"),
+             spool_action("tu_p2b", "still p2", session=session, project="p2proj", cwd="/p2")]
+    (spool_dir / f"{session}.jsonl").write_text(
+        "".join(json.dumps(a) + "\n" for a in lines), encoding="utf-8")
+
+    proc = run_hook(["prompt-context", "--src", str(ROOT / "src"),
+                     "--memory-dir", str(tmp_path / "client-mem"),
+                     "--emit", "UserPromptSubmit"],
+                    env=env, payload=hook_payload(
+                        session, cwd, hook_event_name="UserPromptSubmit", prompt="hi"))
+    assert proc.returncode == 0, proc.stderr
+
+    deadline = time.time() + 30
+    rows = []
+    while time.time() < deadline:
+        db = sqlite3.connect(str(mem / "memory.db"))
+        try:
+            rows = db.execute(
+                "SELECT project FROM agent_actions WHERE session_id=? ORDER BY id",
+                (session,)).fetchall()
+        finally:
+            db.close()
+        if len(rows) == 4:
+            break
+        time.sleep(0.5)
+    assert [r[0] for r in rows] == ["p1proj", "p1proj", "p2proj", "p2proj"]
+
+
+def test_remote_flush_own_stops_when_flushed_file_cannot_be_removed(monkeypatch, tmp_path):
+    """An undeletable flushed spool must not spin the re-list loop until the
+    deadline: once a re-list yields only paths already flushed in this call,
+    remote_flush_own returns True so the follow-up POST still goes out."""
+    spool_env(monkeypatch, tmp_path)
+    posts = []
+
+    def fake_post(command, call, payload, timeout):
+        posts.append(command)
+        return True, ""
+
+    def no_unlink(path, why):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(tam_hook, "remote_post", fake_post)
+    monkeypatch.setattr(tam_hook, "unlink", no_unlink)
+    tam_hook.spool_append(SESSION, spool_action("tu_stuck", "stuck cmd"))
+    started = time.monotonic()
+    ok = tam_hook.remote_flush_own(batch_call(), started + 2)
+    assert ok is True
+    assert time.monotonic() - started < 2
+    assert posts == ["actions-batch"]
+    assert [a["tool_use_id"] for a in pending_spool_actions(tmp_path)] == ["tu_stuck"]
+
+
+def test_remote_spool_take_refreshes_the_taken_file_mtime(monkeypatch, tmp_path):
+    """os.replace keeps the source mtime; the taken-aside .sending must look
+    fresh or another session's stale-sweep could grab a live flush."""
+    spool_env(monkeypatch, tmp_path)
+    path = spool_file(tmp_path, SESSION)
+    tam_hook.spool_append(SESSION, spool_action("tu_mt", "mtime cmd"))
+    stale = time.time() - tam_hook.SPOOL_STALE_SEC - 60
+    os.utime(path, (stale, stale))
+    taken = tam_hook._spool_take(path)
+    assert time.time() - taken.stat().st_mtime < 60
+
+
 # ── one deadline per hook: a blackholed server cannot hang the hook ──
 
 
@@ -928,6 +1005,33 @@ def test_remote_memory_trigger_requests_use_one_ordered_worker(monkeypatch, tmp_
                if path.endswith("/error-capture")]
     assert actions == ["error", "check-patterns"]
     assert len(spawns) == 1, "one memory-trigger invocation must spawn one worker"
+
+
+def test_remote_memory_trigger_flushes_queued_requests_on_failure(monkeypatch, tmp_path):
+    """If memory_trigger raises after queueing error-capture requests (a state
+    file write fails), they are still sent: capture.flush() runs in finally."""
+    spool_env(monkeypatch, tmp_path)
+    flushed = []
+
+    def spy_flush(self):
+        flushed.append([r["payload"]["action"] for r in self.requests])
+
+    def failing_trigger(*args, **kwargs):
+        kwargs["runner"](tmp_path, "auto_self_improve.py",
+                         ["error", "--project", "e2eproj"], stdin_text="d")
+        raise OSError("state file write failed")
+
+    monkeypatch.setattr(tam_hook.RemoteErrorCaptureRunner, "flush", spy_flush)
+    monkeypatch.setattr(tam_hook, "memory_trigger", failing_trigger)
+    payload = {"hook_event_name": "PostToolUseFailure", "tool_name": "Bash",
+               "tool_input": {"command": "false"},
+               "tool_response": {"exit_code": "2", "stderr": "boom"},
+               "session_id": "s2-mt-fail", "cwd": str(tmp_path / "workdir")}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    rc = tam_hook.main(["memory-trigger", "--state-dir", str(tmp_path / "state"),
+                        "--src", str(ROOT / "src"), "--emit", "PostToolUse"])
+    assert rc == 1
+    assert flushed == [["error"]]
 
 
 # ── local-mode stop keeps its early return ───────────────────────────

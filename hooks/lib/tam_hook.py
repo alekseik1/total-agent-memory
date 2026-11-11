@@ -1487,6 +1487,9 @@ def _spool_take(path: Path) -> Path:
     """Rename a pending spool aside; appends during the flush start a fresh file."""
     sending = path.with_name(f"{path.stem}.sending.{os.getpid()}")
     os.replace(path, sending)
+    # os.replace keeps the source mtime; refresh it so a live owner's fresh
+    # .sending does not look stale to another session's sweep.
+    os.utime(sending)
     return sending
 
 
@@ -1512,6 +1515,34 @@ def _spool_call(call: JsonDict, path: Path, entries: list[tuple[str, JsonDict]])
     return batch
 
 
+def _spool_identity(call: JsonDict, path: Path, action: JsonDict) -> tuple[str, str, str]:
+    """The (session_id, project, cwd) one spooled action is sent under: the
+    line's own values, else the spool file's session and the flushing call's -
+    the same resolution _spool_call applies to a whole batch."""
+    return (str(action.get("session_id") or _spool_session(path)
+                or call.get("session_id") or ""),
+            str(action.get("project") or call.get("project") or ""),
+            str(action.get("cwd") or call.get("cwd") or ""))
+
+
+def _spool_runs(call: JsonDict, path: Path,
+                entries: list[tuple[str, JsonDict]]) -> list[list[tuple[str, JsonDict]]]:
+    """Consecutive entries sharing one identity form a run; each run is flushed
+    as its own actions-batch call so the server stores every action under the
+    project/cwd its line carried - a session that cd'd into another repo
+    mid-spool does not get the whole file stored under the first line's."""
+    runs: list[list[tuple[str, JsonDict]]] = []
+    last: tuple[str, str, str] | None = None
+    for entry in entries:
+        identity = _spool_identity(call, path, entry[1])
+        if identity == last:
+            runs[-1].append(entry)
+        else:
+            runs.append([entry])
+            last = identity
+    return runs
+
+
 def _flush_entries(path: Path, call: JsonDict, entries: list[tuple[str, JsonDict]],
                    deadline: float) -> bool:
     """POST one spool file's actions as actions-batch chunks, oldest first.
@@ -1519,51 +1550,62 @@ def _flush_entries(path: Path, call: JsonDict, entries: list[tuple[str, JsonDict
     Sent chunks leave the file as they succeed, so a crash or a failed chunk
     replays at most the unacknowledged tail; the server dedups by tool_use_id.
     The batch call carries an empty payload: the stored hook payload can be
-    large and the 256 KB body limit must fit the actions themselves.
+    large and the 256 KB body limit must fit the actions themselves. Entries
+    are grouped into runs of identical session/project/cwd, each flushed under
+    its own batch call.
     """
-    index = 0
-    while index < len(entries):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        chunk: list[JsonDict] = []
-        size = 0
-        while index + len(chunk) < len(entries) and len(chunk) < SPOOL_ACTION_LIMIT:
-            line, action = entries[index + len(chunk)]
-            line_bytes = len(line.encode("utf-8"))
-            if chunk and size + line_bytes > SPOOL_CHUNK_BYTES:
-                break
-            chunk.append(action)
-            size += line_bytes
-        ok, _ = remote_post("actions-batch", call, {"actions": chunk}, remaining)
-        if not ok:
-            return False
-        index += len(chunk)
-        try:
-            _spool_keep(path, entries[index:])
-        except OSError as exc:
-            log(f"cannot update spool {path}: {exc}")
+    done = 0
+    for run in _spool_runs(call, path, entries):
+        batch = _spool_call(call, path, run)
+        index = 0
+        while index < len(run):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            chunk: list[JsonDict] = []
+            size = 0
+            while index + len(chunk) < len(run) and len(chunk) < SPOOL_ACTION_LIMIT:
+                line, action = run[index + len(chunk)]
+                line_bytes = len(line.encode("utf-8"))
+                if chunk and size + line_bytes > SPOOL_CHUNK_BYTES:
+                    break
+                chunk.append(action)
+                size += line_bytes
+            ok, _ = remote_post("actions-batch", batch, {"actions": chunk}, remaining)
+            if not ok:
+                return False
+            index += len(chunk)
+            done += len(chunk)
+            try:
+                _spool_keep(path, entries[done:])
+            except OSError as exc:
+                log(f"cannot update spool {path}: {exc}")
     return True
 
 
-def _flush_one(path: Path, call: JsonDict, deadline: float) -> bool:
+def _flush_one(path: Path, call: JsonDict, deadline: float) -> Path | None:
     """Flush a single spool file: a .jsonl is taken aside first (appends during
     the POSTs land in a fresh file), then its actions go out as actions-batch
-    chunks under the session/project/cwd carried by the spooled lines. False on
-    a transport failure or the deadline; whatever is left stays on disk."""
+    chunks under the session/project/cwd carried by the spooled lines. Returns
+    the path the entries were flushed from - the taken-aside .sending.<pid>
+    for a .jsonl, so a file that survives (undeletable) is told apart from a
+    fresh one at the same name. None on a transport failure or the deadline;
+    whatever is left stays on disk."""
     if path.name.endswith(".jsonl"):
         try:
             path = _spool_take(path)
         except FileNotFoundError:
-            return True
+            return path.with_name(f"{path.stem}.sending.{os.getpid()}")
         except OSError as exc:
             log(f"cannot take spool {path}: {exc}")
-            return False
+            return None
     entries = _spool_entries(path)
     if not entries:
         unlink(path, "spool flushed")
-        return True
-    return _flush_entries(path, _spool_call(call, path, entries), entries, deadline)
+        return path
+    if not _flush_entries(path, _spool_call(call, path, entries), entries, deadline):
+        return None
+    return path
 
 
 def remote_flush_own(call: JsonDict, deadline: float) -> bool:
@@ -1573,18 +1615,24 @@ def remote_flush_own(call: JsonDict, deadline: float) -> bool:
 
     Own files are re-listed until none remain: a concurrent hook of the same
     session can leave a .sending.<pid> behind mid-flush, and resending is safe
-    because the server dedups by tool_use_id. No lock is ever held across a POST.
+    because the server dedups by tool_use_id. Paths already flushed in this
+    call are not retried - one that cannot be removed would otherwise spin the
+    loop until the deadline. No lock is ever held across a POST.
     """
     own_name = safe_name(str(call.get("session_id") or ""))
+    flushed: set[Path] = set()
     while True:
-        own = [path for path in _spool_pending() if _spool_session(path) == own_name]
+        own = [path for path in _spool_pending()
+               if _spool_session(path) == own_name and path not in flushed]
         if not own:
             return True
         if time.monotonic() >= deadline:
             return False
         for path in own:
-            if not _flush_one(path, call, deadline):
+            flushed_path = _flush_one(path, call, deadline)
+            if flushed_path is None:
                 return False
+            flushed.add(flushed_path)
 
 
 def remote_sweep_stale(call: JsonDict, deadline: float) -> None:
@@ -1604,7 +1652,7 @@ def remote_sweep_stale(call: JsonDict, deadline: float) -> None:
             # Lines without project are old format: only their own session can
             # send them under the right project.
             continue
-        if not _flush_one(path, call, deadline):
+        if _flush_one(path, call, deadline) is None:
             return
 
 
@@ -1978,9 +2026,11 @@ def cmd_memory_trigger(args: argparse.Namespace) -> int:
     project = args.project or project_of(payload)
     if remote_mode():
         capture = remote_error_capture_runner(hook_call(payload, project))
-        messages = memory_trigger(payload, Path(args.state_dir), Path(args.src),
-                                  project, runner=capture)
-        capture.flush()
+        try:
+            messages = memory_trigger(payload, Path(args.state_dir), Path(args.src),
+                                      project, runner=capture)
+        finally:
+            capture.flush()
     else:
         messages = memory_trigger(payload, Path(args.state_dir), Path(args.src),
                                   project, runner=run_script)
