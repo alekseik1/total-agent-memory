@@ -2724,6 +2724,10 @@
           ],
           "type": "string"
         },
+        "append": {
+          "description": "For update: text appended to the rule's content server-side (instead of content)",
+          "type": "string"
+        },
         "applicable": {
           "default": true,
           "description": "For followed: false marks the rule not applicable",

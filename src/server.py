@@ -3379,13 +3379,24 @@ class Store:
         elif action == "update":
             rid = kw.get("id")
             content = kw.get("content")
+            append = kw.get("append")
             if not isinstance(rid, int) or isinstance(rid, bool):
                 return {"error": "update requires an integer rule id"}
-            if not isinstance(content, str) or not content.strip():
-                return {"error": "update requires non-empty content"}
-            changed = self.db.execute(
-                "UPDATE rules SET content=?, updated_at=? WHERE id=?",
-                (content, now, rid)).rowcount
+            if (content is None) == (append is None):
+                return {"error": "update requires exactly one of content or append"}
+            if content is not None:
+                if not isinstance(content, str) or not content.strip():
+                    return {"error": "update requires non-empty content"}
+                stmt, params = ("UPDATE rules SET content=?, updated_at=? WHERE id=?",
+                                (content, now, rid))
+            else:
+                if not isinstance(append, str) or not append.strip():
+                    return {"error": "update requires non-empty append"}
+                # Server-side concat: the caller sends only the delta, so a
+                # retype can never silently rewrite the existing text.
+                stmt = "UPDATE rules SET content=content || ?, updated_at=? WHERE id=?"
+                params = (append, now, rid)
+            changed = self.db.execute(stmt, params).rowcount
             self.db.commit()
             if not changed:
                 return self._not_found("Rule", rid)
@@ -5947,7 +5958,8 @@ async def _tool_catalogue():
                         "`rules_index` entries self_rules_context returns when its limit truncates; "
                         "returned rules get shown_count/last_fired bumped, ids that are not active "
                         "rules are skipped and `returned_ids` says which came back. "
-                        "Update replaces a rule's content and keeps its counters/history.",
+                        "Update replaces a rule's content (or appends to it via `append`) "
+                        "and keeps its counters/history.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -5962,6 +5974,9 @@ async def _tool_catalogue():
                     "success": {"type": "boolean", "description": "For rate: was rule helpful?"},
                     "content": {"type": "string",
                                 "description": "Rule text (for add_manual, update)"},
+                    "append": {"type": "string",
+                               "description": "For update: text appended to the rule's "
+                                              "content server-side (instead of content)"},
                     "category": {"type": "string", "description": "Category (for add_manual)"},
                     "scope": {"type": "string", "default": "global",
                               "description": "global | project:<name> | category:<name>"},

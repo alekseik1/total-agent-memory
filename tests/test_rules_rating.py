@@ -112,3 +112,41 @@ def test_update_requires_id_and_non_empty_content(store):
         r = store.manage_rule("sess-rating-test", "update", **kwargs)
         assert "error" in r and "Unknown action" not in r["error"]
     assert _rule_row(store, rid)["content"] == "keep me"
+
+
+def test_update_append_concatenates_and_keeps_counters(store):
+    """append adds text server-side; counters/history survive."""
+    rid = _add_rule(store, "old rule text")
+    store.manage_rule("sess-rating-test", "rate", id=rid, success=True)
+    store.db.execute(
+        "UPDATE rules SET updated_at='2020-01-01T00:00:00Z' WHERE id=?", (rid,))
+    store.db.commit()
+    before = _rule_row(store, rid)
+
+    appended = "  extra clause\nwith a newline"
+    r = store.manage_rule("sess-rating-test", "update", id=rid, append=appended)
+    assert r == {"updated": True, "id": rid}
+
+    after = _rule_row(store, rid)
+    assert after["content"] == before["content"] + appended
+    assert after["updated_at"] != before["updated_at"]
+    for col in ("fire_count", "success_count", "fail_count", "shown_count",
+                "success_rate", "status", "priority", "scope", "project"):
+        assert after[col] == before[col]
+
+
+def test_update_rejects_content_and_append_together(store):
+    rid = _add_rule(store, "keep me")
+    r = store.manage_rule("sess-rating-test", "update", id=rid,
+                          content="new", append=" tail")
+    assert "error" in r
+    assert _rule_row(store, rid)["content"] == "keep me"
+
+
+def test_update_rejects_empty_append(store):
+    rid = _add_rule(store, "keep me")
+    for append in ("", "   "):
+        r = store.manage_rule("sess-rating-test", "update", id=rid,
+                              append=append)
+        assert "error" in r and "append" in r["error"]
+    assert _rule_row(store, rid)["content"] == "keep me"
