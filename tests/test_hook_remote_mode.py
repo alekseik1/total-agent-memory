@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
 
@@ -419,9 +420,10 @@ def spool_env(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("MEMORY_PROJECT", "e2eproj")
 
 
-def spool_action(tuid: str, summary: str = "cmd", session: str = SESSION) -> dict:
+def spool_action(tuid: str, summary: str = "cmd", session: str = SESSION,
+                 project: str = "e2eproj", cwd: str = "/w") -> dict:
     return {"tool": "Bash", "summary": summary, "status": "ok", "exit_code": None,
-            "session_id": session, "tool_use_id": tuid}
+            "session_id": session, "project": project, "cwd": cwd, "tool_use_id": tuid}
 
 
 def batch_call(session: str = SESSION) -> dict:
@@ -453,7 +455,7 @@ def test_remote_flush_actions_chunks_and_strips_call_payload(monkeypatch, tmp_pa
     monkeypatch.setattr(tam_hook, "remote_post", fake_post)
     for i in range(401):
         tam_hook.spool_append(SESSION, spool_action(f"tu_{i}", f"cmd {i}"))
-    assert tam_hook.remote_flush_actions(batch_call(), time.monotonic() + 30) is True
+    assert tam_hook.remote_flush_own(batch_call(), time.monotonic() + 30) is True
     assert [len(p["actions"]) for _c, _call, p in posts] == [400, 1]
     assert all(command == "actions-batch" for command, _c, _p in posts)
     assert all(call["payload"] == {} for _c, call, _p in posts)
@@ -472,7 +474,7 @@ def test_remote_flush_failed_chunk_keeps_the_tail(monkeypatch, tmp_path):
     monkeypatch.setattr(tam_hook, "remote_post", flaky_post)
     for i in range(401):
         tam_hook.spool_append(SESSION, spool_action(f"tu_{i}", f"cmd {i}"))
-    assert tam_hook.remote_flush_actions(batch_call(), time.monotonic() + 30) is False
+    assert tam_hook.remote_flush_own(batch_call(), time.monotonic() + 30) is False
     assert attempts == [400, 1]
     pending = pending_spool_actions(tmp_path)
     assert [a["tool_use_id"] for a in pending] == ["tu_400"]
@@ -491,30 +493,38 @@ def test_remote_flush_actions_budgets_utf8_bytes(monkeypatch, tmp_path):
     monkeypatch.setattr(tam_hook, "remote_post", fake_post)
     for i in range(400):
         tam_hook.spool_append(SESSION, spool_action(f"tu_{i}", "привет мир " * 30))
-    assert tam_hook.remote_flush_actions(batch_call(), time.monotonic() + 30) is True
+    assert tam_hook.remote_flush_own(batch_call(), time.monotonic() + 30) is True
     assert len(bodies) >= 2, "400 multibyte actions must not fit one 256 KB body"
     assert all(size <= tam_hook.REMOTE_BODY_LIMIT_BYTES for size in bodies), bodies
 
 
 def test_remote_flush_append_during_post_survives(monkeypatch, tmp_path):
-    """A PostToolUse landing while the flush POSTs starts a fresh spool, not a lost line."""
+    """A PostToolUse landing while the flush POSTs starts a fresh spool; the
+    own-session re-list picks it up before the flush returns."""
     spool_env(monkeypatch, tmp_path)
     late = spool_action("tu_late", "late cmd")
+    posts = []
+    appended = False
 
     def fake_post(command, call, payload, timeout):
-        tam_hook.spool_append(SESSION, late)
+        nonlocal appended
+        posts.append(payload["actions"])
+        if not appended:
+            appended = True
+            tam_hook.spool_append(SESSION, late)
         return True, ""
 
     monkeypatch.setattr(tam_hook, "remote_post", fake_post)
     tam_hook.spool_append(SESSION, spool_action("tu_first", "first cmd"))
-    assert tam_hook.remote_flush_actions(batch_call(), time.monotonic() + 30) is True
-    pending = pending_spool_actions(tmp_path)
-    assert [a["tool_use_id"] for a in pending] == ["tu_late"]
+    assert tam_hook.remote_flush_own(batch_call(), time.monotonic() + 30) is True
+    sent = [a["tool_use_id"] for actions in posts for a in actions]
+    assert sent == ["tu_first", "tu_late"]
+    assert pending_spool_actions(tmp_path) == []
 
 
 def test_remote_flush_sweeps_stranded_spools(http_server, tmp_path):
-    """Other sessions' .jsonl and .sending.* spools flush under their own session id,
-    .sending leftovers first, then .jsonl oldest first."""
+    """Stale foreign spools flush under their own session AND project, after the
+    follow-up POST; .sending leftovers first, then .jsonl oldest first."""
     mem, port = http_server
     env = client_env(tmp_path, f"http://127.0.0.1:{port}")
     cwd = tmp_path / "workdir"
@@ -522,12 +532,17 @@ def test_remote_flush_sweeps_stranded_spools(http_server, tmp_path):
     spool_dir = tmp_path / "cache" / "tam" / "spool"
     spool_dir.mkdir(parents=True)
     (spool_dir / "deadbeef.sending.31337").write_text(
-        json.dumps(spool_action("tu_dead", "stranded cmd", session="")) + "\n",
+        json.dumps(spool_action("tu_dead", "stranded cmd", session="",
+                                project="deadproj")) + "\n",
         encoding="utf-8")
-    other_lines = [spool_action(f"tu_o{i}", f"other {i}", session="othersess")
+    other_lines = [spool_action(f"tu_o{i}", f"other {i}", session="othersess",
+                                project="othersproj")
                    for i in range(2)]
     (spool_dir / "othersess.jsonl").write_text(
         "".join(json.dumps(a) + "\n" for a in other_lines), encoding="utf-8")
+    stale = time.time() - tam_hook.SPOOL_STALE_SEC - 60
+    for path in spool_dir.iterdir():
+        os.utime(path, (stale, stale))
 
     proc = run_hook(["record-action", "--src", str(ROOT / "src"),
                      "--memory-dir", str(tmp_path / "client-mem")],
@@ -547,7 +562,7 @@ def test_remote_flush_sweeps_stranded_spools(http_server, tmp_path):
         db = sqlite3.connect(str(mem / "memory.db"))
         try:
             rows = db.execute(
-                "SELECT session_id, tool FROM agent_actions "
+                "SELECT session_id, tool, project FROM agent_actions "
                 "WHERE session_id IN ('deadbeef','othersess',?) ORDER BY id",
                 (current,)).fetchall()
         finally:
@@ -555,10 +570,12 @@ def test_remote_flush_sweeps_stranded_spools(http_server, tmp_path):
         if len(rows) == 4:
             break
         time.sleep(0.5)
-    # .sending leftover first (session from the filename), then the older .jsonl,
-    # then this session's own spool: all under their own session ids.
-    assert rows == [("deadbeef", "Bash"), ("othersess", "Bash"),
-                    ("othersess", "Bash"), (current, "Bash")]
+    # Own session first (it gates the follow-up POST), then the stale sweep:
+    # .sending leftover (session and project from the spooled line/filename),
+    # then the older .jsonl - all under their own session ids and projects.
+    assert rows == [(current, "Bash", "e2eproj"), ("deadbeef", "Bash", "deadproj"),
+                    ("othersess", "Bash", "othersproj"),
+                    ("othersess", "Bash", "othersproj")]
     assert not list(spool_dir.iterdir())
 
 
@@ -583,6 +600,137 @@ def test_remote_session_end_skips_post_and_keeps_spool_on_flush_failure(
     assert posts == ["actions-batch"], "session-end must not close before its actions land"
     pending = pending_spool_actions(tmp_path)
     assert [a["tool_use_id"] for a in pending] == ["tu_se"]
+
+
+def test_remote_sweep_sends_spooled_project_and_cwd(monkeypatch, tmp_path):
+    """A stale foreign spool is sent under ITS session, project and cwd - never
+    the sweeping hook's, which would mislabel the rows in another repo."""
+    spool_env(monkeypatch, tmp_path)
+    posts = []
+
+    def fake_post(command, call, payload, timeout):
+        posts.append((command, call))
+        return True, ""
+
+    monkeypatch.setattr(tam_hook, "remote_post", fake_post)
+    spool_dir = tmp_path / "cache" / "tam" / "spool"
+    spool_dir.mkdir(parents=True)
+    foreign = spool_dir / "foreign1.jsonl"
+    foreign.write_text(json.dumps(spool_action(
+        "tu_f1", "foreign cmd", session="foreign1",
+        project="p1proj", cwd="/p1cwd")) + "\n", encoding="utf-8")
+    stale = time.time() - 700
+    os.utime(foreign, (stale, stale))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(hook_payload(
+        "own-sess", tmp_path / "workdir",
+        hook_event_name="UserPromptSubmit", prompt="hi"))))
+    rc = tam_hook.main(["prompt-context", "--src", str(ROOT / "src"),
+                        "--memory-dir", str(tmp_path / "client-mem"),
+                        "--emit", "UserPromptSubmit"])
+    assert rc == 0
+    batches = [call for command, call in posts if command == "actions-batch"]
+    assert len(batches) == 1
+    assert batches[0]["session_id"] == "foreign1"
+    assert batches[0]["project"] == "p1proj"
+    assert batches[0]["cwd"] == "/p1cwd"
+
+
+def test_remote_stop_flushes_own_sending_left_by_concurrent_hook(monkeypatch, tmp_path):
+    """A <sid>.sending.<pid> of THIS session appearing mid-flush is delivered
+    before turn-end: the turn boundary must not pass undelivered actions."""
+    spool_env(monkeypatch, tmp_path)
+    spool_dir = tmp_path / "cache" / "tam" / "spool"
+    spool_dir.mkdir(parents=True)
+    tam_hook.spool_append(SESSION, spool_action("tu_first", "first cmd"))
+    posts = []
+    injected = False
+
+    def fake_post(command, call, payload, timeout):
+        nonlocal injected
+        posts.append(command)
+        if command == "actions-batch" and not injected:
+            injected = True
+            # A concurrent hook of the same session took a fresh .jsonl aside.
+            (spool_dir / f"{SESSION}.sending.4242").write_text(
+                json.dumps(spool_action("tu_late", "late cmd")) + "\n",
+                encoding="utf-8")
+        return True, ""
+
+    monkeypatch.setattr(tam_hook, "remote_post", fake_post)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(hook_payload(
+        SESSION, tmp_path / "workdir", hook_event_name="Stop"))))
+    rc = tam_hook.main(["stop", "--memory-dir", str(tmp_path / "client-mem"),
+                        "--recovery-dir", str(tmp_path / "client-mem" / "recovery"),
+                        "--src", str(ROOT / "src")])
+    assert rc == 0
+    assert posts == ["actions-batch", "actions-batch", "turn-end"]
+    assert pending_spool_actions(tmp_path) == []
+
+
+def test_remote_session_end_own_spool_beats_foreign_backlog(monkeypatch, tmp_path):
+    """Own session-end is POSTed within the deadline even when a large stale
+    foreign backlog would eat the whole budget under a global sweep."""
+    spool_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir(exist_ok=True)
+    spool_dir = tmp_path / "cache" / "tam" / "spool"
+    spool_dir.mkdir(parents=True)
+    stale = time.time() - 700
+    for i in range(30):
+        path = spool_dir / f"foreign{i}.jsonl"
+        path.write_text("".join(
+            json.dumps(spool_action(f"tu_f{i}_{j}", f"cmd {j}",
+                                    session=f"foreign{i}", project=f"fp{i}",
+                                    cwd="/f")) + "\n"
+            for j in range(tam_hook.SPOOL_ACTION_LIMIT)), encoding="utf-8")
+        os.utime(path, (stale, stale))
+    tam_hook.spool_append("own-end", spool_action("tu_own", "own cmd", session="own-end"))
+    posts = []
+
+    def slow_post(command, call, payload, timeout):
+        posts.append(command)
+        time.sleep(0.05)
+        return True, ""
+
+    monkeypatch.setattr(tam_hook, "remote_post", slow_post)
+    payload = {"session_id": "own-end", "cwd": str(tmp_path / "workdir"),
+               "hook_event_name": "SessionEnd"}
+    started = time.monotonic()
+    ok = tam_hook.remote_session_end(payload, "e2eproj", ROOT / "src",
+                                     "test reason", started + 1.0)
+    elapsed = time.monotonic() - started
+    assert ok is True
+    assert "session-end" in posts
+    assert elapsed < 2.0
+
+
+def test_remote_sweep_never_takes_a_fresh_foreign_spool(monkeypatch, tmp_path):
+    """A foreign .jsonl younger than the stale threshold is left alone: its live
+    session may still be appending through an fd opened before a take-aside."""
+    spool_env(monkeypatch, tmp_path)
+    posts = []
+
+    def fake_post(command, call, payload, timeout):
+        posts.append(command)
+        return True, ""
+
+    monkeypatch.setattr(tam_hook, "remote_post", fake_post)
+    spool_dir = tmp_path / "cache" / "tam" / "spool"
+    spool_dir.mkdir(parents=True)
+    foreign = spool_dir / "live1.jsonl"
+    foreign.write_text(json.dumps(spool_action(
+        "tu_live", "live cmd", session="live1", project="lp", cwd="/l")) + "\n",
+        encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(hook_payload(
+        "own-sess", tmp_path / "workdir",
+        hook_event_name="UserPromptSubmit", prompt="hi"))))
+    rc = tam_hook.main(["prompt-context", "--src", str(ROOT / "src"),
+                        "--memory-dir", str(tmp_path / "client-mem"),
+                        "--emit", "UserPromptSubmit"])
+    assert rc == 0
+    assert posts == ["prompt-context"]
+    assert foreign.exists()
+    assert [a["tool_use_id"] for a in pending_spool_actions(tmp_path)] == ["tu_live"]
 
 
 # ── one deadline per hook: a blackholed server cannot hang the hook ──
@@ -723,6 +871,65 @@ def test_remote_memory_trigger_never_posts_in_process(monkeypatch, tmp_path):
     assert calls == []
 
 
+def test_remote_memory_trigger_requests_use_one_ordered_worker(monkeypatch, tmp_path):
+    """error + check-patterns from one memory-trigger invocation reach the server
+    in order through a SINGLE detached worker (an ordered list on stdin)."""
+    received = []
+
+    class Recorder(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            received.append((self.path, body))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok": true, "output": ""}')
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Recorder)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        spool_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("TAM_REMOTE_URL",
+                           f"http://127.0.0.1:{server.server_address[1]}")
+        category, _severity = tam_hook.categorize("boom")
+        counts = tmp_path / "state" / "error-counts"
+        counts.mkdir(parents=True)
+        (counts / tam_hook.safe_name(f"{category}-e2eproj")).write_text(
+            str(tam_hook.ERROR_PATTERN_THRESHOLD - 1), encoding="utf-8")
+        real_popen = subprocess.Popen
+        spawns = []
+
+        def counting_popen(args, *a, **k):
+            if "remote-post" in args:
+                spawns.append(args)
+            return real_popen(args, *a, **k)
+
+        monkeypatch.setattr(tam_hook.subprocess, "Popen", counting_popen)
+        payload = {"hook_event_name": "PostToolUseFailure", "tool_name": "Bash",
+                   "tool_input": {"command": "false"},
+                   "tool_response": {"exit_code": "2", "stderr": "boom"},
+                   "session_id": "s2-mt-order", "cwd": str(tmp_path / "workdir")}
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+        rc = tam_hook.main(["memory-trigger", "--state-dir", str(tmp_path / "state"),
+                            "--src", str(ROOT / "src"), "--emit", "PostToolUse"])
+        assert rc == 0
+        deadline = time.time() + 15
+        while time.time() < deadline and len(received) < 2:
+            time.sleep(0.1)
+    finally:
+        server.shutdown()
+        server.server_close()
+    actions = [body["payload"]["action"] for path, body in received
+               if path.endswith("/error-capture")]
+    assert actions == ["error", "check-patterns"]
+    assert len(spawns) == 1, "one memory-trigger invocation must spawn one worker"
+
+
 # ── local-mode stop keeps its early return ───────────────────────────
 
 
@@ -745,7 +952,9 @@ def test_local_stop_hook_active_returns_before_project_lookup(monkeypatch, tmp_p
 
 
 def test_remote_slim_call_keeps_only_the_fields_the_server_reads(tmp_path):
-    big = "x" * (tam_hook.REMOTE_CALL_FIELD_MAX_BYTES + 100)
+    """Only the fields the server reads survive, under one shared budget measured
+    on the JSON-encoded size: escapes count, not just raw UTF-8 length."""
+    big = "x" * (tam_hook.REMOTE_CALL_FIELD_MAX_BYTES // 4)
     call = {"payload": {"prompt": big, "last_assistant_message": "done",
                         "user_message": {"role": "user", "content": big},
                         "transcript_path": "/secret/path", "cwd": "/w",
@@ -753,13 +962,23 @@ def test_remote_slim_call_keeps_only_the_fields_the_server_reads(tmp_path):
             "project": "e2eproj", "session_id": "s", "cwd": "/w"}
     slim = tam_hook._remote_slim_call(call, "prompt", "user_message")
     assert set(slim["payload"]) == {"prompt", "user_message"}
-    assert len(slim["payload"]["prompt"].encode("utf-8")) \
-        <= tam_hook.REMOTE_CALL_FIELD_MAX_BYTES
     assert slim["payload"]["user_message"]["role"] == "user"
-    assert len(slim["payload"]["user_message"]["content"].encode("utf-8")) \
-        <= tam_hook.REMOTE_CALL_FIELD_MAX_BYTES
+    size = sum(len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+               for value in slim["payload"].values())
+    assert size <= tam_hook.REMOTE_CALL_FIELD_MAX_BYTES
     # The raw call is not mutated.
     assert len(call["payload"]["prompt"]) == len(big)
+
+    # Escape-heavy text is clipped by encoded size; one field can crowd the
+    # rest out of the shared budget entirely.
+    escapes = '"' * (tam_hook.REMOTE_CALL_FIELD_MAX_BYTES // 2)
+    call = {"payload": {"prompt": escapes,
+                        "user_message": {"role": "user", "content": "hi"}},
+            "project": "e2eproj", "session_id": "s", "cwd": "/w"}
+    slim = tam_hook._remote_slim_call(call, "prompt", "user_message")
+    assert set(slim["payload"]) == {"prompt"}
+    assert len(json.dumps(slim["payload"]["prompt"], ensure_ascii=False)
+               .encode("utf-8")) <= tam_hook.REMOTE_CALL_FIELD_MAX_BYTES
 
 
 # ── end-to-end parity: same session local vs remote ──────────────────
@@ -805,7 +1024,7 @@ def collect_rows(db_path: Path, session: str, cwd: Path):
     db = sqlite3.connect(str(db_path))
     try:
         actions = db.execute(
-            "SELECT tool, summary, status, exit_code FROM agent_actions "
+            "SELECT tool, summary, status, exit_code, project FROM agent_actions "
             "WHERE session_id=? ORDER BY id", (session,)).fetchall()
         intents = db.execute(
             "SELECT prompt FROM intents WHERE session_id=? ORDER BY id",
