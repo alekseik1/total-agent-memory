@@ -4,6 +4,8 @@ Owner decisions (2026-11-08): host = vps-layer7 over Tailscale; hooks = HTTP mod
 
 Goal: with `TAM_REMOTE_URL` set, hooks and MCP on the laptop never touch `memory.db`; all DB work goes through the HTTP server. Without it, local mode is unchanged.
 
+Status (2026-11-11): done. S1-S4 merged; VPS stack (mcp, dashboard, reflection, scheduler) runs on vps-layer7; live DB moved there 2026-11-11. Verified from a fresh session: Claude MCP + hooks, Codex MCP (bearer from env), Devin MCP (`~/.config/devin/mcp_config.json`, `${env:TAM_REMOTE_TOKEN}`), review-prep rules count. Mac LaunchAgents disabled; `~/.tam/memory.db` is the stale rollback copy. Nightly backup: Mac `tam-backup.sh` snapshots the VPS DB and pushes it to the PC.
+
 ## Verified facts
 | Fact | Where |
 |---|---|
