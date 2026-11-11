@@ -15,6 +15,7 @@ docs
 !README.md
 launchagents
 hooks
+!hooks/lib/tam_hook.py
 install*.sh
 install*.ps1
 update.sh

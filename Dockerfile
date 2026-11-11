@@ -77,6 +77,8 @@ COPY --chown=memory:memory docker/ ./docker/
 # meant canonical tag normalisation and save-filters were dead in the image.
 COPY --chown=memory:memory vocabularies/ ./vocabularies/
 COPY --chown=memory:memory filters/ ./filters/
+# POST /internal/hook/{cmd} loads it (src/hook_endpoint.py TAM_HOOK_PATH)
+COPY --chown=memory:memory hooks/lib/tam_hook.py ./hooks/lib/tam_hook.py
 
 # Convenience entrypoint shim — `docker run … mcp|dashboard|reflection|all`
 # routes through the supervisor (which respects TAM_SUPERVISOR_SERVICES).
