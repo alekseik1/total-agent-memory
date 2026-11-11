@@ -595,7 +595,8 @@ def test_remote_session_end_skips_post_and_keeps_spool_on_flush_failure(
     payload = {"session_id": "sess-end", "cwd": str(tmp_path / "workdir"),
                "hook_event_name": "SessionEnd"}
     ok = tam_hook.remote_session_end(payload, "e2eproj", ROOT / "src",
-                                     "test reason", time.monotonic() + 30)
+                                     "test reason", time.monotonic() + 30,
+                                     tmp_path / "recovery")
     assert ok is False
     assert posts == ["actions-batch"], "session-end must not close before its actions land"
     pending = pending_spool_actions(tmp_path)
@@ -1249,3 +1250,94 @@ def test_remote_e2e_local_remote_row_parity(http_server, tmp_path):
     assert local_rows["summaries"] == remote_rows["summaries"]
     assert ([episode_key(r) for r in local_rows["episodes"]]
             == [episode_key(r) for r in remote_rows["episodes"]])
+
+
+# ── S2b: laptop-local recovery in remote mode ────────────────────────
+
+
+def _remote_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TAM_REMOTE_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("TAM_REMOTE_TOKEN", "test-token")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("MEMORY_PROJECT", "e2eproj")
+
+
+def test_remote_stop_writes_recovery_like_local(monkeypatch, tmp_path):
+    """Remote stop must leave the same pending-<sid>.md recovery file local stop does."""
+    _remote_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(tam_hook, "remote_post", lambda *a, **k: (True, ""))
+    cwd = tmp_path / "workdir"
+    cwd.mkdir(exist_ok=True)
+    recovery_dir = tmp_path / "recovery"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+        {"session_id": "s-rec", "cwd": str(cwd), "hook_event_name": "Stop"})))
+    rc = tam_hook.main(["stop", "--memory-dir", str(tmp_path / "mem"),
+                        "--recovery-dir", str(recovery_dir),
+                        "--src", str(ROOT / "src")])
+    assert rc == 0
+    path = recovery_dir / "pending-s-rec.md"
+    assert path.is_file()
+    body = path.read_text(encoding="utf-8")
+    assert '"project": "e2eproj"' in body and str(cwd) in body
+
+
+def test_remote_stop_hook_active_skips_recovery(monkeypatch, tmp_path):
+    """stop_hook_active: remote flushes the spool but writes no recovery, like local."""
+    _remote_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(tam_hook, "remote_post", lambda *a, **k: (True, ""))
+    cwd = tmp_path / "workdir"
+    cwd.mkdir(exist_ok=True)
+    recovery_dir = tmp_path / "recovery"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+        {"session_id": "s-rec2", "cwd": str(cwd), "hook_event_name": "Stop",
+         "stop_hook_active": True})))
+    rc = tam_hook.main(["stop", "--memory-dir", str(tmp_path / "mem"),
+                        "--recovery-dir", str(recovery_dir)])
+    assert rc == 0
+    assert not (recovery_dir / "pending-s-rec2.md").exists()
+
+
+def test_remote_session_end_writes_recovery_with_transcript(monkeypatch, tmp_path):
+    """Remote session-end writes the recovery file locally before flushing/posting."""
+    _remote_env(monkeypatch, tmp_path)
+    posts = []
+    monkeypatch.setattr(tam_hook, "remote_post",
+                        lambda command, call, payload, timeout: posts.append(command) or (True, ""))
+    cwd = tmp_path / "workdir"
+    cwd.mkdir(exist_ok=True)
+    transcript = tmp_path / "t.jsonl"
+    write_transcript(transcript)
+    recovery_dir = tmp_path / "recovery"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+        {"session_id": "s-end", "cwd": str(cwd), "hook_event_name": "SessionEnd",
+         "transcript_path": str(transcript)})))
+    rc = tam_hook.main(["session-end", "--src", str(ROOT / "src"),
+                        "--recovery-dir", str(recovery_dir), "--reason-text", "clear"])
+    assert rc == 0
+    path = recovery_dir / "pending-s-end.md"
+    assert path.is_file()
+    body = path.read_text(encoding="utf-8")
+    assert "fix the flaky test" in body and "working on it" in body
+    assert "session-end" in posts
+
+
+def test_remote_session_start_context_appends_recovery(monkeypatch, tmp_path, capsys):
+    """The laptop recovery block is appended after the server's session-start text."""
+    _remote_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(tam_hook, "remote_post", lambda *a, **k: (True, "SERVER TEXT"))
+    cwd = tmp_path / "workdir"
+    cwd.mkdir(exist_ok=True)
+    recovery_dir = tmp_path / "recovery"
+    tam_hook.write_recovery(recovery_dir, "old-sess", "e2eproj", str(cwd),
+                            "interrupted", "user asked X", "assistant replied Y")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+        {"session_id": "s-new", "cwd": str(cwd), "hook_event_name": "SessionStart",
+         "source": "startup"})))
+    rc = tam_hook.main(["session-start-context", "--db", str(tmp_path / "mem" / "memory.db"),
+                        "--project", "e2eproj", "--cwd", str(cwd), "--session", "s-new",
+                        "--source", "startup", "--recovery-dir", str(recovery_dir)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "SERVER TEXT" in out and "RECOVERY:" in out
+    assert out.index("SERVER TEXT") < out.index("RECOVERY:")
+    assert "user asked X" in out

@@ -1859,17 +1859,23 @@ def _remote_slim_call(call: JsonDict, *fields: str) -> JsonDict:
 
 
 def remote_session_end(payload: JsonDict, project: str, src_dir: Path, reason_text: str,
-                       deadline: float) -> bool:
-    """Flush the spool, then hand the pre-extracted session text to session-end.
-    A failed flush keeps the spool for the next sweep and skips session-end:
-    the turn boundary must not close before the turn's actions landed."""
+                       deadline: float, recovery_dir: Path) -> bool:
+    """Write the laptop-local recovery file, flush the spool, then hand the
+    pre-extracted session text to session-end. A failed flush keeps the spool
+    for the next sweep and skips session-end: the turn boundary must not close
+    before the turn's actions landed. The recovery file is written even then -
+    it is the laptop's own crash safety net and needs no server."""
     session = session_of(payload)
     cwd = str(payload.get("cwd") or os.getcwd())
     call = hook_call(payload, project)
-    if not remote_flush_own(call, deadline):
-        return False
     transcript = find_transcript(str(payload.get("transcript_path") or ""), cwd, session)
     user_texts, assistant_text, episode = remote_session_texts(transcript, src_dir)
+    if user_texts or assistant_text:
+        write_recovery(recovery_dir, session, project, cwd, reason_text,
+                       user_context="\n".join(user_texts), assistant_context=assistant_text,
+                       transcript_events=_line_count(transcript) if transcript is not None else 0)
+    if not remote_flush_own(call, deadline):
+        return False
     # Git before the deadline read: its timeout is not part of the POST budget.
     branch = _git(cwd, "branch", "--show-current")
     remaining = deadline - time.monotonic()
@@ -2066,11 +2072,16 @@ def cmd_session_start_context(args: argparse.Namespace) -> int:
         deadline = time.monotonic() + REMOTE_SYNC_BUDGET_SEC
         remote_flush_own(call, deadline)
         remaining = deadline - time.monotonic()
+        text = ""
         if remaining > 0:
             _ok, text = remote_post("session-start", call, {}, remaining)
-            if text:
-                print(text)
         remote_sweep_stale(call, deadline)
+        # The recovery file is laptop-local: the server never sees it, so the
+        # block is appended here, last like the local session_start_context.
+        recovery = recovery_block(Path(args.recovery_dir), args.cwd, args.session, args.project)
+        parts = [part for part in (text, recovery) if part]
+        if parts:
+            print("\n\n".join(parts))
         return 0
     text = session_start_context(Path(args.db), args.project, args.cwd, args.session, args.source,
                                  Path(args.recovery_dir))
@@ -2093,6 +2104,10 @@ def cmd_stop(args: argparse.Namespace) -> int:
         flushed = remote_flush_own(call, deadline)
         if payload.get("stop_hook_active") is True:
             return 0
+        # Same laptop-local snapshot local stop writes; no network involved.
+        write_recovery(Path(args.recovery_dir), session, project, cwd,
+                       "Turn ended (snapshot kept in case the session is interrupted)",
+                       min_interval_sec=args.min_interval_sec)
         notice = None if os.environ.get("MEMORY_NUDGE_DISABLE") == "1" else stop_notice(memory_dir, session)
         prune_nudge_state(memory_dir)
         turn_notice = ""
@@ -2126,7 +2141,7 @@ def cmd_session_end(args: argparse.Namespace) -> int:
     project = args.project or project_of(payload)
     if remote_mode():
         remote_session_end(payload, project, Path(args.src), args.reason_text,
-                           time.monotonic() + REMOTE_END_BUDGET_SEC)
+                           time.monotonic() + REMOTE_END_BUDGET_SEC, Path(args.recovery_dir))
         return 0
     for action in session_end(payload, Path(args.src), Path(args.recovery_dir), project, args.reason_text):
         log(f"SESSION_END {project}: {action}")
