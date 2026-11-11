@@ -30,6 +30,7 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import uuid
@@ -8207,8 +8208,21 @@ async def _dispatch_tool(name, a):
         ))
 
     elif name == "memory_reflect_now":
-        ra = _get_v5("reflection", store.db)
         scope = a.get("scope", "full")
+        # Over HTTP one process serves every session; CPU-bound reflection would block its event loop.
+        if _transport() in HTTP_TRANSPORTS:
+            if scope not in ("quick", "weekly"):
+                scope = "full"
+            runner = Path(__file__).resolve().parent / "tools" / "run_reflection.py"
+            try:
+                proc = subprocess.Popen([sys.executable, str(runner), f"--scope={scope}"],
+                                        start_new_session=True)
+            except OSError as e:
+                return J({"error": f"failed to start reflection: {e}"})
+            threading.Thread(target=proc.wait, daemon=True).start()
+            return J({"queued": True, "scope": scope, "pid": proc.pid, "mode": "subprocess",
+                      "note": "runs out of process; result in server log / reflection report"})
+        ra = _get_v5("reflection", store.db)
         if scope == "quick":
             result = await ra.run_quick()
         elif scope == "weekly":
