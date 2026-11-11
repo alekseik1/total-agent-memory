@@ -8215,7 +8215,7 @@ async def _dispatch_tool(name, a):
                 scope = "full"
             runner = Path(__file__).resolve().parent / "tools" / "run_reflection.py"
             try:
-                proc = subprocess.Popen([sys.executable, str(runner), f"--scope={scope}"],
+                proc = subprocess.Popen([sys.executable, str(runner), f"--scope={scope}", "--debounce=0"],
                                         start_new_session=True)
             except OSError as e:
                 return J({"error": f"failed to start reflection: {e}"})
