@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""headersHelper for the TAM MCP server in remote mode.
+
+Prints the JSON object Claude Code merges into the MCP server's request
+headers: the bearer token (TAM_REMOTE_TOKEN, else the OS secret store, same
+lookup as hooks/lib/tam_hook.py) and the session id Claude Code exports to
+hook/helper processes.
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+
+import tam_hook  # noqa: E402
+
+
+def main() -> int:
+    headers = {}
+    token = tam_hook.remote_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    if session:
+        headers["X-TAM-Session"] = session
+    print(json.dumps(headers))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

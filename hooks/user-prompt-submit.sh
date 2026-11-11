@@ -27,7 +27,8 @@ printf '%s' "$HOOK_INPUT" | hook_helper prompt-context --src "$HOOK_SRC_DIR" \
     --memory-dir "$CLAUDE_MEMORY_DIR" --emit UserPromptSubmit
 
 DB_PATH="${CLAUDE_MEMORY_DIR}/memory.db"
-[ -f "$DB_PATH" ] || exit 0
+# Remote mode has no local memory.db: the save-intent worker POSTs instead.
+[ -f "$DB_PATH" ] || [ -n "${TAM_REMOTE_URL:-}" ] || exit 0
 
 TMP_INPUT="$(mktemp -t cmm-uprompt.XXXXXX)" || { hook_log "USER_PROMPT: mktemp failed"; exit 0; }
 printf '%s' "$HOOK_INPUT" > "$TMP_INPUT"
