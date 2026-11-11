@@ -1313,9 +1313,15 @@ def docker_ambient_call(command: str, call: JsonDict) -> str:
 
 REMOTE_URL_ENV = "TAM_REMOTE_URL"
 REMOTE_TOKEN_ENV = "TAM_REMOTE_TOKEN"
-REMOTE_SYNC_TIMEOUT_SEC = 3.0
 REMOTE_WRITE_TIMEOUT_SEC = 10.0
 REMOTE_BODY_LIMIT_BYTES = 256 * 1024
+# One deadline per hook process, under the hooks.json timeouts (5/15/20 s):
+# sync hooks stay fast, Stop and SessionEnd may spend most of their budget
+# flushing the spool on a slow uplink.
+REMOTE_SYNC_BUDGET_SEC = 3.0
+REMOTE_STOP_BUDGET_SEC = 13.0
+REMOTE_END_BUDGET_SEC = 18.0
+REMOTE_CALL_FIELD_MAX_BYTES = 200 * 1024
 SPOOL_ACTION_LIMIT = 400
 SPOOL_CHUNK_BYTES = 200 * 1024
 REMOTE_EPISODE_MESSAGES_MAX_BYTES = 64 * 1024
@@ -1342,15 +1348,15 @@ def remote_mode() -> bool:
     return bool(remote_url())
 
 
-def remote_token() -> str:
+def remote_token(timeout: float = 5.0) -> str:
     """Bearer token for /internal/hook: env first, then the OS secret store; cached per process."""
     global _REMOTE_TOKEN
     if _REMOTE_TOKEN is None:
-        _REMOTE_TOKEN = _remote_token_lookup()
+        _REMOTE_TOKEN = _remote_token_lookup(timeout)
     return _REMOTE_TOKEN
 
 
-def _remote_token_lookup() -> str:
+def _remote_token_lookup(timeout: float) -> str:
     env = os.environ.get(REMOTE_TOKEN_ENV, "").strip()
     if env:
         return env
@@ -1359,7 +1365,8 @@ def _remote_token_lookup() -> str:
     else:
         command = ["secret-tool", "lookup", "service", "tam-remote-token"]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=False)
+        result = subprocess.run(command, capture_output=True, text=True,
+                                timeout=max(0.1, timeout), check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         log(f"remote token lookup failed: {exc}")
         return ""
@@ -1367,22 +1374,32 @@ def _remote_token_lookup() -> str:
 
 
 def remote_post(command: str, call: JsonDict, payload: JsonDict, timeout: float) -> tuple[bool, str]:
-    """POST ``{"call", "payload"}`` to /internal/hook/<command>; (False, "") on any failure."""
+    """POST ``{"call", "payload"}`` to /internal/hook/<command>; (False, "") on any failure.
+
+    ``timeout`` bounds the whole call, token lookup included: callers pass the
+    time left before their hook deadline, so a hung server cannot outlive it.
+    """
+    if timeout <= 0:
+        return False, ""
     body = json.dumps({"call": call, "payload": payload}, ensure_ascii=False).encode("utf-8")
     if len(body) > REMOTE_BODY_LIMIT_BYTES:
         log(f"remote {command} dropped: body of {len(body)} bytes exceeds {REMOTE_BODY_LIMIT_BYTES}")
         return False, ""
+    started = time.monotonic()
     headers = {"Content-Type": "application/json",
                "X-TAM-Session": str(call.get("session_id") or "")}
-    token = remote_token()
+    token = remote_token(min(5.0, timeout))
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    remaining = timeout - (time.monotonic() - started)
+    if remaining <= 0:
+        return False, ""
     request = urllib.request.Request(f"{remote_url()}/internal/hook/{command}", data=body,
                                      headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=remaining) as response:
             data = json.loads(response.read().decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001 — a hook must never fail the client
+    except Exception as exc:  # noqa: BLE001 - a hook must never fail the client
         log(f"remote {command} failed: {type(exc).__name__}: {exc}")
         return False, ""
     if not isinstance(data, dict) or data.get("ok") is not True:
@@ -1394,9 +1411,13 @@ def remote_post(command: str, call: JsonDict, payload: JsonDict, timeout: float)
 
 # ── action spool ─────────────────────────────────────────────────────
 
-def spool_path(session: str) -> Path:
+def _spool_dir() -> Path:
     base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
-    return Path(base) / "tam" / "spool" / f"{safe_name(session)}.jsonl"
+    return Path(base) / "tam" / "spool"
+
+
+def spool_path(session: str) -> Path:
+    return _spool_dir() / f"{safe_name(session)}.jsonl"
 
 
 def spool_append(session: str, action: JsonDict) -> None:
@@ -1408,15 +1429,14 @@ def spool_append(session: str, action: JsonDict) -> None:
         fh.write(json.dumps(action, ensure_ascii=False) + "\n")
 
 
-def _spool_entries(session: str) -> tuple[list[tuple[str, JsonDict]], Path]:
-    path = spool_path(session)
+def _spool_entries(path: Path) -> list[tuple[str, JsonDict]]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
-        return [], path
+        return []
     except OSError as exc:
         log(f"cannot read spool {path}: {exc}")
-        return [], path
+        return []
     entries = []
     for line in lines:
         line = line.strip()
@@ -1429,7 +1449,7 @@ def _spool_entries(session: str) -> tuple[list[tuple[str, JsonDict]], Path]:
             continue
         if isinstance(action, dict):
             entries.append((line, action))
-    return entries, path
+    return entries
 
 
 def _spool_keep(path: Path, entries: list[tuple[str, JsonDict]]) -> None:
@@ -1439,30 +1459,66 @@ def _spool_keep(path: Path, entries: list[tuple[str, JsonDict]]) -> None:
     atomic_write(path, "".join(f"{line}\n" for line, _ in entries))
 
 
-def remote_flush_actions(call: JsonDict, timeout: float) -> bool:
-    """Send the session's spooled actions as actions-batch chunks, oldest first.
+def _spool_pending() -> list[Path]:
+    """Spool files awaiting delivery: in-flight .sending.* first, then .jsonl,
+    each oldest first, so a flush interrupted mid-POST is resumed before newer work."""
+    try:
+        files = [path for path in _spool_dir().iterdir() if path.is_file()]
+    except OSError:
+        return []
+    sending = sorted((p for p in files if ".sending." in p.name), key=_mtime)
+    pending = sorted((p for p in files if p.name.endswith(".jsonl")), key=_mtime)
+    return sending + pending
 
-    Sent chunks leave the spool as they succeed, so a crash or a failed chunk
+
+def _spool_take(path: Path) -> Path:
+    """Rename a pending spool aside; appends during the flush start a fresh file."""
+    sending = path.with_name(f"{path.stem}.sending.{os.getpid()}")
+    os.replace(path, sending)
+    return sending
+
+
+def _spool_call(call: JsonDict, path: Path, entries: list[tuple[str, JsonDict]]) -> JsonDict:
+    """The batch call for one spool file: its own session id when the lines carry it
+    (a swept leftover belongs to another session)."""
+    batch = {**call, "payload": {}}
+    for _line, action in entries:
+        session = str(action.get("session_id") or "")
+        if session:
+            batch["session_id"] = session
+            return batch
+    name = path.name.split(".sending.", 1)[0]
+    if name.endswith(".jsonl"):
+        name = name[: -len(".jsonl")]
+    if name:
+        batch["session_id"] = name
+    return batch
+
+
+def _flush_entries(path: Path, call: JsonDict, entries: list[tuple[str, JsonDict]],
+                   deadline: float) -> bool:
+    """POST one spool file's actions as actions-batch chunks, oldest first.
+
+    Sent chunks leave the file as they succeed, so a crash or a failed chunk
     replays at most the unacknowledged tail; the server dedups by tool_use_id.
     The batch call carries an empty payload: the stored hook payload can be
     large and the 256 KB body limit must fit the actions themselves.
     """
-    batch_call = {**call, "payload": {}}
-    entries, path = _spool_entries(str(call.get("session_id") or "unknown"))
-    if not entries:
-        _spool_keep(path, [])
-        return True
     index = 0
     while index < len(entries):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
         chunk: list[JsonDict] = []
         size = 0
         while index + len(chunk) < len(entries) and len(chunk) < SPOOL_ACTION_LIMIT:
             line, action = entries[index + len(chunk)]
-            if chunk and size + len(line) > SPOOL_CHUNK_BYTES:
+            line_bytes = len(line.encode("utf-8"))
+            if chunk and size + line_bytes > SPOOL_CHUNK_BYTES:
                 break
             chunk.append(action)
-            size += len(line)
-        ok, _ = remote_post("actions-batch", batch_call, {"actions": chunk}, timeout)
+            size += line_bytes
+        ok, _ = remote_post("actions-batch", call, {"actions": chunk}, remaining)
         if not ok:
             return False
         index += len(chunk)
@@ -1473,10 +1529,39 @@ def remote_flush_actions(call: JsonDict, timeout: float) -> bool:
     return True
 
 
+def remote_flush_actions(call: JsonDict, deadline: float) -> bool:
+    """Deliver every pending spool file before ``deadline`` (time.monotonic()),
+    each under its own session id: leftover .sending.* and other sessions'
+    .jsonl spools included, so nothing stranded by a dead session is lost.
+
+    A .jsonl is taken aside first, so PostToolUse appends during the POSTs land
+    in a fresh file instead of being overwritten. The first transport failure
+    stops the flush; whatever is left stays on disk for the next hook. No lock
+    is ever held across a POST.
+    """
+    for path in _spool_pending():
+        if path.name.endswith(".jsonl"):
+            try:
+                path = _spool_take(path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                log(f"cannot take spool {path}: {exc}")
+                continue
+        entries = _spool_entries(path)
+        if not entries:
+            unlink(path, "spool flushed")
+            continue
+        if not _flush_entries(path, _spool_call(call, path, entries), entries, deadline):
+            return False
+    return True
+
+
 # ── tool summary (same selection as src/ambient/actions.summarize_tool_input) ──
 
 def _remote_clip(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[: max(0, limit - 3)].rstrip() + "..."
+    # Same clip as src/ambient/actions._clip: limit-1 chars plus the ellipsis.
+    return text if len(text) <= limit else text[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _remote_one_line(text: Any) -> str:
@@ -1488,8 +1573,10 @@ def _remote_snippet(value: Any) -> str:
             if isinstance(value, str) and value.strip() else "")
 
 
-def remote_tool_summary(tool: str, tool_input: Any) -> str:
-    """Short redacted-on-server description of one tool call, at most 400 chars."""
+def remote_tool_summary(tool: str, tool_input: Any, src_dir: Path) -> str:
+    """Short description of one tool call, identical to the local
+    summarize_tool_input: redact first, then clip, so a credential straddling
+    the boundary is fully redacted instead of stored half-cut."""
     data = tool_input if isinstance(tool_input, dict) else {}
     if tool in REMOTE_SHELL_TOOLS:
         text = _remote_one_line(data.get("command") or "")
@@ -1508,7 +1595,7 @@ def remote_tool_summary(tool: str, tool_input: Any) -> str:
              if isinstance(data.get(key), str) and data[key]), "")
         text = _remote_one_line(locator) if locator else (
             "keys: " + ", ".join(sorted(map(str, data))) if data else "")
-    return _remote_clip(text, REMOTE_SUMMARY_MAX_CHARS)
+    return _remote_clip(redact_text(text, src_dir), REMOTE_SUMMARY_MAX_CHARS)
 
 
 def _remote_exit_code(raw: Any) -> int | None:
@@ -1520,8 +1607,8 @@ def _remote_exit_code(raw: Any) -> int | None:
         return None
 
 
-def remote_record_action(payload: JsonDict) -> None:
-    """Spool one PostToolUse action; no network and no src/ imports on this path."""
+def remote_record_action(payload: JsonDict, src_dir: Path) -> None:
+    """Spool one PostToolUse action; no network on this path."""
     tool = _remote_one_line(payload.get("tool_name") or "")[:REMOTE_MAX_TOOL_CHARS]
     if not tool or tool in REMOTE_UNLOGGED_TOOLS:
         return
@@ -1533,9 +1620,12 @@ def remote_record_action(payload: JsonDict) -> None:
     else:
         status = "ok"
     action: JsonDict = {"tool": tool,
-                        "summary": remote_tool_summary(tool, payload.get("tool_input")),
+                        "summary": remote_tool_summary(tool, payload.get("tool_input"), src_dir),
                         "status": status,
-                        "exit_code": _remote_exit_code(code)}
+                        "exit_code": _remote_exit_code(code),
+                        # The sweep of another session's spool needs its own id;
+                        # the server ignores this key on actions-batch.
+                        "session_id": session_of(payload)}
     tool_use_id = str(payload.get("tool_use_id") or "")
     if tool_use_id:
         action["tool_use_id"] = tool_use_id
@@ -1619,14 +1709,45 @@ def remote_session_texts(transcript: Path | None, src_dir: Path
     return user_texts, assistant_text, episode
 
 
-def remote_session_end(payload: JsonDict, project: str, src_dir: Path, reason_text: str) -> bool:
-    """Flush the spool, then hand the pre-extracted session text to session-end."""
+def _clip_utf8(text: str, max_bytes: int) -> str:
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _remote_slim_call(call: JsonDict, *fields: str) -> JsonDict:
+    """The call trimmed to the payload fields the server command reads; the rest
+    of a raw hook payload can be huge and must not push the body over 256 KB."""
+    source = call.get("payload")
+    payload: JsonDict = {}
+    if isinstance(source, dict):
+        for key in fields:
+            value = source.get(key)
+            if isinstance(value, str):
+                payload[key] = _clip_utf8(value, REMOTE_CALL_FIELD_MAX_BYTES)
+            elif isinstance(value, dict):
+                inner = value.get("content")
+                payload[key] = ({**value, "content": _clip_utf8(inner, REMOTE_CALL_FIELD_MAX_BYTES)}
+                                if isinstance(inner, str) else value)
+    return {**call, "payload": payload}
+
+
+def remote_session_end(payload: JsonDict, project: str, src_dir: Path, reason_text: str,
+                       deadline: float) -> bool:
+    """Flush the spool, then hand the pre-extracted session text to session-end.
+    A failed flush keeps the spool for the next sweep and skips session-end:
+    the turn boundary must not close before the turn's actions landed."""
     session = session_of(payload)
     cwd = str(payload.get("cwd") or os.getcwd())
     call = hook_call(payload, project)
-    remote_flush_actions({**call, "payload": {}}, REMOTE_WRITE_TIMEOUT_SEC)
+    if not remote_flush_actions(call, deadline):
+        return False
     transcript = find_transcript(str(payload.get("transcript_path") or ""), cwd, session)
     user_texts, assistant_text, episode = remote_session_texts(transcript, src_dir)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False
     ok, _ = remote_post("session-end", call, {
         "user_texts": user_texts,
         "assistant_text": assistant_text,
@@ -1634,7 +1755,7 @@ def remote_session_end(payload: JsonDict, project: str, src_dir: Path, reason_te
         "branch": _git(cwd, "branch", "--show-current"),
         "project": project,
         "reason": reason_text,
-    }, REMOTE_WRITE_TIMEOUT_SEC)
+    }, remaining)
     return ok
 
 
@@ -1655,7 +1776,11 @@ def _remote_cli_options(args: Sequence[str]) -> dict[str, str]:
 
 def remote_error_capture_runner(call: JsonDict) -> Callable[..., bool]:
     """run_script stand-in for remote mode: auto_self_improve.py error/fix/check-patterns
-    become error-capture POSTs; every other script reports failure like a missing file."""
+    become error-capture POSTs on a detached remote-post worker, so the
+    PostToolUse path itself stays network-free; every other script reports
+    failure like a missing file."""
+    helper = str(Path(__file__).resolve())
+
     def runner(_src_dir: Path, script: str, args: Sequence[str],
                stdin_text: str | None = None) -> bool:
         if script != "auto_self_improve.py" or not args or args[0] not in ("error", "fix", "check-patterns"):
@@ -1673,8 +1798,32 @@ def remote_error_capture_runner(call: JsonDict) -> Callable[..., bool]:
                 payload["severity"] = str(options.get("--severity") or "medium")
             else:
                 payload["fix"] = str(options.get("--fix") or "")
-        ok, _ = remote_post("error-capture", call, payload, REMOTE_WRITE_TIMEOUT_SEC)
-        return ok
+        request = json.dumps({"command": "error-capture", "call": {**call, "payload": {}},
+                              "payload": payload}, ensure_ascii=False)
+        log_file = os.environ.get("TAM_HOOK_LOG_FILE")
+        with ExitStack() as stack:
+            sink: Any = subprocess.DEVNULL
+            if log_file:
+                try:
+                    sink = stack.enter_context(open(log_file, "a", encoding="utf-8"))
+                except OSError as exc:
+                    log(f"cannot open {log_file}, remote-post output discarded: {exc}")
+            try:
+                child = subprocess.Popen([sys.executable, helper, "remote-post"],
+                                         stdin=subprocess.PIPE, stdout=sink, stderr=sink,
+                                         **_detached_kwargs())
+            except OSError as exc:
+                log(f"cannot start remote-post worker: {exc}")
+                return False
+        if child.stdin is None:
+            return False
+        try:
+            child.stdin.write(request.encode("utf-8"))
+            child.stdin.close()
+        except OSError as exc:
+            log(f"cannot pass request to remote-post worker: {exc}")
+            return False
+        return True
     return runner
 
 
@@ -1764,9 +1913,13 @@ def cmd_session_start_context(args: argparse.Namespace) -> int:
     if remote_mode():
         call = {"payload": {"source": args.source, "session_id": args.session, "cwd": args.cwd},
                 "project": args.project, "session_id": args.session or "unknown", "cwd": args.cwd}
-        _ok, text = remote_post("session-start", call, {}, REMOTE_SYNC_TIMEOUT_SEC)
-        if text:
-            print(text)
+        deadline = time.monotonic() + REMOTE_SYNC_BUDGET_SEC
+        remote_flush_actions(call, deadline)  # also sweeps other sessions' stranded spools
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            _ok, text = remote_post("session-start", call, {}, remaining)
+            if text:
+                print(text)
         return 0
     text = session_start_context(Path(args.db), args.project, args.cwd, args.session, args.source,
                                  Path(args.recovery_dir))
@@ -1777,23 +1930,29 @@ def cmd_session_start_context(args: argparse.Namespace) -> int:
 
 def cmd_stop(args: argparse.Namespace) -> int:
     payload = read_payload()
+    if not remote_mode() and payload.get("stop_hook_active") is True:
+        return 0
     memory_dir = Path(args.memory_dir)
     session = session_of(payload)
     project = args.project or project_of(payload)
     cwd = str(payload.get("cwd") or os.getcwd())
     if remote_mode():
         call = hook_call(payload, project)
-        remote_flush_actions({**call, "payload": {}}, REMOTE_WRITE_TIMEOUT_SEC)
+        deadline = time.monotonic() + REMOTE_STOP_BUDGET_SEC
+        flushed = remote_flush_actions(call, deadline)
         if payload.get("stop_hook_active") is True:
             return 0
         notice = None if os.environ.get("MEMORY_NUDGE_DISABLE") == "1" else stop_notice(memory_dir, session)
         prune_nudge_state(memory_dir)
-        _ok, turn_notice = remote_post("turn-end", call, {}, REMOTE_WRITE_TIMEOUT_SEC)
+        turn_notice = ""
+        if flushed:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                slim = _remote_slim_call(call, "last_assistant_message")
+                _ok, turn_notice = remote_post("turn-end", slim, {}, remaining)
         rendered = system_message_json("\n".join(n for n in [notice or "", turn_notice] if n))
         if rendered:
             print(rendered)
-        return 0
-    if payload.get("stop_hook_active") is True:
         return 0
     write_recovery(Path(args.recovery_dir), session, project, cwd,
                    "Turn ended (snapshot kept in case the session is interrupted)",
@@ -1814,7 +1973,8 @@ def cmd_session_end(args: argparse.Namespace) -> int:
     payload = read_payload()
     project = args.project or project_of(payload)
     if remote_mode():
-        remote_session_end(payload, project, Path(args.src), args.reason_text)
+        remote_session_end(payload, project, Path(args.src), args.reason_text,
+                           time.monotonic() + REMOTE_END_BUDGET_SEC)
         return 0
     for action in session_end(payload, Path(args.src), Path(args.recovery_dir), project, args.reason_text):
         log(f"SESSION_END {project}: {action}")
@@ -1834,7 +1994,8 @@ def _run_worker(name: str, job: Callable[[], bool]) -> int:
 def cmd_save_intent(args: argparse.Namespace) -> int:
     if remote_mode():
         payload = consume_input_file(Path(args.input))
-        remote_post("save-intent", hook_call(payload, project_of(payload)), {}, REMOTE_WRITE_TIMEOUT_SEC)
+        call = _remote_slim_call(hook_call(payload, project_of(payload)), "prompt", "user_message")
+        remote_post("save-intent", call, {}, REMOTE_WRITE_TIMEOUT_SEC)
         return 0
     return _run_worker("save-intent", lambda: save_intent_from(
         consume_input_file(Path(args.input)), Path(args.src), Path(args.db)))
@@ -1849,12 +2010,23 @@ def cmd_capture_observation(args: argparse.Namespace) -> int:
         consume_input_file(Path(args.input)), Path(args.src), Path(args.memory_dir)))
 
 
+def cmd_remote_post(_args: argparse.Namespace) -> int:
+    """Detached worker: one {"command", "call", "payload"} request on stdin -> one POST."""
+    data = read_payload()
+    command = str(data.get("command") or "")
+    call = data.get("call")
+    post_payload = data.get("payload")
+    if command and isinstance(call, dict) and isinstance(post_payload, dict):
+        remote_post(command, call, post_payload, REMOTE_WRITE_TIMEOUT_SEC)
+    return 0
+
+
 def cmd_record_action(args: argparse.Namespace) -> int:
     payload = read_payload()
     if remote_mode():
         try:
-            remote_record_action(payload)
-        except Exception as exc:  # noqa: BLE001 — a hook must never fail the client
+            remote_record_action(payload, Path(args.src))
+        except Exception as exc:  # noqa: BLE001 - a hook must never fail the client
             log(f"remote record-action failed: {type(exc).__name__}: {exc}")
         return 0
     ambient_call("record-action", hook_call(payload, project_of(payload)), Path(args.memory_dir), Path(args.src))
@@ -1865,8 +2037,13 @@ def cmd_prompt_context(args: argparse.Namespace) -> int:
     payload = read_payload()
     if remote_mode():
         call = hook_call(payload, project_of(payload))
-        remote_flush_actions({**call, "payload": {}}, REMOTE_SYNC_TIMEOUT_SEC)
-        _ok, text = remote_post("prompt-context", call, {}, REMOTE_SYNC_TIMEOUT_SEC)
+        deadline = time.monotonic() + REMOTE_SYNC_BUDGET_SEC
+        text = ""
+        if remote_flush_actions(call, deadline):
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                slim = _remote_slim_call(call, "prompt", "user_message")
+                _ok, text = remote_post("prompt-context", slim, {}, remaining)
         return print_context(event_for(payload, args.emit), [text])
     text = ambient_call("prompt-context", hook_call(payload, project_of(payload)), Path(args.memory_dir),
                         Path(args.src))
@@ -2068,6 +2245,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", required=True)
     p.add_argument("--input", required=True, help="cached payload file, deleted after reading")
     p.set_defaults(func=cmd_save_intent)
+
+    sub.add_parser("remote-post", help="detached worker: remote POST request on stdin"
+                   ).set_defaults(func=cmd_remote_post)
 
     p = sub.add_parser("capture-observation", help="detached worker: payload file -> extract queue")
     p.add_argument("--src", required=True)
