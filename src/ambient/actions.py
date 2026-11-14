@@ -55,7 +55,8 @@ EDIT_TOOLS: Final = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit",
 SHELL_TOOLS: Final = frozenset({"Bash", "exec"})
 MUTATING_TOOLS: Final = EDIT_TOOLS | SHELL_TOOLS | {CODEX_TURN_TOOL}
 # Read-only lookups are the bulk of tool calls and carry no evidence of what was done.
-UNLOGGED_TOOLS: Final = frozenset({"Read", "Glob", "Grep", "LS", "TodoWrite", "TodoRead"})
+UNLOGGED_TOOLS: Final = frozenset({"Read", "Glob", "Grep", "LS", "TodoWrite", "TodoRead",
+                                   "read", "glob", "grep", "todo_write"})
 # Tools whose input is a path or a pattern worth keeping verbatim.
 _LOCATOR_KEYS: Final = ("file_path", "notebook_path", "path", "pattern", "url", "query", "description")
 MCP_TOOL_PREFIX: Final = "mcp__"

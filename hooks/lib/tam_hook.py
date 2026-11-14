@@ -1349,7 +1349,8 @@ REMOTE_SUMMARY_MAX_CHARS = 400
 REMOTE_DETAIL_SNIPPET_CHARS = 240
 REMOTE_EDIT_DETAIL_SEPARATOR = " :: "
 REMOTE_MAX_TOOL_CHARS = 120
-REMOTE_UNLOGGED_TOOLS = frozenset({"Read", "Glob", "Grep", "LS", "TodoWrite", "TodoRead"})
+REMOTE_UNLOGGED_TOOLS = frozenset({"Read", "Glob", "Grep", "LS", "TodoWrite", "TodoRead",
+                                   "read", "glob", "grep", "todo_write"})
 REMOTE_EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit",
                                "edit", "write", "apply_patch", "notebook_edit"})
 REMOTE_SHELL_TOOLS = frozenset({"Bash", "exec"})
