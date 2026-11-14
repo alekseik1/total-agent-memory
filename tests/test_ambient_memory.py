@@ -178,6 +178,36 @@ def test_summary_of_an_edit_is_the_path_plus_new_text_and_bounded():
     assert multi == "/w/b.py :: alpha beta"
 
 
+def test_devin_tool_names_are_logged_summarised_and_mutating():
+    """Devin CLI names (exec shell; edit/write/apply_patch/notebook_edit files)
+    must behave exactly like Bash/Edit/Write."""
+    shell = act.build_action(tool="exec", tool_input={"command": "pytest -q"}, session_id="s",
+                             project="p", status="ok", exit_code=None)
+    assert shell is not None and shell.mutating and shell.summary == "pytest -q"
+    edit = act.build_action(tool="edit", tool_input={"file_path": "/w/a.py", "new_string": "x = 1"},
+                            session_id="s", project="p", status="ok", exit_code=None)
+    assert edit is not None and edit.mutating and edit.summary == "/w/a.py :: x = 1"
+    write = act.build_action(tool="write", tool_input={"file_path": "/w/b.py", "content": "print(1)"},
+                             session_id="s", project="p", status="ok", exit_code=None)
+    assert write is not None and write.mutating and write.summary.startswith("/w/b.py")
+    for tool, tool_input in (("apply_patch", {"file_path": "/w/c.py"}),
+                             ("notebook_edit", {"notebook_path": "/w/n.ipynb", "new_source": "cell"})):
+        action = act.build_action(tool=tool, tool_input=tool_input, session_id="s", project="p",
+                                  status="ok", exit_code=None)
+        assert action is not None and action.mutating, tool
+
+
+def test_devin_edit_and_exec_feed_the_turn_summary(mem):
+    log_action(mem, "exec", {"command": "make build"})
+    log_action(mem, "edit", {"file_path": "/w/proj/x.py", "new_string": "fixed"})
+    result = stop(mem, message="done")
+    assert result.saved_id is not None
+    with connect(mem) as db:
+        content = db.execute("SELECT content FROM knowledge WHERE id=?", (result.saved_id,)).fetchone()[0]
+    assert "exec x1" in content and "edit x1" in content
+    assert "Files: /w/proj/x.py" in content and "Commands: make build" in content
+
+
 def test_summary_of_an_mcp_tool_keeps_argument_names_only():
     summary = act.summarize_tool_input("mcp__memory__memory_save", {"content": "private text", "project": "p"})
     assert summary == "keys: content, project"

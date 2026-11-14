@@ -450,6 +450,45 @@ class TestSessionEnd:
 
         assert _cli_opts(dict(calls)["auto_session_end.py"])["--session-id"] == "live-session"
 
+    def test_devin_session_end_without_transcript_path_reads_no_transcript(self, world, monkeypatch):
+        """A Devin SessionEnd payload carries prompt_id and never transcript_path; the
+        ~/.claude/projects cwd fallback must not adopt a Claude session's transcript."""
+        monkeypatch.setenv("HOME", str(world["home"]))
+        cwd = world["tmp"] / "work"
+        cwd.mkdir()
+        project_dir = world["home"] / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+        project_dir.mkdir(parents=True)
+        (project_dir / "claude-session.jsonl").write_text(
+            "\n".join(json.dumps(e) for e in NESTED_TRANSCRIPT) + "\n", encoding="utf-8")
+        calls: list[str] = []
+        actions = tam_hook.session_end(
+            {"session_id": "truth-patella", "cwd": str(cwd), "hook_event_name": "SessionEnd",
+             "prompt_id": "p-1", "reason": "logout"},
+            ROOT / "src", world["mem"] / "recovery", "proj", "User exited",
+            runner=lambda _src, script, args, stdin_text=None: calls.append(script) or True)
+        assert calls == [] and actions == []
+        assert not list((world["mem"] / "recovery").glob("pending-*.md"))
+
+
+def test_classify_tool_counts_devin_names():
+    assert tam_hook.classify_tool("exec") == "bashes"
+    assert tam_hook.classify_tool("edit") == "edits"
+    assert tam_hook.classify_tool("apply_patch") == "edits"
+    assert tam_hook.classify_tool("write") == "writes"
+    # Parity with Claude's NotebookEdit, which the nudge does not count.
+    assert tam_hook.classify_tool("notebook_edit") is None
+
+
+def test_hook_call_marks_a_devin_failed_tool_response():
+    """Devin tool_response is {success, output, error}: success=false fails the call
+    even though there is no exit code."""
+    call = tam_hook.hook_call({"tool_response": {"success": False, "output": "", "error": "boom"},
+                               "session_id": "s"}, "p")
+    assert call["failed"] is True
+    ok = tam_hook.hook_call({"tool_response": {"success": True, "output": "ok", "error": None},
+                             "session_id": "s"}, "p")
+    assert ok["failed"] is False
+
 
 # ──────────────────────────────────────────────
 # SessionStart: restore + recovery

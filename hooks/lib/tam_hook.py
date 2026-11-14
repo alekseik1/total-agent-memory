@@ -304,6 +304,12 @@ def error_text(payload: JsonDict) -> str:
     return value if isinstance(value, str) else ""
 
 
+def tool_response_failed(payload: JsonDict) -> bool:
+    """Devin's PostToolUse tool_response is {"success": bool, "output", "error"} with no
+    exit code; success=false is a failed call all the same."""
+    return any(container.get("success") is False for container in _containers(payload))
+
+
 def interrupted(payload: JsonDict) -> bool:
     if payload.get("is_interrupt") is True:
         return True
@@ -502,11 +508,11 @@ def classify_tool(tool: str) -> str | None:
     lower = tool.lower()
     if "memory_save" in lower or lower.endswith(("save_decision", "save_intent")):
         return "memory_saves"
-    if tool in ("Edit", "MultiEdit") or lower.endswith("__edit"):
+    if tool in ("Edit", "MultiEdit", "edit", "apply_patch") or lower.endswith("__edit"):
         return "edits"
-    if tool == "Write" or lower.endswith("__write"):
+    if tool in ("Write", "write") or lower.endswith("__write"):
         return "writes"
-    if tool == "Bash" or lower.endswith("__bash"):
+    if tool in ("Bash", "exec") or lower.endswith("__bash"):
         return "bashes"
     return None
 
@@ -1049,10 +1055,11 @@ def _line_count(path: Path) -> int:
         return 0
 
 
-def find_transcript(transcript_path: str, cwd: str, session: str = "") -> Path | None:
+def find_transcript(transcript_path: str, cwd: str, session: str = "", *,
+                    allow_fallback: bool = True) -> Path | None:
     if transcript_path and Path(transcript_path).is_file():
         return Path(transcript_path)
-    if not cwd:
+    if not cwd or not allow_fallback:
         return None
     escaped = re.sub(r"[^A-Za-z0-9]", "-", cwd)
     project_dir = Path.home() / ".claude" / "projects" / escaped
@@ -1065,6 +1072,13 @@ def find_transcript(transcript_path: str, cwd: str, session: str = "") -> Path |
     return candidates[0] if candidates else None
 
 
+def devin_hook_payload(payload: JsonDict) -> bool:
+    """True for a Devin CLI hook payload: it carries prompt_id on every event after
+    SessionStart and the hook env sets DEVIN_PROJECT_DIR. Devin keeps no transcripts
+    under ~/.claude/projects, so the cwd fallback must not adopt a Claude session's."""
+    return "prompt_id" in payload or bool(os.environ.get("DEVIN_PROJECT_DIR"))
+
+
 def session_end(payload: JsonDict, src_dir: Path, recovery_dir: Path, project: str, reason_text: str,
                 runner: Callable[[Path, str, Sequence[str]], bool] = run_script) -> list[str]:
     """Write the session's recovery file and start auto_session_save / auto_episode_capture /
@@ -1072,7 +1086,8 @@ def session_end(payload: JsonDict, src_dir: Path, recovery_dir: Path, project: s
     cwd = str(payload.get("cwd") or os.getcwd())
     session = session_of(payload)
     actions: list[str] = []
-    transcript = find_transcript(str(payload.get("transcript_path") or ""), cwd, session)
+    transcript = find_transcript(str(payload.get("transcript_path") or ""), cwd, session,
+                                 allow_fallback=not devin_hook_payload(payload))
     user = assistant = ""
     events = 0
     if transcript is not None:
@@ -1230,7 +1245,8 @@ def hook_call(payload: JsonDict, project: str) -> JsonDict:
     code = exit_code(payload)
     return {"payload": payload, "project": project, "session_id": session_of(payload),
             "cwd": str(payload.get("cwd") or os.getcwd()), "exit_code": code,
-            "failed": is_failure(code) or payload.get("hook_event_name") == "PostToolUseFailure",
+            "failed": (is_failure(code) or payload.get("hook_event_name") == "PostToolUseFailure"
+                       or tool_response_failed(payload)),
             "interrupted": interrupted(payload)}
 
 
@@ -1334,8 +1350,9 @@ REMOTE_DETAIL_SNIPPET_CHARS = 240
 REMOTE_EDIT_DETAIL_SEPARATOR = " :: "
 REMOTE_MAX_TOOL_CHARS = 120
 REMOTE_UNLOGGED_TOOLS = frozenset({"Read", "Glob", "Grep", "LS", "TodoWrite", "TodoRead"})
-REMOTE_EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
-REMOTE_SHELL_TOOLS = frozenset({"Bash"})
+REMOTE_EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit",
+                               "edit", "write", "apply_patch", "notebook_edit"})
+REMOTE_SHELL_TOOLS = frozenset({"Bash", "exec"})
 REMOTE_LOCATOR_KEYS = ("file_path", "notebook_path", "path", "pattern", "url", "query", "description")
 REMOTE_MCP_PREFIX = "mcp__"
 
@@ -1714,7 +1731,8 @@ def remote_record_action(payload: JsonDict, src_dir: Path) -> None:
     code = exit_code(payload)
     if interrupted(payload):
         status = "interrupted"
-    elif is_failure(code) or payload.get("hook_event_name") == "PostToolUseFailure":
+    elif (is_failure(code) or payload.get("hook_event_name") == "PostToolUseFailure"
+          or tool_response_failed(payload)):
         status = "failed"
     else:
         status = "ok"
@@ -1868,7 +1886,8 @@ def remote_session_end(payload: JsonDict, project: str, src_dir: Path, reason_te
     session = session_of(payload)
     cwd = str(payload.get("cwd") or os.getcwd())
     call = hook_call(payload, project)
-    transcript = find_transcript(str(payload.get("transcript_path") or ""), cwd, session)
+    transcript = find_transcript(str(payload.get("transcript_path") or ""), cwd, session,
+                                 allow_fallback=not devin_hook_payload(payload))
     user_texts, assistant_text, episode = remote_session_texts(transcript, src_dir)
     if user_texts or assistant_text:
         write_recovery(recovery_dir, session, project, cwd, reason_text,

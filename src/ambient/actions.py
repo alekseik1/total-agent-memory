@@ -48,8 +48,11 @@ ERASE_NEEDLE_CHARS: Final = 80
 ERASE_MIN_CHARS: Final = 12
 SECONDS_PER_DAY: Final = 86_400
 
-EDIT_TOOLS: Final = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
-SHELL_TOOLS: Final = frozenset({"Bash"})
+# Claude Code names plus Devin CLI's: exec is its shell, edit/write/apply_patch/
+# notebook_edit its file tools (lowercase, unlike Claude's).
+EDIT_TOOLS: Final = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit",
+                               "edit", "write", "apply_patch", "notebook_edit"})
+SHELL_TOOLS: Final = frozenset({"Bash", "exec"})
 MUTATING_TOOLS: Final = EDIT_TOOLS | SHELL_TOOLS | {CODEX_TURN_TOOL}
 # Read-only lookups are the bulk of tool calls and carry no evidence of what was done.
 UNLOGGED_TOOLS: Final = frozenset({"Read", "Glob", "Grep", "LS", "TodoWrite", "TodoRead"})

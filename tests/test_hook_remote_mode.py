@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import socket
 import sqlite3
 import subprocess
@@ -909,6 +910,33 @@ def test_remote_tool_summary_matches_local(tool, tool_input, tmp_path):
             == local_summarize(tool, tool_input))
 
 
+def test_remote_tool_summary_covers_devin_tools(tmp_path):
+    """Devin CLI tool names summarise exactly like their Claude counterparts."""
+    assert (tam_hook.remote_tool_summary("exec", {"command": "pytest -q"}, ROOT / "src")
+            == "pytest -q")
+    assert (tam_hook.remote_tool_summary("edit", {"file_path": "/w/a.py", "new_string": "x = 1"},
+                                         ROOT / "src") == "/w/a.py :: x = 1")
+    assert (tam_hook.remote_tool_summary("write", {"file_path": "/w/b.py", "content": "print(1)"},
+                                         ROOT / "src") == "/w/b.py :: print(1)")
+    assert (tam_hook.remote_tool_summary("notebook_edit",
+                                         {"notebook_path": "/w/n.ipynb", "new_source": "cell"},
+                                         ROOT / "src") == "/w/n.ipynb :: cell")
+
+
+def test_remote_record_action_marks_devin_tool_response_failure(tmp_path, monkeypatch):
+    """Devin tool_response {success: false} spools a failed action; there is no exit code."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    tam_hook.remote_record_action(
+        {"tool_name": "exec", "tool_input": {"command": "false"},
+         "tool_response": {"success": False, "output": "", "error": "boom"},
+         "session_id": "s-dev", "cwd": str(tmp_path / "workdir")}, ROOT / "src")
+    lines = spool_file(tmp_path, "s-dev").read_text().splitlines()
+    assert len(lines) == 1
+    action = json.loads(lines[0])
+    assert action["tool"] == "exec" and action["status"] == "failed"
+    assert action["summary"] == "false" and action["exit_code"] is None
+
+
 def test_remote_tool_summary_redacts_secret_straddling_the_clip(tmp_path):
     """A credential cut by the 400-char clip would survive redaction; redact first."""
     secret = "sk-" + "q9xQ9xQ9zZ8yY7xX6wW5vV4uU3tT2sS1rR0"
@@ -1327,6 +1355,42 @@ def test_remote_session_end_writes_recovery_with_transcript(monkeypatch, tmp_pat
     body = path.read_text(encoding="utf-8")
     assert "fix the flaky test" in body and "working on it" in body
     assert "session-end" in posts
+
+
+def test_remote_session_end_devin_payload_reads_no_transcript(monkeypatch, tmp_path):
+    """A Devin SessionEnd payload has prompt_id and no transcript_path; the
+    ~/.claude/projects cwd fallback must not adopt a Claude session's transcript,
+    so session-end goes out with empty texts and no recovery file is written."""
+    _remote_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir(exist_ok=True)
+    cwd = tmp_path / "workdir"
+    cwd.mkdir(exist_ok=True)
+    project_dir = (tmp_path / "home" / ".claude" / "projects"
+                   / re.sub(r"[^A-Za-z0-9]", "-", str(cwd)))
+    project_dir.mkdir(parents=True)
+    (project_dir / "claude-session.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in [
+            {"type": "user", "message": {"role": "user", "content": "claude decoy"}},
+            {"type": "assistant", "message": {"role": "assistant",
+                                              "content": [{"type": "text", "text": "decoy"}]}},
+        ]) + "\n", encoding="utf-8")
+    posts = []
+    monkeypatch.setattr(tam_hook, "remote_post",
+                        lambda command, call, payload, timeout: posts.append((command, payload))
+                        or (True, ""))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+        {"session_id": "truth-patella", "cwd": str(cwd), "hook_event_name": "SessionEnd",
+         "prompt_id": "p-1", "reason": "logout"})))
+    rc = tam_hook.main(["session-end", "--src", str(ROOT / "src"),
+                        "--recovery-dir", str(tmp_path / "recovery"), "--reason-text", "logout"])
+    assert rc == 0
+    end = [payload for command, payload in posts if command == "session-end"]
+    assert len(end) == 1
+    assert end[0]["user_texts"] == [] and end[0]["assistant_text"] == ""
+    assert end[0]["episode_messages"] == []
+    recovery = tmp_path / "recovery"
+    assert not recovery.exists() or not list(recovery.glob("pending-*.md"))
 
 
 def test_remote_session_start_context_appends_recovery(monkeypatch, tmp_path, capsys):
