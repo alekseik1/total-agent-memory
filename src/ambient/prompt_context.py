@@ -10,7 +10,9 @@ Two parts share one budget (``TAM_AMBIENT_TOKEN_BUDGET`` tokens, about
 * background — memory records for the prompt. Warm path: the shared daemon's
   ``POST /internal/hook/recall`` (full hybrid recall, see
   ``tam_daemon/hook_recall.py``). Cold path, when no daemon answers in time:
-  FTS5 only over the project's and ``general`` records.
+  FTS5 only over the project's and ``general`` records, minus auto-saved
+  turn/session summaries (``ambient.turn_end.AUTO_TAGS``); the warm path does
+  not filter them yet.
 
 Everything already injected into the session (``ambient.state``) is skipped.
 The whole build runs against a deadline (``TAM_AMBIENT_LATENCY_MS``): the
