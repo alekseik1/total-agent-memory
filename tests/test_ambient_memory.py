@@ -364,6 +364,18 @@ def test_cold_path_recalls_project_records_within_budget_and_dedupes(mem):
     assert build(mem, "how does the deploy pipeline release work?").record_ids == ()
 
 
+def test_cold_path_skips_auto_saved_summaries(mem):
+    add_record(mem, "Turn summary: deploy pipeline release discussed", source="auto",
+               tags='["auto-saved", "turn-autosave", "proj"]')
+    manual = add_record(mem, "Deploy pipeline uses blue green release")
+    untagged = add_record(mem, "Deploy pipeline release needs a canary")
+    with connect(mem) as db:
+        db.execute("UPDATE knowledge SET tags = NULL WHERE id = ?", (untagged,))
+    result = build(mem, "how does the deploy pipeline release work?")
+    assert result.background == "cold" and sorted(result.record_ids) == sorted([manual, untagged])
+    assert "Turn summary" not in result.text
+
+
 def test_warm_path_is_used_and_records_already_seen_are_dropped(mem):
     calls: list[tuple[dict, float]] = []
 

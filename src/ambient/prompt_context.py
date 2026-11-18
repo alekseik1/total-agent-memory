@@ -38,6 +38,7 @@ import correction_capture
 from ambient.actions import table_exists
 from ambient.settings import AmbientSettings
 from ambient.state import SessionState
+from ambient.turn_end import AUTO_TAGS
 from rule_surfaces import STOPWORDS, RankedRule, RuleSurfacer
 from tam_daemon import hook_recall
 from tam_daemon.registry import DaemonPaths, RegistryError, read_record, read_token
@@ -207,12 +208,14 @@ def cold_recall(db: sqlite3.Connection, prompt: str, project: str, session_id: s
     terms = fts_terms(prompt)
     if not terms:
         return {"results": {}}
+    auto_tag = " OR ".join("instr(coalesce(k.tags, ''), ?) > 0" for _ in AUTO_TAGS)
     rows = db.execute(
         "SELECT k.id, k.type, k.content, k.project, k.created_at, bm25(knowledge_fts) AS rank "
         "FROM knowledge_fts JOIN knowledge k ON k.id = knowledge_fts.rowid "
         "WHERE knowledge_fts MATCH ? AND k.status = 'active' AND k.project IN (?, ?) AND k.session_id != ? "
-        "ORDER BY rank LIMIT ?",
-        (fts_query(terms), project, GENERAL_PROJECT, session_id, COLD_LIMIT + COLD_FETCH_EXTRA)).fetchall()
+        f"AND NOT ({auto_tag}) ORDER BY rank LIMIT ?",
+        (fts_query(terms), project, GENERAL_PROJECT, session_id, *(json.dumps(tag) for tag in AUTO_TAGS),
+         COLD_LIMIT + COLD_FETCH_EXTRA)).fetchall()
     groups: dict[str, list[dict[str, Any]]] = {}
     for record_id, kind, content, record_project, created_at, rank in rows:
         if int(record_id) in seen:
