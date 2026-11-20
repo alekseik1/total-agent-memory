@@ -57,11 +57,13 @@ SECRET = "sk-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6"
 
 @pytest.fixture
 def mem(tmp_path, monkeypatch) -> Iterator[Path]:
-    """A memory dir holding a fully migrated store (no embedder, no Chroma)."""
+    """A memory dir holding a fully migrated store (no embedder, no Chroma, no cold-path score floor)."""
     import server
 
     root = tmp_path / "mem"
     root.mkdir()
+    # bm25 scores in a few-record corpus sit far below the floor tuned on the live corpus.
+    monkeypatch.setattr(prompt_context, "COLD_MIN_SCORE", 0.0)
     monkeypatch.setattr(server, "MEMORY_DIR", root)
     monkeypatch.setattr(server, "HAS_CHROMA", False)
     monkeypatch.setattr(server.Store, "_init_embed_mode", lambda self: "none")
@@ -364,7 +366,8 @@ def test_cold_path_recalls_project_records_within_budget_and_dedupes(mem):
     assert build(mem, "how does the deploy pipeline release work?").record_ids == ()
 
 
-def test_cold_path_skips_auto_saved_summaries(mem):
+def test_cold_path_skips_auto_saved_summaries(mem, monkeypatch):
+    monkeypatch.setattr(prompt_context, "COLD_LIMIT", 3)
     add_record(mem, "Turn summary: deploy pipeline release discussed", source="auto",
                tags='["auto-saved", "turn-autosave", "proj"]')
     add_record(mem, "Session summary: deploy pipeline release discussed", source="auto",
@@ -377,6 +380,30 @@ def test_cold_path_skips_auto_saved_summaries(mem):
     result = build(mem, "how does the deploy pipeline release work?")
     assert result.background == "cold" and sorted(result.record_ids) == sorted([manual, untagged, look_alike])
     assert "Turn summary" not in result.text and "Session summary" not in result.text
+
+
+def cold_ids_and_scores(mem: Path, prompt: str) -> dict[int, float]:
+    with connect(mem) as db:
+        result = prompt_context.cold_recall(db, prompt, "proj", "S1", frozenset())
+    return {record["id"]: record["score"] for records in result["results"].values() for record in records}
+
+
+def test_cold_path_drops_hits_below_the_score_floor(mem, monkeypatch):
+    for number in range(4):
+        add_record(mem, f"Unrelated filler note {number}")
+    strong = add_record(mem, "Kafka consumer lag alerts page the on-call engineer")
+    weak = add_record(mem, "Engineer onboarding checklist")
+    prompt = "why did kafka consumer lag alerts page the engineer"
+    scores = cold_ids_and_scores(mem, prompt)
+    assert scores[strong] > scores[weak]
+    monkeypatch.setattr(prompt_context, "COLD_MIN_SCORE", (scores[strong] + scores[weak]) / 2)
+    assert list(cold_ids_and_scores(mem, prompt)) == [strong]
+
+
+def test_cold_path_returns_at_most_cold_limit_records(mem):
+    for number in range(prompt_context.COLD_LIMIT + 2):
+        add_record(mem, f"Deploy pipeline release note {number}")
+    assert len(cold_ids_and_scores(mem, "how does the deploy pipeline release work?")) == prompt_context.COLD_LIMIT
 
 
 def test_warm_path_is_used_and_records_already_seen_are_dropped(mem):
@@ -787,6 +814,9 @@ def only_json(proc: subprocess.CompletedProcess) -> dict:
 def test_hooks_drive_the_whole_turn(mem, tmp_path):
     sudo = add_rule(mem, SUDO_RULE, priority=8)
     add_record(mem, "Build boxes install Python packages into a virtualenv, never system-wide")
+    # The hook subprocess keeps the real COLD_MIN_SCORE; a larger corpus lifts the match's bm25 above it.
+    for number in range(100):
+        add_record(mem, f"Unrelated filler note {number}")
     env = hook_env(mem, tmp_path)
     base = {"session_id": "H1", "cwd": "/w/proj"}
 

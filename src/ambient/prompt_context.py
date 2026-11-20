@@ -12,7 +12,8 @@ Two parts share one budget (``TAM_AMBIENT_TOKEN_BUDGET`` tokens, about
   ``tam_daemon/hook_recall.py``). Cold path, when no daemon answers in time:
   FTS5 only over the project's and ``general`` records, minus auto-saved
   turn/session summaries (``ambient.turn_end.AUTO_TAGS``); the warm path does
-  not filter them yet.
+  not filter them yet. At most ``COLD_LIMIT`` hits scoring ``COLD_MIN_SCORE``
+  or more.
 
 Everything already injected into the session (``ambient.state``) is skipped.
 The whole build runs against a deadline (``TAM_AMBIENT_LATENCY_MS``): the
@@ -57,7 +58,9 @@ RULE_MIN_MATCHED: Final = 2
 RULE_PREVIEW_CHARS: Final = 280
 RULES_HEADER: Final = "[TAM rules that apply to this prompt — follow them]"
 WARM_LIMIT: Final = 6
-COLD_LIMIT: Final = 4
+COLD_LIMIT: Final = 2
+# Minimum -bm25 score; tuned on the VPS corpus (~11k records) 2026-11-20, bm25 scales with corpus size.
+COLD_MIN_SCORE: Final = 12.0
 # Extra FTS rows fetched so records seen earlier in the session can be skipped.
 COLD_FETCH_EXTRA: Final = 16
 FTS_MAX_TERMS: Final = 8
@@ -220,6 +223,8 @@ def cold_recall(db: sqlite3.Connection, prompt: str, project: str, session_id: s
          COLD_LIMIT + COLD_FETCH_EXTRA)).fetchall()
     groups: dict[str, list[dict[str, Any]]] = {}
     for record_id, kind, content, record_project, created_at, rank in rows:
+        if -float(rank) < COLD_MIN_SCORE:
+            break
         if int(record_id) in seen:
             continue
         groups.setdefault(str(kind or "memory"), []).append({
