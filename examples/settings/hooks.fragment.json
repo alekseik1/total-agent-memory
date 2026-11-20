@@ -19,7 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/session-end.sh"
+            "command": "$HOME/.claude/hooks/session-end.sh",
+            "timeout": 20
           }
         ]
       }

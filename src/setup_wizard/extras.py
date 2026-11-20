@@ -49,6 +49,8 @@ HOOK_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     # Failed calls of the same tools go to the agent action log too.
     ("PostToolUseFailure", POST_TOOL_USE_MATCHER, ("post-tool-use",)),
 )
+# Seconds; Claude Code cancels a SessionEnd hook after 1.5 s without one. Same value as hooks/hooks.json.
+SESSION_END_TIMEOUT_SEC = 20
 
 PLUGIN_NAME = "total-agent-memory"
 
@@ -163,7 +165,9 @@ def plan_hooks(root: Path, host: Host, overwrite: bool = False, memory_dir: Path
                    if (root / "hooks" / (name + suffix)).is_file()]
         missing = [command for command in missing if command not in present]
         if missing:
-            entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": c} for c in missing]})
+            timeout = {"timeout": SESSION_END_TIMEOUT_SEC} if event == "SessionEnd" else {}
+            entries.append({"matcher": matcher,
+                            "hooks": [{"type": "command", "command": c, **timeout} for c in missing]})
             added.append(event)
     return HookPlan(scripts, settings, json.dumps(data, indent=2, ensure_ascii=False) + "\n", tuple(added), overwrite,
                     runtime, generated, plugin_active)

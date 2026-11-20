@@ -478,6 +478,20 @@ def test_m8_wizard_skips_settings_hooks_when_the_plugin_is_enabled(tmp_path):
     assert not extras.plan_hooks(ROOT, _host(home)).plugin_active
 
 
+def test_installers_give_session_end_the_plugin_timeout(tmp_path):
+    from setup_wizard import extras
+    from setup_wizard.docker_install import merge_hooks
+
+    plugin = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    assert [h["timeout"] for b in plugin["SessionEnd"] for h in b["hooks"]] == [extras.SESSION_END_TIMEOUT_SEC]
+    docker: dict = {}
+    merge_hooks(docker, tmp_path / "launchers")
+    for hooks in (json.loads(extras.plan_hooks(ROOT, _host(tmp_path / "home")).text)["hooks"], docker["hooks"]):
+        assert [h.get("timeout") for b in hooks["SessionEnd"] for h in b["hooks"]] == [20]
+        assert all("timeout" not in h for event, blocks in hooks.items() if event != "SessionEnd"
+                   for b in blocks for h in b["hooks"])
+
+
 def test_m8_record_action_is_idempotent_per_tool_use_id(tmp_path):
     sys.path.insert(0, str(SRC))
     from ambient.state import claim_tool_use

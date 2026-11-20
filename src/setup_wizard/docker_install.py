@@ -16,7 +16,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from setup_wizard.clients import ConfigError, read_json
-from setup_wizard.extras import POST_TOOL_USE_MATCHER, PROVENANCE_MATCHER, write_provenance_marker
+from setup_wizard.extras import (POST_TOOL_USE_MATCHER, PROVENANCE_MATCHER, SESSION_END_TIMEOUT_SEC,
+                                 write_provenance_marker)
 from setup_wizard.files import PRIVATE_MODE, atomic_write
 
 SERVER_NAME = "memory"
@@ -76,8 +77,9 @@ def merge_hooks(settings: dict, launcher_dir: Path) -> list[str]:
         entries = hooks.setdefault(event, [])
         if not isinstance(entries, list):
             raise ConfigError(f"settings.json: hooks.{event} must be a list")
+        timeout = {"timeout": SESSION_END_TIMEOUT_SEC} if event == "SessionEnd" else {}
         entries.append({"matcher": matcher,
-                        "hooks": [{"type": "command", "command": str(launcher_dir / script)}]})
+                        "hooks": [{"type": "command", "command": str(launcher_dir / script), **timeout}]})
         if event not in touched:
             touched.append(event)
     return touched
